@@ -157,8 +157,17 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 	}
 	docByPath := make(map[string]*index.Document, len(docs))
 	for i := range docs {
-		doc := docs[i]
-		docByPath[doc.Path] = &doc
+		key, err := normalizeStoredDocumentPath(idx.cfg.WatchDir, docs[i].Path)
+		if err != nil {
+			continue
+		}
+		if key != docs[i].Path {
+			if err := idx.store.RenameDocumentPath(ctx, docs[i].Path, key); err != nil {
+				return fmt.Errorf("renaming indexed document %s to %s: %w", docs[i].Path, key, err)
+			}
+			docs[i].Path = key
+		}
+		docByPath[docs[i].Path] = &docs[i]
 	}
 
 	type pendingItem struct {
@@ -416,6 +425,10 @@ func documentKey(root, path string) (string, error) {
 		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
 	}
 	return rel, nil
+}
+
+func normalizeStoredDocumentPath(root, storedPath string) (string, error) {
+	return documentKey(root, filepath.Join(root, storedPath))
 }
 
 func sameModTime(a, b time.Time) bool {

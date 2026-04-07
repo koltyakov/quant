@@ -174,6 +174,11 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	return err
 }
 
+func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE documents SET path = ? WHERE path = ?`, newPath, oldPath)
+	return err
+}
+
 func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata) (bool, error) {
 	current, err := s.embeddingMetadata(ctx)
 	if err != nil {

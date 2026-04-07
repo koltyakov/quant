@@ -28,16 +28,14 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 ## Usage
 
 ```
-./bin/quant --dir <path> [options]
+./bin/quant [--dir <path>] [options]
 ```
-
-**Required:**
-- `--dir` - Directory to watch and index
 
 **Options:**
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--db` | `<dir>/.quant.db` | SQLite database path |
+| `--dir` | current working directory | Directory to watch and index |
+| `--db` | `<dir>/quant.db` | SQLite database path |
 | `--transport` | `stdio` | MCP transport: `stdio`, `sse`, `http` |
 | `--listen` | `:8080` | Listen address for SSE/HTTP |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
@@ -74,7 +72,7 @@ Configuration precedence is:
 
 ```yaml
 dir: ./my-project
-db: ./.quant.db
+db: ./quant.db
 transport: stdio
 listen: :8080
 embed_url: http://localhost:11434
@@ -137,6 +135,7 @@ Unsupported files are skipped.
 ## Indexing Behavior
 
 - Initial startup scans the target directory and indexes supported files that are new or changed.
+- Stored document paths are relative to the watch directory, so the index remains stable across different launch working directories.
 - Initial startup indexing runs with a bounded worker pool to overlap hashing, extraction, embedding, and database writes across files.
 - A filesystem watcher keeps the index in sync after startup.
 - Deleting a file from disk removes it from the index.

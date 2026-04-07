@@ -61,7 +61,7 @@ func (f fakeExtractor) Extract(context.Context, string) (string, error) {
 	return f.text, nil
 }
 
-func (f fakeExtractor) Supports(string) bool { return true }
+func (f fakeExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
 type countingExtractor struct {
 	text  string
@@ -73,7 +73,7 @@ func (f *countingExtractor) Extract(context.Context, string) (string, error) {
 	return f.text, nil
 }
 
-func (f *countingExtractor) Supports(string) bool { return true }
+func (f *countingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
 func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	dir := t.TempDir()
@@ -258,6 +258,80 @@ func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
 	}
 }
 
+func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("unexpected error creating subdir: %v", err)
+	}
+	path := filepath.Join(subdir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+	hash, err := scan.FileHash(path)
+	if err != nil {
+		t.Fatalf("unexpected error hashing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	oldStoredPath := filepath.Join("..", filepath.Base(dir), "nested", "sample.txt")
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       oldStoredPath,
+		Hash:       hash,
+		ModifiedAt: info.ModTime().UTC().Truncate(time.Microsecond),
+	}, []index.ChunkRecord{{
+		Content:    "existing chunk",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32([]float32{1}),
+	}}); err != nil {
+		t.Fatalf("unexpected error seeding document: %v", err)
+	}
+
+	emb := &countingEmbedder{}
+	ext := &countingExtractor{text: "replacement chunk"}
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 2},
+		store:     store,
+		embedder:  emb,
+		extractor: ext,
+	}
+
+	if err := idx.initialSync(context.Background(), nil); err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+	if ext.calls.Load() != 0 {
+		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
+	}
+	if emb.batchCalls.Load() != 0 {
+		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error listing documents: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document, got %d", len(docs))
+	}
+	if docs[0].Path != filepath.Join("nested", "sample.txt") {
+		t.Fatalf("expected migrated relative path, got %q", docs[0].Path)
+	}
+}
+
 func TestDocumentKey(t *testing.T) {
 	root := filepath.Join(string(filepath.Separator), "tmp", "root")
 	got, err := documentKey(root, filepath.Join(root, "nested", "file.txt"))
@@ -296,6 +370,10 @@ func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("unexpected chdir error: %v", err)
 	}
+	expectedDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("unexpected getwd error after chdir: %v", err)
+	}
 
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	os.Args = []string{"quant"}
@@ -304,10 +382,11 @@ func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-	if cfg.WatchDir != dir {
-		t.Fatalf("expected watch dir %q, got %q", dir, cfg.WatchDir)
+	if cfg.WatchDir != expectedDir {
+		t.Fatalf("expected watch dir %q, got %q", expectedDir, cfg.WatchDir)
 	}
-	if cfg.DBPath != filepath.Join(dir, ".quant.db") {
-		t.Fatalf("expected db path %q, got %q", filepath.Join(dir, ".quant.db"), cfg.DBPath)
+	expectedDBPath := filepath.Join(expectedDir, "quant.db")
+	if cfg.DBPath != expectedDBPath {
+		t.Fatalf("expected db path %q, got %q", expectedDBPath, cfg.DBPath)
 	}
 }

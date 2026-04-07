@@ -35,8 +35,8 @@ go.work.sum
 
 # Logs and databases
 data/
-*.quant.db
-*.quant.db-*
+*quant.db
+*quant.db-*
 
 # OS generated files
 .DS_Store
