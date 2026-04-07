@@ -1,0 +1,140 @@
+package scan
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	ignore "github.com/sabhiram/go-gitignore"
+)
+
+type Result struct {
+	Path       string
+	ModifiedAt time.Time
+}
+
+// Scan walks the directory tree, respecting .gitignore files at every level
+// and skipping hidden files/directories.
+func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
+	var results []Result
+
+	// Collect nested .gitignore matchers keyed by their directory.
+	matchers := make(map[string]*ignore.GitIgnore)
+	if gi != nil {
+		matchers[dir] = gi
+	}
+
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() {
+			if rel == "." {
+				return nil
+			}
+			if strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			if matchesAnyGitIgnore(matchers, dir, rel) {
+				return filepath.SkipDir
+			}
+
+			// Load nested .gitignore if present.
+			nestedPath := filepath.Join(path, ".gitignore")
+			if _, err := os.Stat(nestedPath); err == nil {
+				if m, err := ignore.CompileIgnoreFile(nestedPath); err == nil {
+					matchers[path] = m
+				}
+			}
+
+			return nil
+		}
+
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil
+		}
+
+		if matchesAnyGitIgnore(matchers, dir, rel) {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		results = append(results, Result{
+			Path:       path,
+			ModifiedAt: info.ModTime(),
+		})
+		return nil
+	})
+
+	return results, err
+}
+
+// matchesAnyGitIgnore checks the path against all applicable .gitignore matchers
+// from the root down to the deepest parent directory.
+func matchesAnyGitIgnore(matchers map[string]*ignore.GitIgnore, rootDir, relPath string) bool {
+	// Check root-level gitignore.
+	if gi, ok := matchers[rootDir]; ok && gi.MatchesPath(relPath) {
+		return true
+	}
+
+	// Check nested gitignore files for each parent directory.
+	parts := strings.Split(filepath.Dir(relPath), string(filepath.Separator))
+	current := rootDir
+	for _, part := range parts {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		gi, ok := matchers[current]
+		if !ok {
+			continue
+		}
+		// Compute path relative to the gitignore's directory.
+		nestedRel, err := filepath.Rel(current, filepath.Join(rootDir, relPath))
+		if err != nil {
+			continue
+		}
+		if gi.MatchesPath(nestedRel) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// LoadGitIgnore loads the root .gitignore file if it exists.
+func LoadGitIgnore(dir string) (*ignore.GitIgnore, error) {
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		return nil, nil
+	}
+	return ignore.CompileIgnoreFile(gitignorePath)
+}
+
+func FileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}

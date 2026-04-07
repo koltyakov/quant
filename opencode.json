@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "quant": {
+      "type": "local",
+      "command": ["go", "run", "./cmd/quant", "--dir", "./data"],
+      "enabled": true
+    }
+  }
+}
