@@ -43,6 +43,15 @@ func TestRouter_SupportsOOXML(t *testing.T) {
 	}
 }
 
+func TestRouter_SupportsNotebookAndODF(t *testing.T) {
+	r := NewRouter()
+	for _, path := range []string{"file.ipynb", "file.odt", "file.ods", "file.odp"} {
+		if !r.Supports(path) {
+			t.Errorf("expected support for %s", path)
+		}
+	}
+}
+
 func TestRouter_SupportsRTF(t *testing.T) {
 	r := NewRouter()
 	if !r.Supports("file.rtf") {
@@ -291,5 +300,160 @@ func TestOOXMLExtractor_ExtractPPTX(t *testing.T) {
 	want := "[Slide 1]\nSlide body text.\n\n[Notes]\nSpeaker notes text here."
 	if text != want {
 		t.Fatalf("unexpected pptx extraction: %q", text)
+	}
+}
+
+func TestNotebookExtractor_ExtractIPYNB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notebook.ipynb")
+
+	content := `{
+	  "cells": [
+	    {
+	      "cell_type": "markdown",
+	      "source": ["# Title\n", "Notebook intro."]
+	    },
+	    {
+	      "cell_type": "code",
+	      "source": ["print('hi')\n"],
+	      "outputs": [
+	        {
+	          "text": ["hi\n"]
+	        }
+	      ]
+	    }
+	  ]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected notebook write error: %v", err)
+	}
+
+	ext := &NotebookExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected notebook extract error: %v", err)
+	}
+
+	want := "[Markdown Cell 1]\n# Title\nNotebook intro.\n\n[Code Cell 2]\nprint('hi')\n\n[Output]\nhi"
+	if text != want {
+		t.Fatalf("unexpected notebook extraction: %q", text)
+	}
+}
+
+func TestODFExtractor_ExtractODT(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "document.odt")
+	writeZipArchive(t, path, map[string]string{
+		"content.xml": `
+			<office:document-content xmlns:office="office" xmlns:text="text">
+				<office:body>
+					<office:text>
+						<text:h>Heading</text:h>
+						<text:p>Paragraph one.</text:p>
+						<text:p>Paragraph two.</text:p>
+					</office:text>
+				</office:body>
+			</office:document-content>
+		`,
+	})
+
+	ext := &ODFExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected odt extract error: %v", err)
+	}
+
+	want := "[Document]\nHeading\n\nParagraph one.\n\nParagraph two."
+	if text != want {
+		t.Fatalf("unexpected odt extraction: %q", text)
+	}
+}
+
+func TestODFExtractor_ExtractODS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sheet.ods")
+	writeZipArchive(t, path, map[string]string{
+		"content.xml": `
+			<office:document-content xmlns:office="office" xmlns:table="table" xmlns:text="text">
+				<office:body>
+					<office:spreadsheet>
+						<table:table table:name="Budget">
+							<table:table-row>
+								<table:table-cell><text:p>Q1</text:p></table:table-cell>
+								<table:table-cell office:value="42"><text:p>Total</text:p></table:table-cell>
+							</table:table-row>
+						</table:table>
+					</office:spreadsheet>
+				</office:body>
+			</office:document-content>
+		`,
+	})
+
+	ext := &ODFExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected ods extract error: %v", err)
+	}
+
+	want := "[Sheet Budget]\nQ1 | 42 Total"
+	if text != want {
+		t.Fatalf("unexpected ods extraction: %q", text)
+	}
+}
+
+func TestODFExtractor_ExtractODP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slides.odp")
+	writeZipArchive(t, path, map[string]string{
+		"content.xml": `
+			<office:document-content xmlns:office="office" xmlns:draw="draw" xmlns:text="text">
+				<office:body>
+					<office:presentation>
+						<draw:page draw:name="Overview">
+							<draw:frame>
+								<draw:text-box>
+									<text:p>Slide body text.</text:p>
+								</draw:text-box>
+							</draw:frame>
+						</draw:page>
+					</office:presentation>
+				</office:body>
+			</office:document-content>
+		`,
+	})
+
+	ext := &ODFExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected odp extract error: %v", err)
+	}
+
+	want := "[Slide 1: Overview]\nSlide body text."
+	if text != want {
+		t.Fatalf("unexpected odp extraction: %q", text)
+	}
+}
+
+func writeZipArchive(t *testing.T, path string, entries map[string]string) {
+	t.Helper()
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("unexpected error creating archive: %v", err)
+	}
+	defer file.Close()
+
+	zw := zip.NewWriter(file)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("unexpected error creating zip entry %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("unexpected error writing zip entry %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("unexpected error closing zip writer: %v", err)
 	}
 }

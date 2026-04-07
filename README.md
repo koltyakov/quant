@@ -123,12 +123,14 @@ Add to your Claude Code MCP settings:
 ## Supported File Types
 
 - **Code/text**: `.go`, `.py`, `.js`, `.ts`, `.rs`, `.java`, `.rb`, `.sh`, `.yaml`, `.json`, `.toml`, `.xml`, `.html`, `.css`, `.sql`, `.md`, `.txt`, and [more](internal/extract/text.go)
+- **Notebooks**: `.ipynb`, with cell markers and captured text outputs when present
 - **Common filename-only text files**: `Dockerfile`, `Makefile`, `Rakefile`, `Gemfile`
 - **PDF**: `.pdf`, with page markers like `[Page N]`
 - **Office**:
   - `.docx`, including main document text plus headers and footers when present
   - `.pptx`, with slide markers like `[Slide N]`
   - `.xlsx`, with sheet markers, cell references, shared strings, and formulas when present
+  - OpenDocument `.odt`, `.ods`, `.odp`
 
 Unsupported files are skipped.
 

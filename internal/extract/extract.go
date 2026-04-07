@@ -15,8 +15,10 @@ func NewRouter() *Router {
 	return &Router{
 		extractors: []Extractor{
 			&TextExtractor{},
+			&NotebookExtractor{},
 			&PDFExtractor{},
 			&OOXMLExtractor{},
+			&ODFExtractor{},
 			&RTFExtractor{},
 		},
 	}
