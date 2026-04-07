@@ -234,7 +234,7 @@ func (s *Store) Stats(ctx context.Context) (docCount int, chunkCount int, err er
 
 // Search performs hybrid search combining FTS5 keyword prefilter with vector reranking.
 // pathPrefix optionally restricts results to documents whose path starts with the given prefix.
-// If FTS produces no candidates, a vector-only fallback scans all chunks.
+// If FTS produces no candidates, a vector-only fallback scans all matching chunks.
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -296,13 +296,8 @@ func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding [
 	return rerankByVector(rows, queryEmbedding, limit)
 }
 
-// searchVector performs a brute-force vector similarity search over all chunks.
+// searchVector performs a brute-force vector similarity search over all matching chunks.
 func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
-	scanLimit := limit * 50
-	if scanLimit < 200 {
-		scanLimit = 200
-	}
-
 	var rows *sql.Rows
 	var err error
 	if pathPrefix != "" {
@@ -310,17 +305,14 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id
-			 WHERE d.path LIKE ? || '%'
-			 LIMIT ?`,
-			pathPrefix, scanLimit,
+			 WHERE d.path LIKE ? || '%'`,
+			pathPrefix,
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id
-			 LIMIT ?`,
-			scanLimit,
+			 JOIN documents d ON c.document_id = d.id`,
 		)
 	}
 	if err != nil {

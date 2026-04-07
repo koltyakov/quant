@@ -21,50 +21,32 @@ type Result struct {
 // and skipping hidden files/directories.
 func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 	var results []Result
-
-	// Collect nested .gitignore matchers keyed by their directory.
-	matchers := make(map[string]*ignore.GitIgnore)
-	if gi != nil {
-		matchers[dir] = gi
-	}
+	matcher := NewGitIgnoreMatcher(dir, gi)
 
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return nil
-		}
-
 		if d.IsDir() {
-			if rel == "." {
+			if path == dir {
 				return nil
 			}
-			if strings.HasPrefix(d.Name(), ".") {
+			if IsHiddenName(d.Name()) {
 				return filepath.SkipDir
 			}
-			if matchesAnyGitIgnore(matchers, dir, rel) {
+			if matcher.Matches(path) {
 				return filepath.SkipDir
 			}
-
-			// Load nested .gitignore if present.
-			nestedPath := filepath.Join(path, ".gitignore")
-			if _, err := os.Stat(nestedPath); err == nil {
-				if m, err := ignore.CompileIgnoreFile(nestedPath); err == nil {
-					matchers[path] = m
-				}
-			}
-
+			matcher.Load(path)
 			return nil
 		}
 
-		if strings.HasPrefix(d.Name(), ".") {
+		if IsHiddenName(d.Name()) {
 			return nil
 		}
 
-		if matchesAnyGitIgnore(matchers, dir, rel) {
+		if matcher.Matches(path) {
 			return nil
 		}
 

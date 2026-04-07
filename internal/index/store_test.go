@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -215,6 +216,56 @@ func TestStore_SearchVectorFallback(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result from vector fallback, got %d", len(results))
+	}
+}
+
+func TestStore_SearchVectorFallback_ScansPastInitialWindow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	for i := 0; i < 250; i++ {
+		doc := &Document{
+			Path:       "/test/file" + strconv.Itoa(i) + ".txt",
+			Hash:       "hash-" + strconv.Itoa(i),
+			ModifiedAt: time.Now(),
+		}
+		docID, err := store.UpsertDocument(ctx, doc)
+		if err != nil {
+			t.Fatalf("unexpected upsert error: %v", err)
+		}
+
+		embedding := []float32{0}
+		content := "noise chunk"
+		if i == 249 {
+			embedding = []float32{1}
+			content = "best chunk"
+		}
+
+		if err := store.InsertChunk(ctx, &ChunkRecord{
+			DocumentID: docID,
+			Content:    content,
+			ChunkIndex: 0,
+			Embedding:  EncodeFloat32(embedding),
+		}); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	results, err := store.Search(ctx, "xyznonexistent", NormalizeFloat32([]float32{1}), 1, "")
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ChunkContent != "best chunk" {
+		t.Fatalf("expected best chunk from full vector scan, got %q", results[0].ChunkContent)
 	}
 }
 

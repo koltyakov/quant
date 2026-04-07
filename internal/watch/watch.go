@@ -3,10 +3,10 @@ package watch
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/andrew/quant/internal/scan"
 	"github.com/fsnotify/fsnotify"
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -26,7 +26,7 @@ type Event struct {
 
 type Watcher struct {
 	fsw     *fsnotify.Watcher
-	gi      *ignore.GitIgnore
+	matcher *scan.GitIgnoreMatcher
 	rootDir string
 	events  chan Event
 	done    chan struct{}
@@ -43,7 +43,7 @@ func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
 
 	w := &Watcher{
 		fsw:     fsw,
-		gi:      gi,
+		matcher: scan.NewGitIgnoreMatcher(dir, gi),
 		rootDir: dir,
 		events:  make(chan Event, 256),
 		done:    make(chan struct{}),
@@ -77,17 +77,14 @@ func (w *Watcher) addRecursive(dir string) error {
 		if !d.IsDir() {
 			return nil
 		}
-		if path != dir {
-			if strings.HasPrefix(d.Name(), ".") {
+		if path != w.rootDir {
+			if scan.IsHiddenName(d.Name()) {
 				return filepath.SkipDir
 			}
-			rel, err := filepath.Rel(w.rootDir, path)
-			if err != nil {
+			if w.matcher.Matches(path) {
 				return filepath.SkipDir
 			}
-			if w.gi != nil && w.gi.MatchesPath(rel) {
-				return filepath.SkipDir
-			}
+			w.matcher.Load(path)
 		}
 		return w.fsw.Add(path)
 	})
@@ -111,17 +108,12 @@ func (w *Watcher) loop() {
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
 
-	rel, err := filepath.Rel(w.rootDir, path)
-	if err != nil {
-		return
-	}
-
-	if w.gi != nil && w.gi.MatchesPath(rel) {
-		return
-	}
-
 	base := filepath.Base(path)
-	if len(base) > 0 && base[0] == '.' {
+	if scan.IsHiddenName(base) {
+		return
+	}
+
+	if w.matcher.Matches(path) {
 		return
 	}
 
@@ -131,7 +123,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		if info.IsDir() {
-			w.fsw.Add(path)
+			w.matcher.Load(path)
+			w.addRecursive(path)
 			return
 		}
 		w.debounce(path, Create)

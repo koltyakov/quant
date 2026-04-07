@@ -136,7 +136,7 @@ Unsupported files are skipped.
 - Deleting a file from disk removes it from the index.
 - The index stores embedding metadata in SQLite. If the configured embedding model or dimensions change, the existing index is cleared and rebuilt from the filesystem projection.
 - Reindexing a document is transactional, so partial failures do not leave a document half-indexed.
-- Only the root `.gitignore` is read for ignore rules. Nested `.gitignore` files in subdirectories are not supported.
+- Root and nested `.gitignore` files are applied during both initial scan and live watch updates.
 
 ## Architecture
 

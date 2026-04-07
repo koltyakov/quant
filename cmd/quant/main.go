@@ -20,6 +20,14 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
+type indexAction string
+
+const (
+	indexNoop    indexAction = "noop"
+	indexUpdated indexAction = "updated"
+	indexRemoved indexAction = "removed"
+)
+
 func main() {
 	cfg, err := config.Parse()
 	if err != nil {
@@ -96,20 +104,23 @@ func main() {
 	}
 }
 
-func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, embedder *embed.Ollama, extractor *extract.Router, gi *ignore.GitIgnore) error {
+func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, gi *ignore.GitIgnore) error {
 	results, err := scan.Scan(cfg.WatchDir, gi)
 	if err != nil {
 		return fmt.Errorf("scanning directory: %w", err)
 	}
 
 	for _, r := range results {
-		indexed, err := indexFile(ctx, cfg, store, embedder, extractor, r.Path, r.ModifiedAt)
+		action, err := indexFile(ctx, cfg, store, embedder, extractor, r.Path, r.ModifiedAt)
 		if err != nil {
 			log.Printf("Error indexing %s: %v", r.Path, err)
 			continue
 		}
-		if indexed {
+		switch action {
+		case indexUpdated:
 			log.Printf("Indexed: %s", r.Path)
+		case indexRemoved:
+			log.Printf("Removed from index: %s", r.Path)
 		}
 	}
 
@@ -128,7 +139,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 	return nil
 }
 
-func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embedder *embed.Ollama, extractor *extract.Router, watcher *watch.Watcher) {
+func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, watcher *watch.Watcher) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,13 +159,16 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 					continue
 				}
 
-				indexed, err := indexFile(ctx, cfg, store, embedder, extractor, event.Path, info.ModTime())
+				action, err := indexFile(ctx, cfg, store, embedder, extractor, event.Path, info.ModTime())
 				if err != nil {
 					log.Printf("Error indexing %s: %v", event.Path, err)
 					continue
 				}
-				if indexed {
+				switch action {
+				case indexUpdated:
 					log.Printf("Indexed: %s", event.Path)
+				case indexRemoved:
+					log.Printf("Removed from index: %s", event.Path)
 				}
 
 			case watch.Remove:
@@ -165,39 +179,39 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 	}
 }
 
-func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embedder *embed.Ollama, extractor *extract.Router, path string, modTime time.Time) (bool, error) {
+func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, path string, modTime time.Time) (indexAction, error) {
 	if !extractor.Supports(path) {
-		return false, nil
+		return indexNoop, nil
 	}
 
 	doc, err := store.GetDocumentByPath(ctx, path)
 	if err != nil {
-		return false, fmt.Errorf("loading indexed document: %w", err)
+		return indexNoop, fmt.Errorf("loading indexed document: %w", err)
 	}
 	if doc != nil && doc.ModifiedAt.Equal(modTime) {
-		return false, nil
+		return indexNoop, nil
 	}
 
 	hash, err := scan.FileHash(path)
 	if err != nil {
-		return false, fmt.Errorf("hashing file: %w", err)
+		return indexNoop, fmt.Errorf("hashing file: %w", err)
 	}
 	if doc != nil && doc.Hash == hash {
-		return false, nil
+		return indexNoop, nil
 	}
 
 	text, err := extractor.Extract(ctx, path)
 	if err != nil {
-		return false, fmt.Errorf("extracting text: %w", err)
+		return indexNoop, fmt.Errorf("extracting text: %w", err)
 	}
 
 	if text == "" {
-		return false, nil
+		return removeDocumentIfPresent(ctx, store, doc, path)
 	}
 
 	chunks := chunk.Split(text, cfg.ChunkSize, cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		return false, nil
+		return removeDocumentIfPresent(ctx, store, doc, path)
 	}
 
 	indexedDoc := &index.Document{
@@ -223,7 +237,7 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 
 		embeddings, err := embedder.EmbedBatch(ctx, texts)
 		if err != nil {
-			return false, fmt.Errorf("embedding chunks %d-%d: %w", batchStart, batchEnd-1, err)
+			return indexNoop, fmt.Errorf("embedding chunks %d-%d: %w", batchStart, batchEnd-1, err)
 		}
 
 		for i, c := range batch {
@@ -239,8 +253,18 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 	}
 
 	if err := store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
-		return false, err
+		return indexNoop, err
 	}
 
-	return true, nil
+	return indexUpdated, nil
+}
+
+func removeDocumentIfPresent(ctx context.Context, store *index.Store, doc *index.Document, path string) (indexAction, error) {
+	if doc == nil {
+		return indexNoop, nil
+	}
+	if err := store.DeleteDocument(ctx, path); err != nil {
+		return indexNoop, fmt.Errorf("deleting empty document: %w", err)
+	}
+	return indexRemoved, nil
 }

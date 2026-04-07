@@ -87,11 +87,8 @@ func extractPPTX(path string) (string, error) {
 	notesMap := make(map[int]string)
 
 	for _, f := range zr.File {
-		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") && !strings.Contains(f.Name, "/") {
-			// Only match ppt/slides/slideN.xml (not subdirectories)
-			if strings.Count(f.Name, "/") == 2 {
-				slides = append(slides, f.Name)
-			}
+		if isPPTXSlide(f.Name) {
+			slides = append(slides, f.Name)
 		}
 	}
 	sort.Strings(slides)
@@ -190,6 +187,12 @@ func extractXLSX(path string) (string, error) {
 
 func isWordSection(name, prefix, suffix string) bool {
 	return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix)
+}
+
+func isPPTXSlide(name string) bool {
+	return strings.HasPrefix(name, "ppt/slides/slide") &&
+		strings.HasSuffix(name, ".xml") &&
+		strings.Count(name, "/") == 2
 }
 
 func sectionOrdinal(name string) string {

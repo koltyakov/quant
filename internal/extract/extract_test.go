@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"archive/zip"
 	"context"
 	"os"
 	"path/filepath"
@@ -221,5 +222,74 @@ func TestExtractNotesText(t *testing.T) {
 	text := extractNotesText(xmlData)
 	if text != "Speaker notes text here." {
 		t.Fatalf("unexpected notes extraction: %q", text)
+	}
+}
+
+func TestOOXMLExtractor_ExtractPPTX(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slides.pptx")
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("unexpected error creating pptx: %v", err)
+	}
+
+	zw := zip.NewWriter(file)
+	writeZipEntry := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("unexpected error creating zip entry %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("unexpected error writing zip entry %s: %v", name, err)
+		}
+	}
+
+	writeZipEntry("ppt/slides/slide1.xml", `
+		<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+			<p:cSld>
+				<p:spTree>
+					<p:sp>
+						<p:txBody>
+							<a:p><a:r><a:t>Slide body text.</a:t></a:r></a:p>
+						</p:txBody>
+					</p:sp>
+				</p:spTree>
+			</p:cSld>
+		</p:sld>
+	`)
+	writeZipEntry("ppt/notesSlides/notesSlide1.xml", `
+		<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		         xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+			<p:cSld>
+				<p:spTree>
+					<p:sp>
+						<p:nvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+						<p:txBody>
+							<a:p><a:r><a:t>Speaker notes text here.</a:t></a:r></a:p>
+						</p:txBody>
+					</p:sp>
+				</p:spTree>
+			</p:cSld>
+		</p:notes>
+	`)
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("unexpected error closing zip writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("unexpected error closing pptx: %v", err)
+	}
+
+	ext := &OOXMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+
+	want := "[Slide 1]\nSlide body text.\n\n[Notes]\nSpeaker notes text here."
+	if text != want {
+		t.Fatalf("unexpected pptx extraction: %q", text)
 	}
 }
