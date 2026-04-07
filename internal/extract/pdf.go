@@ -15,7 +15,7 @@ func (p *PDFExtractor) Extract(_ context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var parts []string
 	pageCount := r.NumPage()

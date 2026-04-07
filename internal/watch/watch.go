@@ -51,7 +51,7 @@ func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
 	}
 
 	if err := w.addRecursive(dir); err != nil {
-		fsw.Close()
+		_ = fsw.Close()
 		return nil, err
 	}
 
@@ -124,7 +124,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 		if info.IsDir() {
 			w.matcher.Load(path)
-			w.addRecursive(path)
+			if err := w.addRecursive(path); err != nil {
+				return
+			}
 			return
 		}
 		w.debounce(path, Create)

@@ -94,7 +94,7 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][
 	if err != nil {
 		return nil, fmt.Errorf("sending request to ollama: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

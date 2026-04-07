@@ -50,7 +50,11 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error opening store: %v", err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
 
 	ctx := context.Background()
 	seeded := &index.Document{

@@ -54,12 +54,9 @@ func TestValidate_ValidDir(t *testing.T) {
 func TestApplyEnv(t *testing.T) {
 	cfg := Default()
 
-	os.Setenv("QUANT_EMBED_MODEL", "all-minilm")
-	defer os.Unsetenv("QUANT_EMBED_MODEL")
-	os.Setenv("QUANT_CHUNK_SIZE", "256")
-	defer os.Unsetenv("QUANT_CHUNK_SIZE")
-	os.Setenv("QUANT_INDEX_WORKERS", "6")
-	defer os.Unsetenv("QUANT_INDEX_WORKERS")
+	t.Setenv("QUANT_EMBED_MODEL", "all-minilm")
+	t.Setenv("QUANT_CHUNK_SIZE", "256")
+	t.Setenv("QUANT_INDEX_WORKERS", "6")
 
 	applyEnv(cfg)
 
@@ -77,7 +74,9 @@ func TestApplyEnv(t *testing.T) {
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
-	os.WriteFile(cfgPath, []byte("embed_model: all-minilm\nchunk_size: 1024\nindex_workers: 5\n"), 0644)
+	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\nchunk_size: 1024\nindex_workers: 5\n"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
 
 	cfg := Default()
 	err := loadYAML(cfg, cfgPath)

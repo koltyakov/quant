@@ -44,12 +44,12 @@ func NewStore(dbPath string) (*Store, error) {
 		`PRAGMA foreign_keys = ON`,
 	} {
 		if _, err := s.db.Exec(pragma); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("configuring sqlite pragma %q: %w", pragma, err)
 		}
 	}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
@@ -133,7 +133,7 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	docID, err := upsertDocumentTx(ctx, tx, doc)
 	if err != nil {
@@ -148,7 +148,7 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 	if err != nil {
 		return fmt.Errorf("preparing chunk insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, chunk := range chunks {
 		if _, err := stmt.ExecContext(ctx,
@@ -232,7 +232,7 @@ func (s *Store) ListDocuments(ctx context.Context) ([]Document, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var docs []Document
 	for rows.Next() {
@@ -313,7 +313,7 @@ func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding [
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return rerankByVector(rows, queryEmbedding, limit)
 }
@@ -340,7 +340,7 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return rerankByVector(rows, queryEmbedding, limit)
 }
@@ -495,7 +495,7 @@ func (s *Store) embeddingMetadata(ctx context.Context) (*EmbeddingMetadata, erro
 	if err != nil {
 		return nil, fmt.Errorf("querying embedding metadata: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	values := make(map[string]string)
 	for rows.Next() {
@@ -530,7 +530,7 @@ func (s *Store) putEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata
 	if err != nil {
 		return fmt.Errorf("beginning metadata transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM embedding_metadata`); err != nil {
 		return fmt.Errorf("clearing embedding metadata: %w", err)
@@ -559,7 +559,7 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("beginning reset transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 		return fmt.Errorf("clearing documents: %w", err)

@@ -42,7 +42,7 @@ func extractDOCX(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	var sectionNames []string
 	for _, f := range zr.File {
@@ -81,7 +81,7 @@ func extractPPTX(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	var slides []string
 	notesMap := make(map[int]string)
@@ -126,7 +126,7 @@ func extractPPTX(path string) (string, error) {
 		text := strings.TrimSpace(extractDrawingMLText(data))
 
 		var section strings.Builder
-		section.WriteString(fmt.Sprintf("[Slide %d]", slideNum))
+		_, _ = fmt.Fprintf(&section, "[Slide %d]", slideNum)
 		if text != "" {
 			section.WriteString("\n")
 			section.WriteString(text)
@@ -148,7 +148,7 @@ func extractXLSX(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	sharedStrings := []string{}
 	if data, err := readZipFile(zr.File, "xl/sharedStrings.xml"); err == nil {
@@ -213,7 +213,7 @@ func readZipFile(files []*zip.File, name string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 		return io.ReadAll(rc)
 	}
 	return nil, fmt.Errorf("zip entry not found: %s", name)

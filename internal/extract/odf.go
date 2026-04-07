@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -67,7 +68,7 @@ func readODFContent(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	return readZipFile(zr.File, "content.xml")
 }
@@ -342,8 +343,8 @@ func atoiDefault(value string, fallback int) int {
 	if value == "" {
 		return fallback
 	}
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || parsed <= 0 {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed

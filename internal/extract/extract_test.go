@@ -88,7 +88,9 @@ func TestTextExtractor_Extract(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 	content := "hello world"
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
 
 	ext := &TextExtractor{}
 	text, err := ext.Extract(context.Background(), path)
@@ -104,7 +106,9 @@ func TestRouter_ExtractTextFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.go")
 	content := "package main\nfunc main() {}"
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
 
 	r := NewRouter()
 	text, err := r.Extract(context.Background(), path)
@@ -181,7 +185,9 @@ func TestRTFExtractor_Extract(t *testing.T) {
 	path := filepath.Join(dir, "test.rtf")
 	// Simple RTF document.
 	content := `{\rtf1\ansi Hello World.\par Second paragraph.}`
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
 
 	ext := &RTFExtractor{}
 	text, err := ext.Extract(context.Background(), path)
@@ -198,7 +204,9 @@ func TestRTFExtractor_Unicode(t *testing.T) {
 	path := filepath.Join(dir, "test.rtf")
 	// RTF with unicode escape.
 	content := `{\rtf1\ansi Smart \u8220"quotes\u8221" here.}`
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
 
 	ext := &RTFExtractor{}
 	text, err := ext.Extract(context.Background(), path)
@@ -441,7 +449,11 @@ func writeZipArchive(t *testing.T, path string, entries map[string]string) {
 	if err != nil {
 		t.Fatalf("unexpected error creating archive: %v", err)
 	}
-	defer file.Close()
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Fatalf("unexpected file close error: %v", err)
+		}
+	})
 
 	zw := zip.NewWriter(file)
 	for name, content := range entries {

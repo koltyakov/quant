@@ -3,9 +3,11 @@ package config
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -109,11 +111,11 @@ func Parse() (*Config, error) {
 		case "embed-model":
 			cfg.EmbedModel = f.Value.String()
 		case "chunk-size":
-			fmt.Sscanf(f.Value.String(), "%d", &cfg.ChunkSize)
+			cfg.ChunkSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.ChunkSize)
 		case "chunk-overlap":
-			fmt.Sscanf(f.Value.String(), "%f", &cfg.ChunkOverlap)
+			cfg.ChunkOverlap = mustParseFloatFlag(f.Name, f.Value.String(), cfg.ChunkOverlap)
 		case "index-workers":
-			fmt.Sscanf(f.Value.String(), "%d", &cfg.IndexWorkers)
+			cfg.IndexWorkers = mustParseIntFlag(f.Name, f.Value.String(), cfg.IndexWorkers)
 		}
 	})
 
@@ -202,13 +204,13 @@ func applyEnv(cfg *Config) {
 		cfg.EmbedModel = v
 	}
 	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" {
-		fmt.Sscanf(v, "%d", &cfg.ChunkSize)
+		cfg.ChunkSize = mustParseIntEnv("QUANT_CHUNK_SIZE", v, cfg.ChunkSize)
 	}
 	if v := os.Getenv("QUANT_CHUNK_OVERLAP"); v != "" {
-		fmt.Sscanf(v, "%f", &cfg.ChunkOverlap)
+		cfg.ChunkOverlap = mustParseFloatEnv("QUANT_CHUNK_OVERLAP", v, cfg.ChunkOverlap)
 	}
 	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" {
-		fmt.Sscanf(v, "%d", &cfg.IndexWorkers)
+		cfg.IndexWorkers = mustParseIntEnv("QUANT_INDEX_WORKERS", v, cfg.IndexWorkers)
 	}
 }
 
@@ -221,4 +223,40 @@ func defaultIndexWorkers() int {
 		return 8
 	}
 	return workers
+}
+
+func mustParseIntFlag(name, value string, fallback int) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
+}
+
+func mustParseFloatFlag(name, value string, fallback float64) float64 {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
+}
+
+func mustParseIntEnv(name, value string, fallback int) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
+}
+
+func mustParseFloatEnv(name, value string, fallback float64) float64 {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
 }

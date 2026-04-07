@@ -44,7 +44,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error connecting to ollama: %v\n", err)
 		os.Exit(1)
 	}
-	defer embedder.Close()
+	defer func() {
+		if err := embedder.Close(); err != nil {
+			log.Printf("Error closing embedder: %v", err)
+		}
+	}()
 
 	log.Printf("Connected to embedding backend via Ollama (model: %s, dimensions: %d)", cfg.EmbedModel, embedder.Dimensions())
 
@@ -53,7 +57,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error opening database: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("Error closing store: %v", err)
+		}
+	}()
 
 	log.Printf("Database opened: %s", cfg.DBPath)
 
@@ -92,7 +100,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error starting watcher: %v\n", err)
 		os.Exit(1)
 	}
-	defer watcher.Close()
+	defer func() {
+		if err := watcher.Close(); err != nil {
+			log.Printf("Error closing watcher: %v", err)
+		}
+	}()
 
 	go watchLoop(ctx, cfg, store, embedder, extractor, watcher)
 
@@ -179,7 +191,10 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 	}
 	for _, doc := range docs {
 		if !resultMap[doc.Path] {
-			store.DeleteDocument(ctx, doc.Path)
+			if err := store.DeleteDocument(ctx, doc.Path); err != nil {
+				log.Printf("Error removing stale document %s: %v", doc.Path, err)
+				continue
+			}
 			log.Printf("Removed from index: %s", doc.Path)
 		}
 	}
@@ -220,7 +235,10 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 				}
 
 			case watch.Remove:
-				store.DeleteDocument(ctx, event.Path)
+				if err := store.DeleteDocument(ctx, event.Path); err != nil {
+					log.Printf("Error removing %s: %v", event.Path, err)
+					continue
+				}
 				log.Printf("Removed from index: %s", event.Path)
 			}
 		}

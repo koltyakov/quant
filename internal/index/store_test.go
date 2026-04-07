@@ -13,7 +13,7 @@ func TestNewStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 }
 
 func TestStore_UpsertAndGetDocument(t *testing.T) {
@@ -22,7 +22,7 @@ func TestStore_UpsertAndGetDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	doc := &Document{
@@ -60,7 +60,7 @@ func TestStore_UpsertDocument_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	doc := &Document{
@@ -89,7 +89,7 @@ func TestStore_InsertAndSearchChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 
@@ -108,7 +108,9 @@ func TestStore_InsertAndSearchChunks(t *testing.T) {
 		ChunkIndex: 0,
 		Embedding:  EncodeFloat32(embedding),
 	}
-	store.InsertChunk(ctx, chunk1)
+	if err := store.InsertChunk(ctx, chunk1); err != nil {
+		t.Fatalf("unexpected error inserting chunk1: %v", err)
+	}
 
 	embedding2 := make([]float32, 8)
 	embedding2[1] = 1.0
@@ -118,7 +120,9 @@ func TestStore_InsertAndSearchChunks(t *testing.T) {
 		ChunkIndex: 1,
 		Embedding:  EncodeFloat32(embedding2),
 	}
-	store.InsertChunk(ctx, chunk2)
+	if err := store.InsertChunk(ctx, chunk2); err != nil {
+		t.Fatalf("unexpected error inserting chunk2: %v", err)
+	}
 
 	query := make([]float32, 8)
 	query[0] = 1.0
@@ -145,7 +149,7 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 
@@ -158,8 +162,12 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 
 	embedding := make([]float32, 8)
 	embedding[0] = 1.0
-	store.InsertChunk(ctx, &ChunkRecord{DocumentID: id1, Content: "hello from source code", ChunkIndex: 0, Embedding: EncodeFloat32(embedding)})
-	store.InsertChunk(ctx, &ChunkRecord{DocumentID: id2, Content: "hello from documentation", ChunkIndex: 0, Embedding: EncodeFloat32(embedding)})
+	if err := store.InsertChunk(ctx, &ChunkRecord{DocumentID: id1, Content: "hello from source code", ChunkIndex: 0, Embedding: EncodeFloat32(embedding)}); err != nil {
+		t.Fatalf("unexpected error inserting first chunk: %v", err)
+	}
+	if err := store.InsertChunk(ctx, &ChunkRecord{DocumentID: id2, Content: "hello from documentation", ChunkIndex: 0, Embedding: EncodeFloat32(embedding)}); err != nil {
+		t.Fatalf("unexpected error inserting second chunk: %v", err)
+	}
 
 	query := NormalizeFloat32(embedding)
 
@@ -191,7 +199,7 @@ func TestStore_SearchVectorFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 
@@ -200,12 +208,14 @@ func TestStore_SearchVectorFallback(t *testing.T) {
 
 	embedding := make([]float32, 8)
 	embedding[0] = 1.0
-	store.InsertChunk(ctx, &ChunkRecord{
+	if err := store.InsertChunk(ctx, &ChunkRecord{
 		DocumentID: docID,
 		Content:    "hello world",
 		ChunkIndex: 0,
 		Embedding:  EncodeFloat32(embedding),
-	})
+	}); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
 
 	query := NormalizeFloat32(embedding)
 
@@ -225,7 +235,7 @@ func TestStore_SearchVectorFallback_ScansPastInitialWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 
@@ -275,7 +285,7 @@ func TestStore_DeleteDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	doc := &Document{
@@ -318,7 +328,7 @@ func TestStore_Stats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	docCount, chunkCount, err := store.Stats(ctx)
@@ -336,7 +346,7 @@ func TestStore_ListDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 
@@ -346,7 +356,9 @@ func TestStore_ListDocuments(t *testing.T) {
 			Hash:       "hash",
 			ModifiedAt: time.Now(),
 		}
-		store.UpsertDocument(ctx, doc)
+		if _, err := store.UpsertDocument(ctx, doc); err != nil {
+			t.Fatalf("unexpected upsert error: %v", err)
+		}
 	}
 
 	docs, err := store.ListDocuments(ctx)
@@ -404,7 +416,7 @@ func TestStore_ReindexDocument_RollsBackOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	original := &Document{
@@ -456,7 +468,7 @@ func TestStore_EnsureEmbeddingMetadata_ResetOnChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer store.Close()
+	mustCloseStore(t, store)
 
 	ctx := context.Background()
 	docID, err := store.UpsertDocument(ctx, &Document{
@@ -521,4 +533,13 @@ func TestBuildFTSQuery_Phrases(t *testing.T) {
 	if got != `"exact match" OR other` {
 		t.Errorf("unexpected FTS query with phrase: %q", got)
 	}
+}
+
+func mustCloseStore(t *testing.T, store *Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
 }

@@ -28,7 +28,11 @@ func TestWatcher_RespectsNestedGitIgnore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected watcher error: %v", err)
 	}
-	defer watcher.Close()
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
 
 	keepPath := filepath.Join(subdir, "keep.txt")
 	skipPath := filepath.Join(subdir, "skip.tmp")
@@ -54,7 +58,11 @@ func TestWatcher_AddsNewDirectoriesRecursively(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected watcher error: %v", err)
 	}
-	defer watcher.Close()
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
 
 	subdir := filepath.Join(dir, "newdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {

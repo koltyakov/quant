@@ -8,8 +8,8 @@ import (
 
 func TestScan_BasicFiles(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0644)
-	os.WriteFile(filepath.Join(dir, "b.go"), []byte("package main"), 0644)
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), "hello")
+	mustWriteFile(t, filepath.Join(dir, "b.go"), "package main")
 
 	results, err := Scan(dir, nil)
 	if err != nil {
@@ -22,8 +22,8 @@ func TestScan_BasicFiles(t *testing.T) {
 
 func TestScan_SkipsHidden(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644)
-	os.WriteFile(filepath.Join(dir, ".hidden"), []byte("hidden"), 0644)
+	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "hello")
+	mustWriteFile(t, filepath.Join(dir, ".hidden"), "hidden")
 
 	results, err := Scan(dir, nil)
 	if err != nil {
@@ -36,9 +36,9 @@ func TestScan_SkipsHidden(t *testing.T) {
 
 func TestScan_SkipsHiddenDirs(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0755)
-	os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("git config"), 0644)
-	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644)
+	mustMkdirAll(t, filepath.Join(dir, ".git", "objects"))
+	mustWriteFile(t, filepath.Join(dir, ".git", "config"), "git config")
+	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "hello")
 
 	results, err := Scan(dir, nil)
 	if err != nil {
@@ -51,11 +51,11 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 
 func TestScan_GitIgnore(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\nbuild/\n"), 0644)
-	os.WriteFile(filepath.Join(dir, "code.go"), []byte("package main"), 0644)
-	os.WriteFile(filepath.Join(dir, "debug.log"), []byte("log"), 0644)
-	os.MkdirAll(filepath.Join(dir, "build"), 0755)
-	os.WriteFile(filepath.Join(dir, "build", "output"), []byte("binary"), 0644)
+	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "*.log\nbuild/\n")
+	mustWriteFile(t, filepath.Join(dir, "code.go"), "package main")
+	mustWriteFile(t, filepath.Join(dir, "debug.log"), "log")
+	mustMkdirAll(t, filepath.Join(dir, "build"))
+	mustWriteFile(t, filepath.Join(dir, "build", "output"), "binary")
 
 	gi, err := LoadGitIgnore(dir)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestScan_GitIgnore(t *testing.T) {
 func TestFileHash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
-	os.WriteFile(path, []byte("hello"), 0644)
+	mustWriteFile(t, path, "hello")
 
 	hash, err := FileHash(path)
 	if err != nil {
@@ -114,19 +114,19 @@ func TestScan_NestedGitIgnore(t *testing.T) {
 	dir := t.TempDir()
 
 	// Root gitignore ignores *.log.
-	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0644)
+	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "*.log\n")
 
 	// Sub-directory with its own gitignore ignoring *.tmp.
-	os.MkdirAll(filepath.Join(dir, "subdir"), 0755)
-	os.WriteFile(filepath.Join(dir, "subdir", ".gitignore"), []byte("*.tmp\n"), 0644)
-	os.WriteFile(filepath.Join(dir, "subdir", "keep.txt"), []byte("keep"), 0644)
-	os.WriteFile(filepath.Join(dir, "subdir", "skip.tmp"), []byte("skip"), 0644)
-	os.WriteFile(filepath.Join(dir, "subdir", "skip.log"), []byte("log"), 0644)
+	mustMkdirAll(t, filepath.Join(dir, "subdir"))
+	mustWriteFile(t, filepath.Join(dir, "subdir", ".gitignore"), "*.tmp\n")
+	mustWriteFile(t, filepath.Join(dir, "subdir", "keep.txt"), "keep")
+	mustWriteFile(t, filepath.Join(dir, "subdir", "skip.tmp"), "skip")
+	mustWriteFile(t, filepath.Join(dir, "subdir", "skip.log"), "log")
 
 	// Root file.
-	os.WriteFile(filepath.Join(dir, "root.txt"), []byte("root"), 0644)
+	mustWriteFile(t, filepath.Join(dir, "root.txt"), "root")
 	// .tmp at root should NOT be ignored (only subdir's gitignore has *.tmp).
-	os.WriteFile(filepath.Join(dir, "root.tmp"), []byte("tmp"), 0644)
+	mustWriteFile(t, filepath.Join(dir, "root.tmp"), "tmp")
 
 	gi, err := LoadGitIgnore(dir)
 	if err != nil {
@@ -158,5 +158,19 @@ func TestScan_NestedGitIgnore(t *testing.T) {
 	}
 	if paths[filepath.Join("subdir", "skip.log")] {
 		t.Error("expected subdir/skip.log to be excluded by root gitignore")
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error for %s: %v", path, err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error for %s: %v", path, err)
 	}
 }
