@@ -3,7 +3,7 @@
   "mcp": {
     "quant": {
       "type": "local",
-      "command": ["go", "run", "./cmd/quant", "--dir", "./data"],
+      "command": ["./bin/quant", "--dir", "./data"],
       "enabled": true
     }
   }

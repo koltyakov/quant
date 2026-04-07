@@ -22,13 +22,13 @@ make build
 
 Or directly:
 ```
-go build -o quant ./cmd/quant
+mkdir -p bin && go build -o bin/quant ./cmd/quant
 ```
 
 ## Usage
 
 ```
-quant --dir <path> [options]
+./bin/quant --dir <path> [options]
 ```
 
 **Required:**
@@ -61,13 +61,13 @@ Configuration precedence is:
 
 ```bash
 # Basic - index a folder over stdio
-quant --dir ./my-project
+./bin/quant --dir ./my-project
 
 # SSE transport for remote access
-quant --dir ./my-project --transport sse --listen :9090
+./bin/quant --dir ./my-project --transport sse --listen :9090
 
 # Custom embedding endpoint via Ollama
-quant --dir ./docs --embed-url http://gpu-server:11434 --embed-model mxbai-embed-large
+./bin/quant --dir ./docs --embed-url http://gpu-server:11434 --embed-model mxbai-embed-large
 ```
 
 ### Config file

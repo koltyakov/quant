@@ -123,6 +123,29 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		return fmt.Errorf("scanning directory: %w", err)
 	}
 
+	docs, err := store.ListDocuments(ctx)
+	if err != nil {
+		return fmt.Errorf("listing indexed documents: %w", err)
+	}
+	docByPath := make(map[string]*index.Document, len(docs))
+	for i := range docs {
+		doc := docs[i]
+		docByPath[doc.Path] = &doc
+	}
+
+	scannedPaths := make(map[string]bool, len(results))
+	pending := make([]scan.Result, 0, len(results))
+	for _, r := range results {
+		scannedPaths[r.Path] = true
+		if !extractor.Supports(r.Path) {
+			continue
+		}
+		if doc := docByPath[r.Path]; doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
+			continue
+		}
+		pending = append(pending, r)
+	}
+
 	type indexResult struct {
 		path   string
 		action indexAction
@@ -130,8 +153,8 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 	}
 
 	workers := cfg.IndexWorkers
-	if workers > len(results) && len(results) > 0 {
-		workers = len(results)
+	if workers > len(pending) && len(pending) > 0 {
+		workers = len(pending)
 	}
 	if workers < 1 {
 		workers = 1
@@ -153,7 +176,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 	}
 
 	go func() {
-		for _, r := range results {
+		for _, r := range pending {
 			select {
 			case <-ctx.Done():
 				close(jobs)
@@ -184,13 +207,8 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		return err
 	}
 
-	docs, _ := store.ListDocuments(ctx)
-	resultMap := make(map[string]bool, len(results))
-	for _, r := range results {
-		resultMap[r.Path] = true
-	}
 	for _, doc := range docs {
-		if !resultMap[doc.Path] {
+		if !scannedPaths[doc.Path] {
 			if err := store.DeleteDocument(ctx, doc.Path); err != nil {
 				log.Printf("Error removing stale document %s: %v", doc.Path, err)
 				continue
@@ -254,7 +272,7 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 	if err != nil {
 		return indexNoop, fmt.Errorf("loading indexed document: %w", err)
 	}
-	if doc != nil && doc.ModifiedAt.Equal(modTime) {
+	if doc != nil && sameModTime(doc.ModifiedAt, modTime) {
 		return indexNoop, nil
 	}
 
@@ -323,6 +341,14 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 	}
 
 	return indexUpdated, nil
+}
+
+func sameModTime(a, b time.Time) bool {
+	return normalizeModTime(a).UnixMicro() == normalizeModTime(b).UnixMicro()
+}
+
+func normalizeModTime(t time.Time) time.Time {
+	return t.UTC().Round(0)
 }
 
 func removeDocumentIfPresent(ctx context.Context, store *index.Store, doc *index.Document, path string) (indexAction, error) {
