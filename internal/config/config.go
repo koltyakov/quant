@@ -47,9 +47,6 @@ func Default() *Config {
 }
 
 func (c *Config) Validate() error {
-	if c.WatchDir == "" {
-		return fmt.Errorf("--dir is required")
-	}
 	info, err := os.Stat(c.WatchDir)
 	if err != nil {
 		return fmt.Errorf("cannot access watch dir: %w", err)
@@ -75,7 +72,7 @@ func (c *Config) Validate() error {
 func Parse() (*Config, error) {
 	cfg := Default()
 
-	flag.StringVar(&cfg.WatchDir, "dir", "", "Directory to watch (required)")
+	flag.StringVar(&cfg.WatchDir, "dir", "", "Directory to watch (default: current directory)")
 	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/.quant.db)")
 	flag.StringVar((*string)(&cfg.Transport), "transport", string(cfg.Transport), "MCP transport: stdio, sse, http")
 	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
@@ -119,8 +116,28 @@ func Parse() (*Config, error) {
 		}
 	})
 
-	if cfg.DBPath == "" && cfg.WatchDir != "" {
+	if cfg.WatchDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("getting current directory: %w", err)
+		}
+		cfg.WatchDir = wd
+	}
+
+	watchDir, err := filepath.Abs(cfg.WatchDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving watch dir: %w", err)
+	}
+	cfg.WatchDir = filepath.Clean(watchDir)
+
+	if cfg.DBPath == "" {
 		cfg.DBPath = filepath.Join(cfg.WatchDir, ".quant.db")
+	} else {
+		dbPath, err := filepath.Abs(cfg.DBPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolving db path: %w", err)
+		}
+		cfg.DBPath = filepath.Clean(dbPath)
 	}
 
 	if err := cfg.Validate(); err != nil {

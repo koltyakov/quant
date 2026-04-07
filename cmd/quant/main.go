@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -160,6 +162,7 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 	}
 
 	type pendingItem struct {
+		key    string
 		result scan.Result
 		doc    *index.Document
 	}
@@ -167,15 +170,19 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 	scannedPaths := make(map[string]bool, len(results))
 	pending := make([]pendingItem, 0, len(results))
 	for _, r := range results {
-		scannedPaths[r.Path] = true
+		key, err := documentKey(idx.cfg.WatchDir, r.Path)
+		if err != nil {
+			return fmt.Errorf("computing document key for %s: %w", r.Path, err)
+		}
+		scannedPaths[key] = true
 		if !idx.extractor.Supports(r.Path) {
 			continue
 		}
-		doc := docByPath[r.Path]
+		doc := docByPath[key]
 		if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
 			continue
 		}
-		pending = append(pending, pendingItem{result: r, doc: doc})
+		pending = append(pending, pendingItem{key: key, result: r, doc: doc})
 	}
 
 	type indexResult struct {
@@ -201,7 +208,7 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
-				action, err := idx.indexFileCore(ctx, item.result.Path, item.result.ModifiedAt, item.doc)
+				action, err := idx.indexFileCore(ctx, item.key, item.result.Path, item.result.ModifiedAt, item.doc)
 				indexResults <- indexResult{path: item.result.Path, action: action, err: err}
 			}
 		}()
@@ -285,7 +292,12 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 				}
 
 			case watch.Remove:
-				if err := idx.store.DeleteDocument(ctx, event.Path); err != nil {
+				key, err := documentKey(idx.cfg.WatchDir, event.Path)
+				if err != nil {
+					log.Printf("Error removing %s: %v", event.Path, err)
+					continue
+				}
+				if err := idx.store.DeleteDocument(ctx, key); err != nil {
 					log.Printf("Error removing %s: %v", event.Path, err)
 					continue
 				}
@@ -303,7 +315,12 @@ func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Tim
 		return indexNoop, nil
 	}
 
-	doc, err := idx.store.GetDocumentByPath(ctx, path)
+	key, err := documentKey(idx.cfg.WatchDir, path)
+	if err != nil {
+		return indexNoop, fmt.Errorf("computing document key: %w", err)
+	}
+
+	doc, err := idx.store.GetDocumentByPath(ctx, key)
 	if err != nil {
 		return indexNoop, fmt.Errorf("loading indexed document: %w", err)
 	}
@@ -311,14 +328,14 @@ func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Tim
 		return indexNoop, nil
 	}
 
-	return idx.indexFileCore(ctx, path, modTime, doc)
+	return idx.indexFileCore(ctx, key, path, modTime, doc)
 }
 
 // indexFileCore performs the actual indexing work: hashing, extracting,
 // chunking, embedding, and storing. It accepts an optional pre-loaded document
 // so that callers who already have it (e.g. initialSync) can skip the extra
 // database lookup.
-func (idx *indexer) indexFileCore(ctx context.Context, path string, modTime time.Time, doc *index.Document) (indexAction, error) {
+func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, doc *index.Document) (indexAction, error) {
 	hash, err := scan.FileHash(path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("hashing file: %w", err)
@@ -333,16 +350,16 @@ func (idx *indexer) indexFileCore(ctx context.Context, path string, modTime time
 	}
 
 	if text == "" {
-		return removeDocumentIfPresent(ctx, idx.store, doc, path)
+		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
 	chunks := chunk.Split(text, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		return removeDocumentIfPresent(ctx, idx.store, doc, path)
+		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
 	indexedDoc := &index.Document{
-		Path:       path,
+		Path:       key,
 		Hash:       hash,
 		ModifiedAt: modTime,
 	}
@@ -384,6 +401,21 @@ func (idx *indexer) indexFileCore(ctx context.Context, path string, modTime time
 	}
 
 	return indexUpdated, nil
+}
+
+func documentKey(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return "", fmt.Errorf("path %q resolves to watch root %q", path, root)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
+	}
+	return rel, nil
 }
 
 func sameModTime(a, b time.Time) bool {

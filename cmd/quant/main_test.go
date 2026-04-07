@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -93,7 +94,7 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 
 	ctx := context.Background()
 	seeded := &index.Document{
-		Path:       path,
+		Path:       "sample.txt",
 		Hash:       "stale-hash",
 		ModifiedAt: time.Now().Add(-time.Hour),
 	}
@@ -106,7 +107,7 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	}
 
 	idx := &indexer{
-		cfg:       &config.Config{ChunkSize: 128, ChunkOverlap: 0},
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:     store,
 		embedder:  fakeEmbedder{},
 		extractor: fakeExtractor{text: ""},
@@ -125,7 +126,7 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 		t.Fatalf("expected removal action, got %s", action)
 	}
 
-	doc, err := store.GetDocumentByPath(ctx, path)
+	doc, err := store.GetDocumentByPath(ctx, "sample.txt")
 	if err != nil {
 		t.Fatalf("unexpected error loading document: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 
 	ctx := context.Background()
 	seeded := &index.Document{
-		Path:       path,
+		Path:       "sample.txt",
 		Hash:       hash,
 		ModifiedAt: info.ModTime().UTC().Truncate(time.Microsecond),
 	}
@@ -183,7 +184,7 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	emb := &countingEmbedder{}
 	ext := &countingExtractor{text: "replacement chunk"}
 	idx := &indexer{
-		cfg:       &config.Config{ChunkSize: 128, ChunkOverlap: 0},
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:     store,
 		embedder:  emb,
 		extractor: ext,
@@ -201,5 +202,112 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	}
 	if emb.batchCalls.Load() != 0 {
 		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	}
+}
+
+func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("unexpected error creating subdir: %v", err)
+	}
+	path := filepath.Join(subdir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  fakeEmbedder{},
+		extractor: fakeExtractor{text: "hello world"},
+	}
+
+	action, err := idx.indexFile(context.Background(), path, info.ModTime())
+	if err != nil {
+		t.Fatalf("unexpected error indexing file: %v", err)
+	}
+	if action != indexUpdated {
+		t.Fatalf("expected update action, got %s", action)
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error listing documents: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document, got %d", len(docs))
+	}
+	if docs[0].Path != filepath.Join("nested", "sample.txt") {
+		t.Fatalf("expected relative path, got %q", docs[0].Path)
+	}
+}
+
+func TestDocumentKey(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "tmp", "root")
+	got, err := documentKey(root, filepath.Join(root, "nested", "file.txt"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != filepath.Join("nested", "file.txt") {
+		t.Fatalf("unexpected key %q", got)
+	}
+}
+
+func TestDocumentKey_RejectsOutsideRoot(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "tmp", "root")
+	_, err := documentKey(root, filepath.Join(string(filepath.Separator), "tmp", "other", "file.txt"))
+	if err == nil {
+		t.Fatal("expected error for path outside root")
+	}
+}
+
+func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
+	oldArgs := os.Args
+	oldCommandLine := flag.CommandLine
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("unexpected getwd error: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldCommandLine
+		if err := os.Chdir(oldWD); err != nil {
+			t.Fatalf("unexpected restore chdir error: %v", err)
+		}
+	})
+
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("unexpected chdir error: %v", err)
+	}
+
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{"quant"}
+
+	cfg, err := config.Parse()
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if cfg.WatchDir != dir {
+		t.Fatalf("expected watch dir %q, got %q", dir, cfg.WatchDir)
+	}
+	if cfg.DBPath != filepath.Join(dir, ".quant.db") {
+		t.Fatalf("expected db path %q, got %q", filepath.Join(dir, ".quant.db"), cfg.DBPath)
 	}
 }
