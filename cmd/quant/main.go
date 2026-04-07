@@ -100,19 +100,6 @@ func main() {
 		extractor: extract.NewRouter(),
 	}
 
-	log.Printf("Starting initial scan of %s", cfg.WatchDir)
-	if err := idx.initialSync(ctx, gi); err != nil {
-		fmt.Fprintf(os.Stderr, "error during initial scan: %v\n", err)
-		os.Exit(1)
-	}
-
-	docCount, chunkCount, err := store.Stats(ctx)
-	if err != nil {
-		log.Printf("Error fetching index stats: %v", err)
-	} else {
-		log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
-	}
-
 	watcher, err := watch.New(cfg.WatchDir, gi)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error starting watcher: %v\n", err)
@@ -131,6 +118,12 @@ func main() {
 		idx.watchLoop(ctx, watcher)
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idx.runInitialSync(ctx, gi)
+	}()
+
 	mcpServer := mcp.NewServer(cfg, store, embedder)
 	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
 
@@ -143,6 +136,24 @@ func main() {
 
 	cancel()
 	wg.Wait()
+}
+
+func (idx *indexer) runInitialSync(ctx context.Context, gi *ignore.GitIgnore) {
+	log.Printf("Starting initial scan of %s", idx.cfg.WatchDir)
+	if err := idx.initialSync(ctx, gi); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("Error during initial scan: %v", err)
+		return
+	}
+
+	docCount, chunkCount, err := idx.store.Stats(ctx)
+	if err != nil {
+		log.Printf("Error fetching index stats: %v", err)
+		return
+	}
+	log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
 }
 
 func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error {

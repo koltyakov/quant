@@ -134,9 +134,11 @@ Unsupported files are skipped.
 
 ## Indexing Behavior
 
+- MCP startup is immediate; the initial filesystem scan runs in the background after the server is already accepting requests.
 - Initial startup scans the target directory and indexes supported files that are new or changed.
 - Stored document paths are relative to the watch directory, so the index remains stable across different launch working directories.
 - Initial startup indexing runs with a bounded worker pool to overlap hashing, extraction, embedding, and database writes across files.
+- Search results become richer as background indexing completes; already-indexed content is queryable immediately.
 - A filesystem watcher keeps the index in sync after startup.
 - Deleting a file from disk removes it from the index.
 - The index stores embedding metadata in SQLite. If the configured embedding model or dimensions change, the existing index is cleared and rebuilt from the filesystem projection.
