@@ -44,10 +44,12 @@ quant --dir <path> [options]
 | `--embed-model` | `nomic-embed-text` | Embedding model |
 | `--chunk-size` | `512` | Target chunk size in approximate words |
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0–1) |
+| `--index-workers` | auto (`2-8`) | Parallel workers for startup indexing |
 | `--config` | - | YAML config file path |
 
 All flags can also be set via env vars:
 `QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
+Also `QUANT_INDEX_WORKERS`.
 
 Configuration precedence is:
 1. Defaults
@@ -79,6 +81,7 @@ embed_url: http://localhost:11434
 embed_model: nomic-embed-text
 chunk_size: 512
 chunk_overlap: 0.15
+index_workers: 4
 ```
 
 ## Embedding Model Choice
@@ -132,6 +135,7 @@ Unsupported files are skipped.
 ## Indexing Behavior
 
 - Initial startup scans the target directory and indexes supported files that are new or changed.
+- Initial startup indexing runs with a bounded worker pool to overlap hashing, extraction, embedding, and database writes across files.
 - A filesystem watcher keeps the index in sync after startup.
 - Deleting a file from disk removes it from the index.
 - The index stores embedding metadata in SQLite. If the configured embedding model or dimensions change, the existing index is cleared and rebuilt from the filesystem projection.
@@ -192,6 +196,8 @@ flowchart TB
 
 - **No CGO** - uses `modernc.org/sqlite` (pure Go SQLite)
 - **Hybrid retrieval** - SQLite FTS5 prefilter + normalized vector rerank
+- **Bounded-memory rerank** - top-k heap keeps vector reranking memory stable as candidate sets grow
+- **SQLite tuned for concurrency** - WAL + busy timeout + multi-connection pool allow reads during writes
 - **Embedding metadata** - stored in SQLite; index is rebuilt if model settings change
 - **Transactional indexing** - chunk replacement happens in a single SQLite transaction per document
 - **Office docs** parsed with stdlib `archive/zip` + `encoding/xml`, preserving more document structure

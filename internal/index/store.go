@@ -1,12 +1,14 @@
 package index
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,13 +25,28 @@ func NewStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	conns := runtime.GOMAXPROCS(0)
+	if conns < 4 {
+		conns = 4
+	}
+	if conns > 16 {
+		conns = 16
+	}
+	db.SetMaxOpenConns(conns)
+	db.SetMaxIdleConns(conns / 2)
 
 	s := &Store{db: db}
-	if _, err := s.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enabling foreign keys: %w", err)
+	for _, pragma := range []string{
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA synchronous = NORMAL`,
+		`PRAGMA temp_store = MEMORY`,
+		`PRAGMA busy_timeout = 5000`,
+		`PRAGMA foreign_keys = ON`,
+	} {
+		if _, err := s.db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("configuring sqlite pragma %q: %w", pragma, err)
+		}
 	}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -127,9 +144,14 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		return fmt.Errorf("deleting existing chunks: %w", err)
 	}
 
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("preparing chunk insert: %w", err)
+	}
+	defer stmt.Close()
+
 	for _, chunk := range chunks {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?)`,
+		if _, err := stmt.ExecContext(ctx,
 			docID, chunk.Content, chunk.ChunkIndex, chunk.Embedding,
 		); err != nil {
 			return fmt.Errorf("inserting chunk %d: %w", chunk.ChunkIndex, err)
@@ -325,12 +347,7 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 
 // rerankByVector computes dot product scores for candidate rows and returns top results.
 func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchResult, error) {
-	type candidate struct {
-		result SearchResult
-		score  float32
-	}
-
-	var candidates []candidate
+	candidates := make(candidateHeap, 0, limit)
 	for rows.Next() {
 		var id int
 		var content string
@@ -343,7 +360,7 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]Sear
 
 		embedding := decodeFloat32(embeddingBytes)
 		score := dotProduct(queryEmbedding, embedding)
-		candidates = append(candidates, candidate{
+		candidate := scoredResult{
 			result: SearchResult{
 				DocumentPath: docPath,
 				ChunkContent: content,
@@ -351,7 +368,20 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]Sear
 				Score:        score,
 			},
 			score: score,
-		})
+		}
+
+		if limit <= 0 {
+			continue
+		}
+		if len(candidates) < limit {
+			heap.Push(&candidates, candidate)
+			continue
+		}
+		if candidate.score <= candidates[0].score {
+			continue
+		}
+		candidates[0] = candidate
+		heap.Fix(&candidates, 0)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -361,15 +391,34 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]Sear
 		return candidates[i].score > candidates[j].score
 	})
 
-	if limit > len(candidates) {
-		limit = len(candidates)
-	}
-
-	results := make([]SearchResult, limit)
-	for i := 0; i < limit; i++ {
+	results := make([]SearchResult, len(candidates))
+	for i := range candidates {
 		results[i] = candidates[i].result
 	}
 	return results, nil
+}
+
+type scoredResult struct {
+	result SearchResult
+	score  float32
+}
+
+type candidateHeap []scoredResult
+
+func (h candidateHeap) Len() int           { return len(h) }
+func (h candidateHeap) Less(i, j int) bool { return h[i].score < h[j].score }
+func (h candidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *candidateHeap) Push(x any) {
+	*h = append(*h, x.(scoredResult))
+}
+
+func (h *candidateHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 func EncodeFloat32(vec []float32) []byte {

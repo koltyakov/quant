@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -110,18 +111,65 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		return fmt.Errorf("scanning directory: %w", err)
 	}
 
-	for _, r := range results {
-		action, err := indexFile(ctx, cfg, store, embedder, extractor, r.Path, r.ModifiedAt)
-		if err != nil {
-			log.Printf("Error indexing %s: %v", r.Path, err)
+	type indexResult struct {
+		path   string
+		action indexAction
+		err    error
+	}
+
+	workers := cfg.IndexWorkers
+	if workers > len(results) && len(results) > 0 {
+		workers = len(results)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan scan.Result)
+	indexResults := make(chan indexResult, workers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range jobs {
+				action, err := indexFile(ctx, cfg, store, embedder, extractor, r.Path, r.ModifiedAt)
+				indexResults <- indexResult{path: r.Path, action: action, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		for _, r := range results {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				close(indexResults)
+				return
+			case jobs <- r:
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		close(indexResults)
+	}()
+
+	for result := range indexResults {
+		if result.err != nil {
+			log.Printf("Error indexing %s: %v", result.path, result.err)
 			continue
 		}
-		switch action {
+		switch result.action {
 		case indexUpdated:
-			log.Printf("Indexed: %s", r.Path)
+			log.Printf("Indexed: %s", result.path)
 		case indexRemoved:
-			log.Printf("Removed from index: %s", r.Path)
+			log.Printf("Removed from index: %s", result.path)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	docs, _ := store.ListDocuments(ctx)

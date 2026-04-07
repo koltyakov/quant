@@ -19,6 +19,9 @@ func TestDefault(t *testing.T) {
 	if cfg.EmbedModel != "nomic-embed-text" {
 		t.Errorf("expected nomic-embed-text, got %s", cfg.EmbedModel)
 	}
+	if cfg.IndexWorkers < 1 {
+		t.Errorf("expected positive index worker count, got %d", cfg.IndexWorkers)
+	}
 }
 
 func TestValidate_NoDir(t *testing.T) {
@@ -55,6 +58,8 @@ func TestApplyEnv(t *testing.T) {
 	defer os.Unsetenv("QUANT_EMBED_MODEL")
 	os.Setenv("QUANT_CHUNK_SIZE", "256")
 	defer os.Unsetenv("QUANT_CHUNK_SIZE")
+	os.Setenv("QUANT_INDEX_WORKERS", "6")
+	defer os.Unsetenv("QUANT_INDEX_WORKERS")
 
 	applyEnv(cfg)
 
@@ -64,12 +69,15 @@ func TestApplyEnv(t *testing.T) {
 	if cfg.ChunkSize != 256 {
 		t.Errorf("expected chunk size 256, got %d", cfg.ChunkSize)
 	}
+	if cfg.IndexWorkers != 6 {
+		t.Errorf("expected index workers 6, got %d", cfg.IndexWorkers)
+	}
 }
 
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
-	os.WriteFile(cfgPath, []byte("embed_model: all-minilm\nchunk_size: 1024\n"), 0644)
+	os.WriteFile(cfgPath, []byte("embed_model: all-minilm\nchunk_size: 1024\nindex_workers: 5\n"), 0644)
 
 	cfg := Default()
 	err := loadYAML(cfg, cfgPath)
@@ -81,5 +89,8 @@ func TestLoadYAML(t *testing.T) {
 	}
 	if cfg.ChunkSize != 1024 {
 		t.Errorf("expected chunk size 1024, got %d", cfg.ChunkSize)
+	}
+	if cfg.IndexWorkers != 5 {
+		t.Errorf("expected index workers 5, got %d", cfg.IndexWorkers)
 	}
 }

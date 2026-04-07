@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,7 @@ type Config struct {
 	EmbedModel   string    `yaml:"embed_model"`
 	ChunkSize    int       `yaml:"chunk_size"`
 	ChunkOverlap float64   `yaml:"chunk_overlap"`
+	IndexWorkers int       `yaml:"index_workers"`
 	ConfigFile   string    `yaml:"-"`
 }
 
@@ -38,6 +40,7 @@ func Default() *Config {
 		EmbedModel:   "nomic-embed-text",
 		ChunkSize:    512,
 		ChunkOverlap: 0.15,
+		IndexWorkers: defaultIndexWorkers(),
 	}
 }
 
@@ -61,6 +64,9 @@ func (c *Config) Validate() error {
 	if c.ChunkOverlap < 0 || c.ChunkOverlap >= 1 {
 		return fmt.Errorf("chunk_overlap must be between 0 and 0.99")
 	}
+	if c.IndexWorkers < 1 || c.IndexWorkers > 64 {
+		return fmt.Errorf("index_workers must be between 1 and 64")
+	}
 	return nil
 }
 
@@ -75,6 +81,7 @@ func Parse() (*Config, error) {
 	flag.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flag.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flag.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
+	flag.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
 	flag.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	flag.Parse()
@@ -105,6 +112,8 @@ func Parse() (*Config, error) {
 			fmt.Sscanf(f.Value.String(), "%d", &cfg.ChunkSize)
 		case "chunk-overlap":
 			fmt.Sscanf(f.Value.String(), "%f", &cfg.ChunkOverlap)
+		case "index-workers":
+			fmt.Sscanf(f.Value.String(), "%d", &cfg.IndexWorkers)
 		}
 	})
 
@@ -134,6 +143,7 @@ func loadYAML(cfg *Config, path string) error {
 		EmbedModel   string    `yaml:"embed_model"`
 		ChunkSize    int       `yaml:"chunk_size"`
 		ChunkOverlap float64   `yaml:"chunk_overlap"`
+		IndexWorkers int       `yaml:"index_workers"`
 	}
 
 	var parsed fileConfig
@@ -165,6 +175,9 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.ChunkOverlap != 0 {
 		cfg.ChunkOverlap = parsed.ChunkOverlap
 	}
+	if parsed.IndexWorkers != 0 {
+		cfg.IndexWorkers = parsed.IndexWorkers
+	}
 
 	return nil
 }
@@ -194,4 +207,18 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QUANT_CHUNK_OVERLAP"); v != "" {
 		fmt.Sscanf(v, "%f", &cfg.ChunkOverlap)
 	}
+	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.IndexWorkers)
+	}
+}
+
+func defaultIndexWorkers() int {
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 {
+		return 2
+	}
+	if workers > 8 {
+		return 8
+	}
+	return workers
 }
