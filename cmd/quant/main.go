@@ -29,6 +29,13 @@ const (
 	indexRemoved indexAction = "removed"
 )
 
+type indexer struct {
+	cfg       *config.Config
+	store     *index.Store
+	embedder  embed.Embedder
+	extractor extract.Extractor
+}
+
 func main() {
 	cfg, err := config.Parse()
 	if err != nil {
@@ -78,24 +85,33 @@ func main() {
 		log.Printf("Embedding metadata changed; rebuilding index from filesystem projection")
 	}
 
-	ignore, err := scan.LoadGitIgnore(cfg.WatchDir)
+	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading gitignore: %v\n", err)
 		os.Exit(1)
 	}
 
-	extractor := extract.NewRouter()
+	idx := &indexer{
+		cfg:       cfg,
+		store:     store,
+		embedder:  embedder,
+		extractor: extract.NewRouter(),
+	}
 
 	log.Printf("Starting initial scan of %s", cfg.WatchDir)
-	if err := initialSync(ctx, cfg, store, embedder, extractor, ignore); err != nil {
+	if err := idx.initialSync(ctx, gi); err != nil {
 		fmt.Fprintf(os.Stderr, "error during initial scan: %v\n", err)
 		os.Exit(1)
 	}
 
-	docCount, chunkCount, _ := store.Stats(ctx)
-	log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
+	docCount, chunkCount, err := store.Stats(ctx)
+	if err != nil {
+		log.Printf("Error fetching index stats: %v", err)
+	} else {
+		log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
+	}
 
-	watcher, err := watch.New(cfg.WatchDir, ignore)
+	watcher, err := watch.New(cfg.WatchDir, gi)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error starting watcher: %v\n", err)
 		os.Exit(1)
@@ -106,24 +122,34 @@ func main() {
 		}
 	}()
 
-	go watchLoop(ctx, cfg, store, embedder, extractor, watcher)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idx.watchLoop(ctx, watcher)
+	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder)
 	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
 
 	if err := mcpServer.Serve(ctx, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		cancel()
+		wg.Wait()
 		os.Exit(1)
 	}
+
+	cancel()
+	wg.Wait()
 }
 
-func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, gi *ignore.GitIgnore) error {
-	results, err := scan.Scan(cfg.WatchDir, gi)
+func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error {
+	results, err := scan.Scan(idx.cfg.WatchDir, gi)
 	if err != nil {
 		return fmt.Errorf("scanning directory: %w", err)
 	}
 
-	docs, err := store.ListDocuments(ctx)
+	docs, err := idx.store.ListDocuments(ctx)
 	if err != nil {
 		return fmt.Errorf("listing indexed documents: %w", err)
 	}
@@ -133,17 +159,23 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		docByPath[doc.Path] = &doc
 	}
 
+	type pendingItem struct {
+		result scan.Result
+		doc    *index.Document
+	}
+
 	scannedPaths := make(map[string]bool, len(results))
-	pending := make([]scan.Result, 0, len(results))
+	pending := make([]pendingItem, 0, len(results))
 	for _, r := range results {
 		scannedPaths[r.Path] = true
-		if !extractor.Supports(r.Path) {
+		if !idx.extractor.Supports(r.Path) {
 			continue
 		}
-		if doc := docByPath[r.Path]; doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
+		doc := docByPath[r.Path]
+		if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
 			continue
 		}
-		pending = append(pending, r)
+		pending = append(pending, pendingItem{result: r, doc: doc})
 	}
 
 	type indexResult struct {
@@ -152,7 +184,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		err    error
 	}
 
-	workers := cfg.IndexWorkers
+	workers := idx.cfg.IndexWorkers
 	if workers > len(pending) && len(pending) > 0 {
 		workers = len(pending)
 	}
@@ -160,7 +192,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		workers = 1
 	}
 
-	jobs := make(chan scan.Result)
+	jobs := make(chan pendingItem)
 	indexResults := make(chan indexResult, workers)
 
 	var wg sync.WaitGroup
@@ -168,22 +200,22 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for r := range jobs {
-				action, err := indexFile(ctx, cfg, store, embedder, extractor, r.Path, r.ModifiedAt)
-				indexResults <- indexResult{path: r.Path, action: action, err: err}
+			for item := range jobs {
+				action, err := idx.indexFileCore(ctx, item.result.Path, item.result.ModifiedAt, item.doc)
+				indexResults <- indexResult{path: item.result.Path, action: action, err: err}
 			}
 		}()
 	}
 
 	go func() {
-		for _, r := range pending {
+		for _, item := range pending {
 			select {
 			case <-ctx.Done():
 				close(jobs)
 				wg.Wait()
 				close(indexResults)
 				return
-			case jobs <- r:
+			case jobs <- item:
 			}
 		}
 		close(jobs)
@@ -209,7 +241,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 
 	for _, doc := range docs {
 		if !scannedPaths[doc.Path] {
-			if err := store.DeleteDocument(ctx, doc.Path); err != nil {
+			if err := idx.store.DeleteDocument(ctx, doc.Path); err != nil {
 				log.Printf("Error removing stale document %s: %v", doc.Path, err)
 				continue
 			}
@@ -220,7 +252,7 @@ func initialSync(ctx context.Context, cfg *config.Config, store *index.Store, em
 	return nil
 }
 
-func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, watcher *watch.Watcher) {
+func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -240,7 +272,7 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 					continue
 				}
 
-				action, err := indexFile(ctx, cfg, store, embedder, extractor, event.Path, info.ModTime())
+				action, err := idx.indexFile(ctx, event.Path, info.ModTime())
 				if err != nil {
 					log.Printf("Error indexing %s: %v", event.Path, err)
 					continue
@@ -253,7 +285,7 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 				}
 
 			case watch.Remove:
-				if err := store.DeleteDocument(ctx, event.Path); err != nil {
+				if err := idx.store.DeleteDocument(ctx, event.Path); err != nil {
 					log.Printf("Error removing %s: %v", event.Path, err)
 					continue
 				}
@@ -263,12 +295,15 @@ func watchLoop(ctx context.Context, cfg *config.Config, store *index.Store, embe
 	}
 }
 
-func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embedder embed.Embedder, extractor extract.Extractor, path string, modTime time.Time) (indexAction, error) {
-	if !extractor.Supports(path) {
+// indexFile is the full entry point used by watchLoop. It checks whether the
+// file type is supported, loads any existing document from the store, and
+// short-circuits when the modification time is unchanged.
+func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Time) (indexAction, error) {
+	if !idx.extractor.Supports(path) {
 		return indexNoop, nil
 	}
 
-	doc, err := store.GetDocumentByPath(ctx, path)
+	doc, err := idx.store.GetDocumentByPath(ctx, path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("loading indexed document: %w", err)
 	}
@@ -276,6 +311,14 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 		return indexNoop, nil
 	}
 
+	return idx.indexFileCore(ctx, path, modTime, doc)
+}
+
+// indexFileCore performs the actual indexing work: hashing, extracting,
+// chunking, embedding, and storing. It accepts an optional pre-loaded document
+// so that callers who already have it (e.g. initialSync) can skip the extra
+// database lookup.
+func (idx *indexer) indexFileCore(ctx context.Context, path string, modTime time.Time, doc *index.Document) (indexAction, error) {
 	hash, err := scan.FileHash(path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("hashing file: %w", err)
@@ -284,18 +327,18 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 		return indexNoop, nil
 	}
 
-	text, err := extractor.Extract(ctx, path)
+	text, err := idx.extractor.Extract(ctx, path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("extracting text: %w", err)
 	}
 
 	if text == "" {
-		return removeDocumentIfPresent(ctx, store, doc, path)
+		return removeDocumentIfPresent(ctx, idx.store, doc, path)
 	}
 
-	chunks := chunk.Split(text, cfg.ChunkSize, cfg.ChunkOverlap)
+	chunks := chunk.Split(text, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		return removeDocumentIfPresent(ctx, store, doc, path)
+		return removeDocumentIfPresent(ctx, idx.store, doc, path)
 	}
 
 	indexedDoc := &index.Document{
@@ -319,7 +362,7 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 			texts[i] = c.Content
 		}
 
-		embeddings, err := embedder.EmbedBatch(ctx, texts)
+		embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
 		if err != nil {
 			return indexNoop, fmt.Errorf("embedding chunks %d-%d: %w", batchStart, batchEnd-1, err)
 		}
@@ -336,7 +379,7 @@ func indexFile(ctx context.Context, cfg *config.Config, store *index.Store, embe
 		}
 	}
 
-	if err := store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
+	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
 		return indexNoop, err
 	}
 

@@ -105,13 +105,19 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 		t.Fatalf("unexpected error seeding document: %v", err)
 	}
 
-	cfg := &config.Config{ChunkSize: 128, ChunkOverlap: 0}
+	idx := &indexer{
+		cfg:       &config.Config{ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  fakeEmbedder{},
+		extractor: fakeExtractor{text: ""},
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("unexpected error stating file: %v", err)
 	}
 
-	action, err := indexFile(ctx, cfg, store, fakeEmbedder{}, fakeExtractor{text: ""}, path, info.ModTime())
+	action, err := idx.indexFile(ctx, path, info.ModTime())
 	if err != nil {
 		t.Fatalf("unexpected error indexing file: %v", err)
 	}
@@ -174,21 +180,26 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 		t.Fatalf("unexpected error seeding document: %v", err)
 	}
 
-	cfg := &config.Config{ChunkSize: 128, ChunkOverlap: 0}
-	embedder := &countingEmbedder{}
-	extractor := &countingExtractor{text: "replacement chunk"}
+	emb := &countingEmbedder{}
+	ext := &countingExtractor{text: "replacement chunk"}
+	idx := &indexer{
+		cfg:       &config.Config{ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  emb,
+		extractor: ext,
+	}
 
-	action, err := indexFile(ctx, cfg, store, embedder, extractor, path, info.ModTime())
+	action, err := idx.indexFile(ctx, path, info.ModTime())
 	if err != nil {
 		t.Fatalf("unexpected error indexing file: %v", err)
 	}
 	if action != indexNoop {
 		t.Fatalf("expected noop action, got %s", action)
 	}
-	if extractor.calls.Load() != 0 {
-		t.Fatalf("expected extractor to be skipped, got %d calls", extractor.calls.Load())
+	if ext.calls.Load() != 0 {
+		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
 	}
-	if embedder.batchCalls.Load() != 0 {
-		t.Fatalf("expected embedder to be skipped, got %d batch calls", embedder.batchCalls.Load())
+	if emb.batchCalls.Load() != 0 {
+		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
 	}
 }
