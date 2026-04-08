@@ -20,7 +20,7 @@ func (s *Server) registerTools() {
 			mcplib.Description("Maximum number of results (default: 5)"),
 		),
 		mcplib.WithNumber("threshold",
-			mcplib.Description("Minimum similarity score 0-1 (default: 0)"),
+			mcplib.Description("Minimum result score. Vector-only results use cosine-style scores; hybrid FTS+vector results use RRF ranks (default: 0)"),
 		),
 		mcplib.WithString("path",
 			mcplib.Description("Filter results to documents whose path starts with this prefix"),
@@ -82,8 +82,8 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 
 	output := ""
 	for i, r := range filtered {
-		output += fmt.Sprintf("--- Result %d (score: %.4f) ---\nFile: %s (chunk %d)\n%s\n\n",
-			i+1, r.Score, r.DocumentPath, r.ChunkIndex, r.ChunkContent)
+		output += fmt.Sprintf("--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n%s\n\n",
+			i+1, r.Score, r.ScoreKind, r.DocumentPath, r.ChunkIndex, r.ChunkContent)
 	}
 
 	return mcplib.NewToolResultText(output), nil

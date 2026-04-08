@@ -454,6 +454,55 @@ func TestDotProduct(t *testing.T) {
 	}
 }
 
+func TestDotProductEncoded(t *testing.T) {
+	query := NormalizeFloat32([]float32{3, 4})
+	encoded := EncodeFloat32([]float32{0.6, 0.8})
+
+	score := dotProductEncoded(query, encoded)
+	if score < 0.999 || score > 1.001 {
+		t.Fatalf("expected score near 1.0, got %f", score)
+	}
+}
+
+func TestStore_SearchResultScoreKinds(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	doc := &Document{Path: "/test/file.txt", Hash: "abc", ModifiedAt: time.Now()}
+	docID, _ := store.UpsertDocument(ctx, doc)
+
+	embedding := NormalizeFloat32([]float32{1, 0})
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: docID,
+		Content:    "hello world",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(embedding),
+	}); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+
+	hybrid, err := store.Search(ctx, "hello", embedding, 1, "")
+	if err != nil {
+		t.Fatalf("unexpected hybrid search error: %v", err)
+	}
+	if len(hybrid) != 1 || hybrid[0].ScoreKind != "rrf" {
+		t.Fatalf("expected hybrid result with rrf score kind, got %+v", hybrid)
+	}
+
+	vectorOnly, err := store.Search(ctx, "noftsresult", embedding, 1, "")
+	if err != nil {
+		t.Fatalf("unexpected vector search error: %v", err)
+	}
+	if len(vectorOnly) != 1 || vectorOnly[0].ScoreKind != "cosine" {
+		t.Fatalf("expected vector result with cosine score kind, got %+v", vectorOnly)
+	}
+}
+
 func TestStore_ReindexDocument_RollsBackOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")

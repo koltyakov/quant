@@ -453,15 +453,15 @@ func rerankRRF(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchRes
 			return nil, err
 		}
 		ftsRank++
-		embedding := decodeFloat32(embeddingBytes)
 		candidates = append(candidates, candidate{
 			result: SearchResult{
 				DocumentPath: docPath,
 				ChunkContent: content,
 				ChunkIndex:   chunkIndex,
+				ScoreKind:    "rrf",
 			},
 			ftsRank:     ftsRank,
-			vectorScore: dotProduct(queryEmbedding, embedding),
+			vectorScore: dotProductEncoded(queryEmbedding, embeddingBytes),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -516,14 +516,14 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]Sear
 			return nil, err
 		}
 
-		embedding := decodeFloat32(embeddingBytes)
-		score := dotProduct(queryEmbedding, embedding)
+		score := dotProductEncoded(queryEmbedding, embeddingBytes)
 		candidate := scoredResult{
 			result: SearchResult{
 				DocumentPath: docPath,
 				ChunkContent: content,
 				ChunkIndex:   chunkIndex,
 				Score:        score,
+				ScoreKind:    "cosine",
 			},
 			score: score,
 		}
@@ -622,6 +622,19 @@ func dotProduct(a, b []float32) float32 {
 	var dot float32
 	for i := range a {
 		dot += a[i] * b[i]
+	}
+	return dot
+}
+
+func dotProductEncoded(query []float32, encoded []byte) float32 {
+	if len(encoded) != len(query)*4 {
+		return 0
+	}
+
+	var dot float32
+	for i, q := range query {
+		v := math.Float32frombits(binary.LittleEndian.Uint32(encoded[i*4:]))
+		dot += q * v
 	}
 	return dot
 }

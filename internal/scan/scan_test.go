@@ -161,6 +161,42 @@ func TestScan_NestedGitIgnore(t *testing.T) {
 	}
 }
 
+func TestWalk_MatchesScanResults(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "*.log\n")
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), "hello")
+	mustWriteFile(t, filepath.Join(dir, "b.log"), "skip")
+	mustMkdirAll(t, filepath.Join(dir, "sub"))
+	mustWriteFile(t, filepath.Join(dir, "sub", "c.go"), "package main")
+
+	gi, err := LoadGitIgnore(dir)
+	if err != nil {
+		t.Fatalf("unexpected load error: %v", err)
+	}
+
+	results, err := Scan(dir, gi)
+	if err != nil {
+		t.Fatalf("unexpected scan error: %v", err)
+	}
+
+	var walked []Result
+	if err := Walk(dir, gi, func(result Result) error {
+		walked = append(walked, result)
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected walk error: %v", err)
+	}
+
+	if len(walked) != len(results) {
+		t.Fatalf("expected %d walked results, got %d", len(results), len(walked))
+	}
+	for i := range results {
+		if results[i].Path != walked[i].Path {
+			t.Fatalf("result %d: expected %s, got %s", i, results[i].Path, walked[i].Path)
+		}
+	}
+}
+
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {

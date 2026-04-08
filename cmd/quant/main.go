@@ -232,11 +232,6 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		return fmt.Errorf("loading gitignore: %w", err)
 	}
 
-	results, err := scan.Scan(idx.cfg.WatchDir, gi)
-	if err != nil {
-		return fmt.Errorf("scanning directory: %w", err)
-	}
-
 	docs, err := idx.store.ListDocuments(ctx)
 	if err != nil {
 		return fmt.Errorf("listing indexed documents: %w", err)
@@ -262,22 +257,25 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		doc    *index.Document
 	}
 
-	scannedPaths := make(map[string]bool, len(results))
-	pending := make([]pendingItem, 0, len(results))
-	for _, r := range results {
+	var pending []pendingItem
+	scannedPaths := make(map[string]bool)
+	if err := scan.Walk(idx.cfg.WatchDir, gi, func(r scan.Result) error {
 		key, err := documentKey(idx.cfg.WatchDir, r.Path)
 		if err != nil {
 			return fmt.Errorf("computing document key for %s: %w", r.Path, err)
 		}
 		scannedPaths[key] = true
 		if !idx.extractor.Supports(r.Path) {
-			continue
+			return nil
 		}
 		doc := docByPath[key]
 		if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
-			continue
+			return nil
 		}
 		pending = append(pending, pendingItem{key: key, result: r, doc: doc})
+		return nil
+	}); err != nil {
+		return fmt.Errorf("scanning directory: %w", err)
 	}
 
 	type indexResult struct {
@@ -342,10 +340,15 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		return err
 	}
 
+	reconcileMatcher, err := idx.newReconcileMatcher()
+	if err != nil {
+		return err
+	}
+
 	for _, doc := range docs {
 		if !scannedPaths[doc.Path] {
 			absPath := filepath.Join(idx.cfg.WatchDir, doc.Path)
-			if shouldIndex, err := idx.shouldIndexExistingPath(absPath); err != nil {
+			if shouldIndex, err := idx.shouldIndexExistingPath(reconcileMatcher, absPath); err != nil {
 				log.Printf("Error reconciling stale document %s: %v", doc.Path, err)
 				continue
 			} else if shouldIndex {
@@ -524,7 +527,15 @@ func (idx *indexer) loadDocument(ctx context.Context, key string, doc *index.Doc
 	return doc, nil
 }
 
-func (idx *indexer) shouldIndexExistingPath(path string) (bool, error) {
+func (idx *indexer) newReconcileMatcher() (*scan.GitIgnoreMatcher, error) {
+	rootIgnore, err := scan.LoadGitIgnore(idx.cfg.WatchDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading gitignore: %w", err)
+	}
+	return scan.NewGitIgnoreMatcher(idx.cfg.WatchDir, rootIgnore), nil
+}
+
+func (idx *indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -538,12 +549,6 @@ func (idx *indexer) shouldIndexExistingPath(path string) (bool, error) {
 	if scan.IsHiddenName(filepath.Base(path)) || !idx.extractor.Supports(path) {
 		return false, nil
 	}
-
-	rootIgnore, err := scan.LoadGitIgnore(idx.cfg.WatchDir)
-	if err != nil {
-		return false, fmt.Errorf("loading gitignore: %w", err)
-	}
-	matcher := scan.NewGitIgnoreMatcher(idx.cfg.WatchDir, rootIgnore)
 
 	relDir, err := filepath.Rel(idx.cfg.WatchDir, filepath.Dir(path))
 	if err != nil {

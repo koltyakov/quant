@@ -29,4 +29,5 @@ type SearchResult struct {
 	ChunkContent string
 	ChunkIndex   int
 	Score        float32
+	ScoreKind    string
 }

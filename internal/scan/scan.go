@@ -17,13 +17,25 @@ type Result struct {
 	ModifiedAt time.Time
 }
 
+type Visitor func(Result) error
+
 // Scan walks the directory tree, respecting .gitignore files at every level
 // and skipping hidden files/directories.
 func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 	var results []Result
+	err := Walk(dir, gi, func(result Result) error {
+		results = append(results, result)
+		return nil
+	})
+	return results, err
+}
+
+// Walk streams file results to visit without materializing the full result set.
+// It respects .gitignore files at every level and skips hidden files/directories.
+func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 	matcher := NewGitIgnoreMatcher(dir, gi)
 
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -55,14 +67,11 @@ func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 			return nil
 		}
 
-		results = append(results, Result{
+		return visit(Result{
 			Path:       path,
 			ModifiedAt: info.ModTime(),
 		})
-		return nil
 	})
-
-	return results, err
 }
 
 // matchesAnyGitIgnore checks the path against all applicable .gitignore matchers
