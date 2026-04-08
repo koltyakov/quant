@@ -8,17 +8,36 @@ A lightweight, developer-focused RAG index exposed as an MCP server. Point it at
 
 The index is a projection of the filesystem. Files added, changed, or removed on disk are reflected in the index. There is no separate feed mode, manual injection path, or index-only delete API.
 
+In practice, `quant` is usually most useful as a project-scoped MCP, not a single global MCP for everything on your machine. A common setup is one `quant` server per repository, documentation set, or research workspace. It also works well as a named MCP for a domain-specific slice of context, such as architecture docs, product research, RFCs, customer notes, or other curated document sets you want available to an agent for a specific task. That makes it especially useful for research-heavy workflows where you want to connect a bounded corpus into Claude Desktop, the Codex app, Claude Code, or another MCP client and ask focused research questions against your own material.
+
 Zero CGO. Pure Go.
 
-## Requirements
+## Runtime requirements
 
-- Go 1.26.1+
+- A `quant` binary for your platform, either downloaded from GitHub Releases or built from source
+- A coding agent or other MCP-capable client of your choice, such as Claude, Codex, OpenCode, or GitHub Copilot
 - [Ollama](https://ollama.ai) running locally with an embedding model pulled:
   ```
   ollama pull nomic-embed-text
   ```
 
-## Build
+### Hardware guidance for Ollama
+
+These are practical recommendations, not hard requirements. Exact needs depend on your embedding model, document sizes, and how much concurrent indexing you run.
+
+- Best default on macOS: Apple Silicon with 16 GB unified memory or more is a strong general-purpose local setup for Ollama
+- `nomic-embed-text` class models: 8 GB RAM is a workable floor, but 16 GB is a better default for smoother local indexing
+- Larger embedding models such as `mxbai-embed-large`: plan for at least 16 GB RAM, often more if you also run other local tools
+- GPU guidance: a discrete GPU can help on Linux or Windows, or for larger models and heavier concurrent indexing, but it is optional for typical `nomic-embed-text` usage
+- CPU: modern 4-core or better is a reasonable baseline for CPU-heavy local-only use
+- Storage: SSD strongly recommended because model startup, SQLite I/O, and rescans are noticeably slower on spinning disks
+- If Ollama runs on another machine and `quant` points at it via `--embed-url`, these hardware constraints apply to the Ollama host, not necessarily the MCP client machine
+
+## Build from source
+
+You only need Go if you are building `quant` yourself instead of using a release binary.
+
+- Go 1.26.1+
 
 ```
 make build
@@ -86,6 +105,16 @@ chunk_overlap: 0.15
 index_workers: 4
 ```
 
+## Recommended Deployment Model
+
+`quant` is typically better when scoped to the work you are doing right now instead of acting as one giant universal index.
+
+- Per project: one server per repository or docs folder
+- Per domain: one server for a bounded area such as `frontend-docs`, `architecture-rfcs`, `research-notes`, or `customer-evidence`
+- Per research set: one server over a hand-picked folder of papers, exports, meeting notes, or source material for a specific investigation
+
+This keeps tool selection clearer for the agent, reduces irrelevant retrieval noise, and makes it easier to control which documents are actually in scope for a task.
+
 ## Embedding Model Choice
 
 Current code supports Ollama as the embedding backend, but the config names are generic so another backend can be added later without renaming the whole surface.
@@ -108,15 +137,74 @@ If you later add a hosted backend, the cheapest widely-used OpenAI embedding opt
 
 `search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity.
 
+### Research workflow
+
+`quant` is a strong fit for research tasks. Point it at a folder of papers, notes, interview transcripts, exported docs, or RFCs, connect it to an MCP-capable client such as Claude Desktop or the Codex app, and ask research questions against that specific corpus instead of relying on a single broad workspace index.
+
 ### Claude Code config
 
-Add to your Claude Code MCP settings:
+For Claude Code, project-scoped MCPs are usually the right default:
+
+```bash
+claude mcp add --transport stdio --scope project quant -- quant --dir /path/to/project
+```
+
+Or commit a project-level `.mcp.json`:
+
 ```json
 {
   "mcpServers": {
     "quant": {
+      "type": "stdio",
       "command": "quant",
       "args": ["--dir", "/path/to/project"]
+    }
+  }
+}
+```
+
+### GitHub Copilot config
+
+For VS Code with GitHub Copilot Agent mode, add a project-level `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "quant": {
+      "type": "stdio",
+      "command": "quant",
+      "args": ["--dir", "/path/to/project"]
+    }
+  }
+}
+```
+
+### Codex config
+
+Add a local stdio MCP with the Codex CLI:
+
+```bash
+codex mcp add quant -- quant --dir /path/to/project
+```
+
+If you prefer a domain-specific name:
+
+```bash
+codex mcp add research-notes -- quant --dir /path/to/research-notes
+```
+
+### OpenCode config
+
+Add a local MCP in `opencode.json` or `opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "quant": {
+      "type": "local",
+      "command": ["quant", "--dir", "/path/to/project"],
+      "enabled": true
     }
   }
 }
