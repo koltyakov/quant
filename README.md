@@ -1,5 +1,9 @@
 # quant
 
+<p align="center">
+  <img src="./assets/logo.png" alt="expose logo" width="220" />
+</p>
+
 A lightweight, developer-focused RAG index exposed as an MCP server. Point it at a folder and it watches the filesystem, extracts supported files, chunks them with basic structure awareness, embeds them via Ollama, stores them in SQLite, and serves semantic search over MCP.
 
 The index is a projection of the filesystem. Files added, changed, or removed on disk are reflected in the index. There is no separate feed mode, manual injection path, or index-only delete API.
@@ -151,53 +155,18 @@ Unsupported files are skipped.
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph FS[Filesystem Projection]
-        A[Watch dir]
-        B[Initial scan]
-        C[fsnotify watcher]
-        A --> B
-        A --> C
-    end
+flowchart TD
+    WD([Watched directory]) --> INDEX[Initial scan and watch updates]
+    INDEX --> PROC[Extract, chunk, and embed]
+    PROC --> OLLAMA[/Ollama API/]
+    PROC --> DB[(SQLite index)]
 
-    subgraph INGEST[Ingestion]
-        D[Extract text]
-        E[Structure-aware chunking]
-        F[Embed via configured backend]
-        G[Transactional reindex]
-        D --> E --> F --> G
-    end
-
-    subgraph DB[SQLite Index]
-        H[(documents)]
-        I[(chunks)]
-        J[(chunks_fts)]
-        K[(embedding_metadata)]
-    end
-
-    subgraph QUERY[Retrieval]
-        L[Embed query]
-        M[FTS5 candidate search]
-        N[Vector rerank]
-        O[MCP client]
-        L --> M
-        M --> N
-        N --> O
-    end
-
-    FS --> INGEST
-    INGEST --> DB
-    DB --> QUERY
-
-    B --> D
-    C --> D
-    G --> H
-    G --> I
-    G --> J
-    G --> K
-    J --> M
-    I --> N
-    K -. model + dims .-> L
+    CLIENT([MCP client]) --> MCP[MCP server]
+    MCP --> QUERY[Embed query]
+    QUERY --> OLLAMA
+    MCP --> SEARCH[Hybrid search]
+    DB --> SEARCH
+    SEARCH --> MCP
 ```
 
 - **No CGO** - uses `modernc.org/sqlite` (pure Go SQLite)
