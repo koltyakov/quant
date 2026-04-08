@@ -13,6 +13,7 @@ import (
 	"github.com/andrew/quant/internal/config"
 	"github.com/andrew/quant/internal/index"
 	"github.com/andrew/quant/internal/scan"
+	"github.com/andrew/quant/internal/watch"
 )
 
 type fakeEmbedder struct{}
@@ -360,6 +361,58 @@ func TestIndexFile_CoalescesConcurrentRequests(t *testing.T) {
 	}
 	if emb.batchCalls.Load() != 1 {
 		t.Fatalf("expected one embedding batch call, got %d", emb.batchCalls.Load())
+	}
+}
+
+func TestHandleWatchEvent_QueuesLiveIndexWork(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	ext := &blockingExtractor{
+		text:    "hello world",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  ext,
+		pathStates: make(map[string]*pathState),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	idx.startLiveIndexWorkers(ctx, &wg)
+	t.Cleanup(func() {
+		close(ext.release)
+		cancel()
+		wg.Wait()
+	})
+
+	start := time.Now()
+	idx.handleWatchEvent(ctx, watch.Event{Path: path, Op: watch.Write})
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected watch event handling to enqueue quickly, took %s", elapsed)
+	}
+
+	select {
+	case <-ext.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for live worker to start extraction")
 	}
 }
 

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"os"
@@ -19,7 +20,7 @@ type Server struct {
 	mcp      *mcpserver.MCPServer
 
 	embCacheMu sync.Mutex
-	embCache   map[string][]float32
+	embCache   *embeddingLRU
 }
 
 const embCacheMaxSize = 128
@@ -29,13 +30,66 @@ func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder) 
 		cfg:      cfg,
 		store:    store,
 		embedder: embedder,
-		embCache: make(map[string][]float32, embCacheMaxSize),
+		embCache: newEmbeddingLRU(embCacheMaxSize),
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", "1.0.0")
 	s.registerTools()
 
 	return s
+}
+
+type embeddingCacheEntry struct {
+	key   string
+	value []float32
+}
+
+type embeddingLRU struct {
+	capacity int
+	ll       *list.List
+	items    map[string]*list.Element
+}
+
+func newEmbeddingLRU(capacity int) *embeddingLRU {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &embeddingLRU{
+		capacity: capacity,
+		ll:       list.New(),
+		items:    make(map[string]*list.Element, capacity),
+	}
+}
+
+func (c *embeddingLRU) Get(key string) ([]float32, bool) {
+	elem, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	c.ll.MoveToFront(elem)
+	return elem.Value.(*embeddingCacheEntry).value, true
+}
+
+func (c *embeddingLRU) Put(key string, value []float32) {
+	if elem, ok := c.items[key]; ok {
+		entry := elem.Value.(*embeddingCacheEntry)
+		entry.value = value
+		c.ll.MoveToFront(elem)
+		return
+	}
+
+	elem := c.ll.PushFront(&embeddingCacheEntry{key: key, value: value})
+	c.items[key] = elem
+	if c.ll.Len() <= c.capacity {
+		return
+	}
+
+	tail := c.ll.Back()
+	if tail == nil {
+		return
+	}
+	c.ll.Remove(tail)
+	delete(c.items, tail.Value.(*embeddingCacheEntry).key)
 }
 
 type shutdownable interface {

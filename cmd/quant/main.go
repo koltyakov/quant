@@ -36,6 +36,8 @@ type indexer struct {
 	embedder  embed.Embedder
 	extractor extract.Extractor
 
+	liveJobs chan liveIndexRequest
+
 	pathMu     sync.Mutex
 	pathStates map[string]*pathState
 
@@ -51,6 +53,11 @@ type pathState struct {
 
 	hasModTime   bool
 	requestedMod time.Time
+}
+
+type liveIndexRequest struct {
+	path    string
+	modTime time.Time
 }
 
 func main() {
@@ -128,6 +135,8 @@ func main() {
 	}()
 
 	var wg sync.WaitGroup
+	idx.startLiveIndexWorkers(ctx, &wg)
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -284,13 +293,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		err    error
 	}
 
-	workers := idx.cfg.IndexWorkers
-	if workers > len(pending) && len(pending) > 0 {
-		workers = len(pending)
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	workers := idx.workerCount(len(pending))
 
 	jobs := make(chan pendingItem)
 	indexResults := make(chan indexResult, workers)
@@ -374,6 +377,80 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (idx *indexer) workerCount(maxPending int) int {
+	workers := idx.cfg.IndexWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	if maxPending > 0 && workers > maxPending {
+		workers = maxPending
+	}
+	return workers
+}
+
+func (idx *indexer) liveQueueSize() int {
+	size := idx.workerCount(0) * 8
+	if size < 16 {
+		size = 16
+	}
+	if size > 512 {
+		size = 512
+	}
+	return size
+}
+
+func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGroup) {
+	if idx.liveJobs == nil {
+		idx.liveJobs = make(chan liveIndexRequest, idx.liveQueueSize())
+	}
+
+	workers := idx.workerCount(0)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case req := <-idx.liveJobs:
+					idx.processLiveIndexRequest(ctx, req)
+				}
+			}
+		}()
+	}
+}
+
+func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime time.Time) bool {
+	if idx.liveJobs == nil {
+		idx.processLiveIndexRequest(ctx, liveIndexRequest{path: path, modTime: modTime})
+		return true
+	}
+
+	select {
+	case idx.liveJobs <- liveIndexRequest{path: path, modTime: modTime}:
+		return true
+	default:
+		log.Printf("warning: live index queue full for %s; scheduling resync", path)
+		idx.requestResync(ctx)
+		return false
+	}
+}
+
+func (idx *indexer) processLiveIndexRequest(ctx context.Context, req liveIndexRequest) {
+	action, err := idx.indexFile(ctx, req.path, req.modTime)
+	if err != nil {
+		log.Printf("Error indexing %s: %v", req.path, err)
+		return
+	}
+	switch action {
+	case indexUpdated:
+		log.Printf("Indexed: %s", req.path)
+	case indexRemoved:
+		log.Printf("Removed from index: %s", req.path)
+	}
 }
 
 func (idx *indexer) beginPathSync(key string, modTime *time.Time) (uint64, bool) {
@@ -574,61 +651,53 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 			if !ok {
 				return
 			}
+			idx.handleWatchEvent(ctx, event)
+		}
+	}
+}
 
-			switch event.Op {
-			case watch.Resync:
-				idx.requestResync(ctx)
+func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
+	switch event.Op {
+	case watch.Resync:
+		idx.requestResync(ctx)
 
-			case watch.Create, watch.Write:
-				info, err := os.Stat(event.Path)
-				if err != nil {
-					if os.IsNotExist(err) {
-						continue
-					}
-					log.Printf("Error stating %s: %v", event.Path, err)
-					continue
-				}
-				if info.IsDir() {
-					continue
-				}
+	case watch.Create, watch.Write:
+		info, err := os.Stat(event.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return
+			}
+			log.Printf("Error stating %s: %v", event.Path, err)
+			return
+		}
+		if info.IsDir() {
+			return
+		}
+		idx.enqueueLiveIndex(ctx, event.Path, info.ModTime())
 
-				action, err := idx.indexFile(ctx, event.Path, info.ModTime())
-				if err != nil {
-					log.Printf("Error indexing %s: %v", event.Path, err)
-					continue
-				}
-				switch action {
-				case indexUpdated:
-					log.Printf("Indexed: %s", event.Path)
-				case indexRemoved:
-					log.Printf("Removed from index: %s", event.Path)
-				}
-
-			case watch.Remove:
-				key, err := documentKey(idx.cfg.WatchDir, event.Path)
-				if err != nil {
-					log.Printf("Error removing %s: %v", event.Path, err)
-					continue
-				}
-				if event.IsDir {
-					idx.invalidatePrefix(key)
-					if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
-						log.Printf("Error removing directory %s: %v", event.Path, err)
-						continue
-					}
-				} else {
-					action, err := idx.syncDocument(ctx, key, event.Path, nil, nil)
-					if err != nil {
-						log.Printf("Error removing %s: %v", event.Path, err)
-						continue
-					}
-					if action == indexNoop {
-						continue
-					}
-				}
-				log.Printf("Removed from index: %s", event.Path)
+	case watch.Remove:
+		key, err := documentKey(idx.cfg.WatchDir, event.Path)
+		if err != nil {
+			log.Printf("Error removing %s: %v", event.Path, err)
+			return
+		}
+		if event.IsDir {
+			idx.invalidatePrefix(key)
+			if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
+				log.Printf("Error removing directory %s: %v", event.Path, err)
+				return
+			}
+		} else {
+			action, err := idx.syncDocument(ctx, key, event.Path, nil, nil)
+			if err != nil {
+				log.Printf("Error removing %s: %v", event.Path, err)
+				return
+			}
+			if action == indexNoop {
+				return
 			}
 		}
+		log.Printf("Removed from index: %s", event.Path)
 	}
 }
 

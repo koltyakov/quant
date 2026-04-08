@@ -128,7 +128,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
 	s.embCacheMu.Lock()
-	if vec, ok := s.embCache[text]; ok {
+	if vec, ok := s.embCache.Get(text); ok {
 		s.embCacheMu.Unlock()
 		return vec, nil
 	}
@@ -141,11 +141,7 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 	vec = index.NormalizeFloat32(vec)
 
 	s.embCacheMu.Lock()
-	if len(s.embCache) >= embCacheMaxSize {
-		// Evict all entries when full (simple reset strategy).
-		s.embCache = make(map[string][]float32, embCacheMaxSize)
-	}
-	s.embCache[text] = vec
+	s.embCache.Put(text, vec)
 	s.embCacheMu.Unlock()
 
 	return vec, nil
