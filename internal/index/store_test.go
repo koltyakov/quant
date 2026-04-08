@@ -509,29 +509,37 @@ func TestStore_EnsureEmbeddingMetadata_ResetOnChange(t *testing.T) {
 	}
 }
 
-func TestBuildFTSQuery_Basic(t *testing.T) {
+func TestBuildFTSQueries_Basic(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
+		input   string
+		wantAND string
+		wantOR  string
 	}{
-		{"hello world", "hello OR world"},
-		{"", ""},
-		{"a b c", "a OR b OR c"}, // single-char tokens now included
-		{"hello hello", "hello"},
+		{"hello world", "hello AND world", "hello OR world"},
+		{"", "", ""},
+		{"a b c", "a AND b AND c", "a OR b OR c"},
+		{"hello hello", "hello", "hello"}, // single token, AND == OR
+		{"single", "single", "single"},
 	}
 
 	for _, tt := range tests {
-		got := buildFTSQuery(tt.input)
-		if got != tt.want {
-			t.Errorf("buildFTSQuery(%q) = %q, want %q", tt.input, got, tt.want)
+		gotAND, gotOR := buildFTSQueries(tt.input)
+		if gotAND != tt.wantAND {
+			t.Errorf("buildFTSQueries(%q) AND = %q, want %q", tt.input, gotAND, tt.wantAND)
+		}
+		if gotOR != tt.wantOR {
+			t.Errorf("buildFTSQueries(%q) OR = %q, want %q", tt.input, gotOR, tt.wantOR)
 		}
 	}
 }
 
-func TestBuildFTSQuery_Phrases(t *testing.T) {
-	got := buildFTSQuery(`"exact match" other`)
-	if got != `"exact match" OR other` {
-		t.Errorf("unexpected FTS query with phrase: %q", got)
+func TestBuildFTSQueries_Phrases(t *testing.T) {
+	gotAND, gotOR := buildFTSQueries(`"exact match" other`)
+	if gotAND != `"exact match" AND other` {
+		t.Errorf("unexpected AND query with phrase: %q", gotAND)
+	}
+	if gotOR != `"exact match" OR other` {
+		t.Errorf("unexpected OR query with phrase: %q", gotOR)
 	}
 }
 

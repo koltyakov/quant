@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
+	"os"
 	"regexp"
 	"runtime"
 	"sort"
@@ -17,10 +19,56 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	dbPath   string
+	backup   string // non-empty if a pre-existing DB was backed up due to migration failure
 }
 
+// NewStore opens (or creates) a SQLite database at dbPath.
+// If the database exists but migration fails, the old file is backed up and a
+// fresh database is created. Call RemoveBackup after re-indexing completes.
 func NewStore(dbPath string) (*Store, error) {
+	s, err := openStore(dbPath)
+	if err == nil {
+		return s, nil
+	}
+
+	// If the file doesn't exist the error is not recoverable by recreating.
+	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+		return nil, err
+	}
+
+	// Back up the broken DB and start fresh.
+	backupPath := dbPath + ".bak"
+	log.Printf("Migration failed (%v); backing up existing database to %s", err, backupPath)
+
+	// Remove stale backup if present, then rename current DB + WAL/SHM files.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(backupPath + suffix)
+		_ = os.Rename(dbPath+suffix, backupPath+suffix)
+	}
+
+	s, err = openStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("creating fresh database after backup: %w", err)
+	}
+	s.backup = backupPath
+	return s, nil
+}
+
+// RemoveBackup deletes the backup created during NewStore, if any.
+func (s *Store) RemoveBackup() {
+	if s.backup == "" {
+		return
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Remove(s.backup + suffix)
+	}
+	log.Printf("Removed database backup %s", s.backup)
+	s.backup = ""
+}
+
+func openStore(dbPath string) (*Store, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
@@ -35,13 +83,15 @@ func NewStore(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(conns)
 	db.SetMaxIdleConns(conns / 2)
 
-	s := &Store{db: db}
+	s := &Store{db: db, dbPath: dbPath}
 	for _, pragma := range []string{
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA synchronous = NORMAL`,
 		`PRAGMA temp_store = MEMORY`,
 		`PRAGMA busy_timeout = 5000`,
 		`PRAGMA foreign_keys = ON`,
+		`PRAGMA mmap_size = 268435456`,
+		`PRAGMA cache_size = -64000`,
 	} {
 		if _, err := s.db.Exec(pragma); err != nil {
 			_ = db.Close()
@@ -85,7 +135,8 @@ func (s *Store) migrate() error {
 	CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 		content,
 		content='chunks',
-		content_rowid='id'
+		content_rowid='id',
+		tokenize='porter unicode61'
 	);
 	CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
 		INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
@@ -101,6 +152,7 @@ func (s *Store) migrate() error {
 	_, err := s.db.Exec(schema)
 	return err
 }
+
 
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
 	var id int64
@@ -261,16 +313,28 @@ func (s *Store) Stats(ctx context.Context) (docCount int, chunkCount int, err er
 
 // Search performs hybrid search combining FTS5 keyword prefilter with vector reranking.
 // pathPrefix optionally restricts results to documents whose path starts with the given prefix.
-// If FTS produces no candidates, a vector-only fallback scans all matching chunks.
+// It tries AND-joined FTS first (tighter match), falls back to OR, then to pure vector scan.
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 
-	// Try FTS-based hybrid search first.
-	ftsQuery := buildFTSQuery(query)
-	if ftsQuery != "" {
-		results, err := s.searchFTS(ctx, ftsQuery, queryEmbedding, limit, pathPrefix)
+	andQuery, orQuery := buildFTSQueries(query)
+
+	// Try AND-joined FTS first (all terms must match).
+	if andQuery != "" {
+		results, err := s.searchFTS(ctx, andQuery, queryEmbedding, limit, pathPrefix)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) > 0 {
+			return results, nil
+		}
+	}
+
+	// Fall back to OR-joined FTS (any term matches).
+	if orQuery != "" && orQuery != andQuery {
+		results, err := s.searchFTS(ctx, orQuery, queryEmbedding, limit, pathPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -283,7 +347,10 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 	return s.searchVector(ctx, queryEmbedding, limit, pathPrefix)
 }
 
-// searchFTS performs keyword-prefiltered search with vector reranking.
+// searchFTS performs keyword-prefiltered search with reciprocal rank fusion.
+// Candidates are retrieved ordered by BM25 (giving each an FTS rank), then
+// scored by vector similarity (giving a vector rank). The final score combines
+// both via RRF: score = 1/(k+ftsRank) + 1/(k+vectorRank), with k=60.
 func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	candidateLimit := limit * 20
 	if candidateLimit < 50 {
@@ -320,7 +387,7 @@ func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding [
 	}
 	defer func() { _ = rows.Close() }()
 
-	return rerankByVector(rows, queryEmbedding, limit)
+	return rerankRRF(rows, queryEmbedding, limit)
 }
 
 // searchVector performs a brute-force vector similarity search over all matching chunks.
@@ -348,6 +415,77 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	defer func() { _ = rows.Close() }()
 
 	return rerankByVector(rows, queryEmbedding, limit)
+}
+
+// rerankRRF combines FTS rank (row order from BM25) with vector similarity rank
+// using Reciprocal Rank Fusion: score = 1/(k+ftsRank) + 1/(k+vectorRank), k=60.
+func rerankRRF(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchResult, error) {
+	type candidate struct {
+		result      SearchResult
+		ftsRank     int
+		vectorScore float32
+	}
+
+	var candidates []candidate
+	ftsRank := 0
+	for rows.Next() {
+		var id int
+		var content string
+		var chunkIndex int
+		var embeddingBytes []byte
+		var docPath string
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
+			return nil, err
+		}
+		ftsRank++
+		embedding := decodeFloat32(embeddingBytes)
+		candidates = append(candidates, candidate{
+			result: SearchResult{
+				DocumentPath: docPath,
+				ChunkContent: content,
+				ChunkIndex:   chunkIndex,
+			},
+			ftsRank:     ftsRank,
+			vectorScore: dotProduct(queryEmbedding, embedding),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Assign vector ranks by sorting by vector score descending.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].vectorScore > candidates[j].vectorScore
+	})
+	vectorRanks := make([]int, len(candidates))
+	for i := range candidates {
+		vectorRanks[i] = i + 1
+	}
+
+	// Compute RRF scores and pick top-k via heap.
+	const k = 60
+	top := make(candidateHeap, 0, limit)
+	for i := range candidates {
+		rrf := 1.0/float32(k+candidates[i].ftsRank) + 1.0/float32(k+vectorRanks[i])
+		candidates[i].result.Score = rrf
+		sr := scoredResult{result: candidates[i].result, score: rrf}
+		if len(top) < limit {
+			heap.Push(&top, sr)
+		} else if rrf > top[0].score {
+			top[0] = sr
+			heap.Fix(&top, 0)
+		}
+	}
+
+	sort.Slice(top, func(i, j int) bool { return top[i].score > top[j].score })
+	results := make([]SearchResult, len(top))
+	for i := range top {
+		results[i] = top[i].result
+	}
+	return results, nil
 }
 
 // rerankByVector computes dot product scores for candidate rows and returns top results.
@@ -581,10 +719,10 @@ func (s *Store) resetIndex(ctx context.Context) error {
 
 var ftsTokenPattern = regexp.MustCompile(`[\pL\pN_]+`)
 
-// buildFTSQuery converts a natural-language query into an FTS5 query.
-// Supports quoted phrases ("exact match"), preserves single-char tokens for code search,
-// and combines terms with OR.
-func buildFTSQuery(query string) string {
+// buildFTSQueries converts a natural-language query into AND and OR FTS5 queries.
+// The AND query requires all terms to match (tighter); the OR query matches any term.
+// When there is only one token, both queries are identical.
+func buildFTSQueries(query string) (andQuery, orQuery string) {
 	// Extract quoted phrases first.
 	var phrases []string
 	remaining := query
@@ -626,9 +764,15 @@ func buildFTSQuery(query string) string {
 	}
 
 	if len(tokens) == 0 {
-		return ""
+		return "", ""
 	}
 
 	sort.Strings(tokens)
-	return strings.Join(tokens, " OR ")
+	orQuery = strings.Join(tokens, " OR ")
+	if len(tokens) == 1 {
+		return orQuery, orQuery
+	}
+	andQuery = strings.Join(tokens, " AND ")
+	return andQuery, orQuery
 }
+

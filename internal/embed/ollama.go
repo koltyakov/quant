@@ -114,6 +114,16 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][
 				return o.embedBatch(ctx, truncated, depth+1)
 			}
 		}
+		// Retry transient server errors with exponential backoff.
+		if resp.StatusCode >= 500 && depth < 4 {
+			backoff := time.Duration(1<<depth) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			return o.embedBatch(ctx, texts, depth+1)
+		}
 		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
 	}
 

@@ -59,11 +59,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		pathPrefix = v
 	}
 
-	queryEmbedding, err := s.embedder.Embed(ctx, query)
+	queryEmbedding, err := s.cachedEmbed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embedding query: %w", err)
 	}
-	queryEmbedding = index.NormalizeFloat32(queryEmbedding)
 
 	results, err := s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
 	if err != nil {
@@ -125,6 +124,31 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	)
 
 	return mcplib.NewToolResultText(output), nil
+}
+
+func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
+	s.embCacheMu.Lock()
+	if vec, ok := s.embCache[text]; ok {
+		s.embCacheMu.Unlock()
+		return vec, nil
+	}
+	s.embCacheMu.Unlock()
+
+	vec, err := s.embedder.Embed(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	vec = index.NormalizeFloat32(vec)
+
+	s.embCacheMu.Lock()
+	if len(s.embCache) >= embCacheMaxSize {
+		// Evict all entries when full (simple reset strategy).
+		s.embCache = make(map[string][]float32, embCacheMaxSize)
+	}
+	s.embCache[text] = vec
+	s.embCacheMu.Unlock()
+
+	return vec, nil
 }
 
 func formatBytes(b int64) string {

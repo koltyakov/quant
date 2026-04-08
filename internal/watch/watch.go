@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -166,6 +167,7 @@ func (w *Watcher) debounce(path string, op Op) {
 		select {
 		case w.events <- Event{Path: path, Op: op}:
 		default:
+			log.Printf("warning: watcher event dropped for %s (channel full)", path)
 		}
 	})
 }

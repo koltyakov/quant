@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/andrew/quant/internal/config"
 	"github.com/andrew/quant/internal/embed"
@@ -16,13 +17,19 @@ type Server struct {
 	store    *index.Store
 	embedder embed.Embedder
 	mcp      *mcpserver.MCPServer
+
+	embCacheMu sync.Mutex
+	embCache   map[string][]float32
 }
+
+const embCacheMaxSize = 128
 
 func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder) *Server {
 	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		embedder: embedder,
+		embCache: make(map[string][]float32, embCacheMaxSize),
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", "1.0.0")

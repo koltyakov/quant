@@ -154,6 +154,7 @@ func (idx *indexer) runInitialSync(ctx context.Context, gi *ignore.GitIgnore) {
 		return
 	}
 	log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
+	idx.store.RemoveBackup()
 }
 
 func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error {
