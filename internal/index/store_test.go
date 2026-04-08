@@ -229,6 +229,60 @@ func TestStore_SearchVectorFallback(t *testing.T) {
 	}
 }
 
+func TestStore_Search_MergesANDAndORCandidates(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+
+	doc1 := &Document{Path: "/test/and.txt", Hash: "and", ModifiedAt: time.Now()}
+	doc2 := &Document{Path: "/test/or.txt", Hash: "or", ModifiedAt: time.Now()}
+
+	doc1ID, err := store.UpsertDocument(ctx, doc1)
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
+	doc2ID, err := store.UpsertDocument(ctx, doc2)
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
+
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: doc1ID,
+		Content:    "alpha beta",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{0, 1})),
+	}); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: doc2ID,
+		Content:    "alpha",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+
+	results, err := store.Search(ctx, "alpha beta", NormalizeFloat32([]float32{1, 0}), 2, "")
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected merged AND/OR search to return 2 results, got %d", len(results))
+	}
+	if results[0].ChunkContent != "alpha beta" {
+		t.Fatalf("expected precise AND match first, got %q", results[0].ChunkContent)
+	}
+	if results[1].ChunkContent != "alpha" {
+		t.Fatalf("expected OR candidate to fill remaining slot, got %q", results[1].ChunkContent)
+	}
+}
+
 func TestStore_SearchVectorFallback_ScansPastInitialWindow(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")

@@ -139,38 +139,61 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 		return vec, nil
 	}
 	if flight, ok := s.embFlights[text]; ok {
+		flight.waiters++
 		s.embCacheMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-flight.done:
-			return flight.vec, flight.err
-		}
+		return s.waitForEmbeddingFlight(ctx, text, flight)
 	}
-	flight := &embeddingFlight{done: make(chan struct{})}
+	flight := &embeddingFlight{
+		done:    make(chan struct{}),
+		waiters: 1,
+	}
 	s.embFlights[text] = flight
 	s.embCacheMu.Unlock()
 
-	vec, err := s.embedder.Embed(ctx, text)
-	if err != nil {
-		s.embCacheMu.Lock()
-		delete(s.embFlights, text)
-		flight.err = err
-		close(flight.done)
-		s.embCacheMu.Unlock()
-		return nil, err
+	go s.runEmbeddingFlight(context.Background(), text, flight)
+
+	return s.waitForEmbeddingFlight(ctx, text, flight)
+}
+
+func (s *Server) waitForEmbeddingFlight(ctx context.Context, text string, flight *embeddingFlight) ([]float32, error) {
+	select {
+	case <-ctx.Done():
+		s.releaseEmbeddingFlight(text, flight)
+		return nil, ctx.Err()
+	case <-flight.done:
+		s.releaseEmbeddingFlight(text, flight)
+		return flight.vec, flight.err
 	}
-	vec = index.NormalizeFloat32(vec)
+}
+
+func (s *Server) runEmbeddingFlight(ctx context.Context, text string, flight *embeddingFlight) {
+	vec, err := s.embedder.Embed(ctx, text)
+	if err == nil {
+		vec = index.NormalizeFloat32(vec)
+	}
 
 	s.embCacheMu.Lock()
-	s.embCache.Put(text, vec)
+	defer s.embCacheMu.Unlock()
+
+	if err == nil {
+		if s.embCache == nil {
+			s.embCache = newEmbeddingLRU(embCacheMaxSize)
+		}
+		s.embCache.Put(text, vec)
+	}
 	delete(s.embFlights, text)
 	flight.vec = vec
-	flight.err = nil
+	flight.err = err
 	close(flight.done)
-	s.embCacheMu.Unlock()
+}
 
-	return vec, nil
+func (s *Server) releaseEmbeddingFlight(_ string, flight *embeddingFlight) {
+	s.embCacheMu.Lock()
+	defer s.embCacheMu.Unlock()
+
+	if flight.waiters > 0 {
+		flight.waiters--
+	}
 }
 
 func formatBytes(b int64) string {

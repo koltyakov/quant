@@ -309,9 +309,6 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 				return nil
 			}
 			doc := docByPath[key]
-			if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
-				return nil
-			}
 
 			select {
 			case <-ctx.Done():
@@ -581,14 +578,8 @@ func (idx *indexer) beginPathSync(key string, modTime *time.Time) (uint64, bool)
 	return state.version, true
 }
 
-func (idx *indexer) pathRequestInvalidates(state *pathState, modTime *time.Time) bool {
-	if modTime == nil {
-		return true
-	}
-	if !state.hasModTime {
-		return true
-	}
-	return !sameModTime(state.requestedMod, *modTime)
+func (idx *indexer) pathRequestInvalidates(_ *pathState, _ *time.Time) bool {
+	return true
 }
 
 func (idx *indexer) finishPathSync(key string) (uint64, bool) {
@@ -678,11 +669,18 @@ func (idx *indexer) syncDocumentOnce(ctx context.Context, key, path string, modT
 	if err != nil {
 		return indexNoop, err
 	}
+	precomputedHash := ""
 	if doc != nil && sameModTime(doc.ModifiedAt, effectiveModTime) {
-		return indexNoop, nil
+		precomputedHash, err = scan.FileHash(path)
+		if err != nil {
+			return indexNoop, fmt.Errorf("hashing file: %w", err)
+		}
+		if doc.Hash == precomputedHash {
+			return indexNoop, nil
+		}
 	}
 
-	return idx.indexFileCore(ctx, key, path, effectiveModTime, doc, version)
+	return idx.indexFileCore(ctx, key, path, effectiveModTime, precomputedHash, doc, version)
 }
 
 func (idx *indexer) loadDocument(ctx context.Context, key string, doc *index.Document) (*index.Document, error) {
@@ -808,10 +806,14 @@ func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Tim
 // chunking, embedding, and storing. It accepts an optional pre-loaded document
 // so that callers who already have it (e.g. initialSync) can skip the extra
 // database lookup.
-func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, doc *index.Document, version uint64) (indexAction, error) {
-	hash, err := scan.FileHash(path)
-	if err != nil {
-		return indexNoop, fmt.Errorf("hashing file: %w", err)
+func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (indexAction, error) {
+	hash := precomputedHash
+	if hash == "" {
+		var err error
+		hash, err = scan.FileHash(path)
+		if err != nil {
+			return indexNoop, fmt.Errorf("hashing file: %w", err)
+		}
 	}
 	if doc != nil && doc.Hash == hash {
 		return indexNoop, nil

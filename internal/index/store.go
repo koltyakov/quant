@@ -326,52 +326,67 @@ func (s *Store) Stats(ctx context.Context) (docCount int, chunkCount int, err er
 	return docCount, chunkCount, err
 }
 
+type searchCandidate struct {
+	id          int
+	result      SearchResult
+	keywordRank int
+	vectorScore float32
+}
+
 // Search performs hybrid search combining FTS5 keyword prefilter with vector reranking.
 // pathPrefix optionally restricts results to documents whose path starts with the given prefix.
-// It tries AND-joined FTS first (tighter match), falls back to OR, then to pure vector scan.
+// It merges candidates from AND and OR FTS queries, reranks them together, then fills any
+// remaining result slots with vector-only matches.
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 
 	andQuery, orQuery := buildFTSQueries(query)
+	keywordCandidates := make(map[int]*searchCandidate)
+	rankOffset := 0
+	candidateLimit := searchCandidateLimit(limit)
 
-	// Try AND-joined FTS first (all terms must match).
 	if andQuery != "" {
-		results, err := s.searchFTS(ctx, andQuery, queryEmbedding, limit, pathPrefix)
+		collected, err := s.collectFTSCandidates(ctx, andQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
 		if err != nil {
 			return nil, err
 		}
-		if len(results) > 0 {
-			return results, nil
-		}
+		rankOffset += collected
 	}
 
-	// Fall back to OR-joined FTS (any term matches).
 	if orQuery != "" && orQuery != andQuery {
-		results, err := s.searchFTS(ctx, orQuery, queryEmbedding, limit, pathPrefix)
+		_, err := s.collectFTSCandidates(ctx, orQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
 		if err != nil {
 			return nil, err
 		}
-		if len(results) > 0 {
-			return results, nil
-		}
 	}
 
-	// Vector-only fallback: scan all chunks (optionally filtered by path).
-	return s.searchVector(ctx, queryEmbedding, limit, pathPrefix)
+	keywordResults := rerankKeywordCandidates(keywordCandidates, limit)
+	if len(keywordResults) >= limit {
+		return keywordResults, nil
+	}
+
+	vectorResults, err := s.searchVector(ctx, queryEmbedding, limit-len(keywordResults), pathPrefix, keywordCandidates)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(keywordResults) == 0 {
+		return vectorResults, nil
+	}
+	return append(keywordResults, vectorResults...), nil
 }
 
-// searchFTS performs keyword-prefiltered search with reciprocal rank fusion.
-// Candidates are retrieved ordered by BM25 (giving each an FTS rank), then
-// scored by vector similarity (giving a vector rank). The final score combines
-// both via RRF: score = 1/(k+ftsRank) + 1/(k+vectorRank), with k=60.
-func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
+func searchCandidateLimit(limit int) int {
 	candidateLimit := limit * 20
 	if candidateLimit < 50 {
 		candidateLimit = 50
 	}
+	return candidateLimit
+}
 
+func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, queryEmbedding []float32, candidateLimit int, pathPrefix string, rankOffset int, candidates map[int]*searchCandidate) (int, error) {
 	var rows *sql.Rows
 	var err error
 	if pathPrefix != "" {
@@ -398,15 +413,52 @@ func (s *Store) searchFTS(ctx context.Context, ftsQuery string, queryEmbedding [
 		)
 	}
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	return rerankRRF(rows, queryEmbedding, limit)
+	rank := 0
+	for rows.Next() {
+		var id int
+		var content string
+		var chunkIndex int
+		var embeddingBytes []byte
+		var docPath string
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
+			return 0, err
+		}
+		rank++
+		keywordRank := rankOffset + rank
+		if existing, ok := candidates[id]; ok {
+			if keywordRank < existing.keywordRank {
+				existing.keywordRank = keywordRank
+			}
+			continue
+		}
+		candidates[id] = &searchCandidate{
+			id: id,
+			result: SearchResult{
+				DocumentPath: docPath,
+				ChunkContent: content,
+				ChunkIndex:   chunkIndex,
+				ScoreKind:    "rrf",
+			},
+			keywordRank: keywordRank,
+			vectorScore: dotProductEncoded(queryEmbedding, embeddingBytes),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return rank, nil
 }
 
 // searchVector performs a brute-force vector similarity search over all matching chunks.
-func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
+func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, exclude map[int]*searchCandidate) ([]SearchResult, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
 	var rows *sql.Rows
 	var err error
 	if pathPrefix != "" {
@@ -429,64 +481,36 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	}
 	defer func() { _ = rows.Close() }()
 
-	return rerankByVector(rows, queryEmbedding, limit)
+	return rerankByVector(rows, queryEmbedding, limit, exclude)
 }
 
-// rerankRRF combines FTS rank (row order from BM25) with vector similarity rank
-// using Reciprocal Rank Fusion: score = 1/(k+ftsRank) + 1/(k+vectorRank), k=60.
-func rerankRRF(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchResult, error) {
-	type candidate struct {
-		result      SearchResult
-		ftsRank     int
-		vectorScore float32
+// rerankKeywordCandidates combines keyword rank with vector similarity rank
+// using Reciprocal Rank Fusion: score = 1/(k+keywordRank) + 1/(k+vectorRank), k=60.
+func rerankKeywordCandidates(candidates map[int]*searchCandidate, limit int) []SearchResult {
+	if len(candidates) == 0 || limit <= 0 {
+		return nil
 	}
 
-	var candidates []candidate
-	ftsRank := 0
-	for rows.Next() {
-		var id int
-		var content string
-		var chunkIndex int
-		var embeddingBytes []byte
-		var docPath string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
-			return nil, err
+	ranked := make([]*searchCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		ranked = append(ranked, candidate)
+	}
+
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].vectorScore == ranked[j].vectorScore {
+			return ranked[i].keywordRank < ranked[j].keywordRank
 		}
-		ftsRank++
-		candidates = append(candidates, candidate{
-			result: SearchResult{
-				DocumentPath: docPath,
-				ChunkContent: content,
-				ChunkIndex:   chunkIndex,
-				ScoreKind:    "rrf",
-			},
-			ftsRank:     ftsRank,
-			vectorScore: dotProductEncoded(queryEmbedding, embeddingBytes),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
-	// Assign vector ranks by sorting by vector score descending.
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].vectorScore > candidates[j].vectorScore
+		return ranked[i].vectorScore > ranked[j].vectorScore
 	})
-	vectorRanks := make([]int, len(candidates))
-	for i := range candidates {
-		vectorRanks[i] = i + 1
-	}
 
-	// Compute RRF scores and pick top-k via heap.
 	const k = 60
 	top := make(candidateHeap, 0, limit)
-	for i := range candidates {
-		rrf := 1.0/float32(k+candidates[i].ftsRank) + 1.0/float32(k+vectorRanks[i])
-		candidates[i].result.Score = rrf
-		sr := scoredResult{result: candidates[i].result, score: rrf}
+	for i, candidate := range ranked {
+		vectorRank := i + 1
+		rrf := 1.0/float32(k+candidate.keywordRank) + 1.0/float32(k+vectorRank)
+		result := candidate.result
+		result.Score = rrf
+		sr := scoredResult{result: result, score: rrf}
 		if len(top) < limit {
 			heap.Push(&top, sr)
 		} else if rrf > top[0].score {
@@ -500,11 +524,11 @@ func rerankRRF(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchRes
 	for i := range top {
 		results[i] = top[i].result
 	}
-	return results, nil
+	return results
 }
 
 // rerankByVector computes dot product scores for candidate rows and returns top results.
-func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]SearchResult, error) {
+func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int, exclude map[int]*searchCandidate) ([]SearchResult, error) {
 	candidates := make(candidateHeap, 0, limit)
 	for rows.Next() {
 		var id int
@@ -514,6 +538,9 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int) ([]Sear
 		var docPath string
 		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
 			return nil, err
+		}
+		if _, ok := exclude[id]; ok {
+			continue
 		}
 
 		score := dotProductEncoded(queryEmbedding, embeddingBytes)

@@ -65,6 +65,18 @@ func (f fakeExtractor) Extract(context.Context, string) (string, error) {
 
 func (f fakeExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
+type fileExtractor struct{}
+
+func (fileExtractor) Extract(_ context.Context, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (fileExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
+
 type countingExtractor struct {
 	text  string
 	calls atomic.Int32
@@ -239,6 +251,93 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	}
 	if emb.batchCalls.Load() != 0 {
 		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	}
+}
+
+func TestIndexFile_ReindexesSameModTimeContentChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("first version"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	modTime := time.Unix(1_700_000_000, 123_456_789)
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("unexpected error setting file time: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  fakeEmbedder{},
+		extractor: fileExtractor{},
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+
+	action, err := idx.indexFile(context.Background(), path, info.ModTime())
+	if err != nil {
+		t.Fatalf("unexpected initial indexing error: %v", err)
+	}
+	if action != indexUpdated {
+		t.Fatalf("expected initial update action, got %s", action)
+	}
+
+	if err := os.WriteFile(path, []byte("second version"), 0644); err != nil {
+		t.Fatalf("unexpected error overwriting file: %v", err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("unexpected error restoring file time: %v", err)
+	}
+
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error restating file: %v", err)
+	}
+
+	action, err = idx.indexFile(context.Background(), path, info.ModTime())
+	if err != nil {
+		t.Fatalf("unexpected reindex error: %v", err)
+	}
+	if action != indexUpdated {
+		t.Fatalf("expected content change with same modtime to reindex, got %s", action)
+	}
+
+	doc, err := store.GetDocumentByPath(context.Background(), "sample.txt")
+	if err != nil {
+		t.Fatalf("unexpected error loading document: %v", err)
+	}
+	if doc == nil {
+		t.Fatal("expected document to remain indexed")
+	}
+
+	wantHash, err := scan.FileHash(path)
+	if err != nil {
+		t.Fatalf("unexpected error hashing updated file: %v", err)
+	}
+	if doc.Hash != wantHash {
+		t.Fatalf("expected updated hash %q, got %q", wantHash, doc.Hash)
+	}
+
+	results, err := store.Search(context.Background(), "second", index.NormalizeFloat32([]float32{1}), 1, "")
+	if err != nil {
+		t.Fatalf("unexpected error searching updated content: %v", err)
+	}
+	if len(results) != 1 || results[0].ChunkContent != "second version" {
+		t.Fatalf("expected updated content to be searchable, got %+v", results)
 	}
 }
 

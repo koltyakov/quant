@@ -53,9 +53,10 @@ type embeddingLRU struct {
 }
 
 type embeddingFlight struct {
-	done chan struct{}
-	vec  []float32
-	err  error
+	done    chan struct{}
+	waiters int
+	vec     []float32
+	err     error
 }
 
 func newEmbeddingLRU(capacity int) *embeddingLRU {
