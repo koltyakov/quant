@@ -578,8 +578,17 @@ func (idx *indexer) beginPathSync(key string, modTime *time.Time) (uint64, bool)
 	return state.version, true
 }
 
-func (idx *indexer) pathRequestInvalidates(_ *pathState, _ *time.Time) bool {
-	return true
+func (idx *indexer) pathRequestInvalidates(state *pathState, modTime *time.Time) bool {
+	if state == nil {
+		return true
+	}
+	if modTime == nil {
+		return state.hasModTime
+	}
+	if !state.hasModTime {
+		return true
+	}
+	return !sameModTime(state.requestedMod, *modTime)
 }
 
 func (idx *indexer) finishPathSync(key string) (uint64, bool) {
