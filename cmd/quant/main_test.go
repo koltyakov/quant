@@ -93,6 +93,24 @@ func (f *blockingExtractor) Extract(context.Context, string) (string, error) {
 
 func (f *blockingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
+type selectiveBlockingExtractor struct {
+	texts       map[string]string
+	blockPath   string
+	started     chan struct{}
+	release     chan struct{}
+	blockedOnce sync.Once
+}
+
+func (f *selectiveBlockingExtractor) Extract(_ context.Context, path string) (string, error) {
+	if path == f.blockPath {
+		f.blockedOnce.Do(func() { close(f.started) })
+		<-f.release
+	}
+	return f.texts[path], nil
+}
+
+func (f *selectiveBlockingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
+
 func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")
@@ -395,6 +413,166 @@ func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
 	}
 	if len(docs) != 0 {
 		t.Fatalf("expected ignored document to be removed, got %d docs", len(docs))
+	}
+}
+
+func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+
+	ext := &blockingExtractor{
+		text:    "hello world",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  ext,
+		pathStates: make(map[string]*pathState),
+	}
+
+	indexErrCh := make(chan error, 1)
+	go func() {
+		_, err := idx.indexFile(context.Background(), path, info.ModTime())
+		indexErrCh <- err
+	}()
+
+	select {
+	case <-ext.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for extraction to start")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("unexpected remove error: %v", err)
+	}
+
+	removeErrCh := make(chan error, 1)
+	go func() {
+		_, err := idx.syncDocument(context.Background(), "sample.txt", path, nil, nil)
+		removeErrCh <- err
+	}()
+
+	close(ext.release)
+
+	if err := <-indexErrCh; err != nil {
+		t.Fatalf("unexpected indexing error: %v", err)
+	}
+	if err := <-removeErrCh; err != nil {
+		t.Fatalf("unexpected remove sync error: %v", err)
+	}
+
+	doc, err := store.GetDocumentByPath(context.Background(), "sample.txt")
+	if err != nil {
+		t.Fatalf("unexpected load error: %v", err)
+	}
+	if doc != nil {
+		t.Fatalf("expected document to stay deleted, got %+v", doc)
+	}
+}
+
+func TestInitialSync_ReconcilesFileRecreatedDuringScanWindow(t *testing.T) {
+	dir := t.TempDir()
+	blockerPath := filepath.Join(dir, "blocker.txt")
+	recreatedPath := filepath.Join(dir, "recreated.txt")
+	if err := os.WriteFile(blockerPath, []byte("blocker"), 0644); err != nil {
+		t.Fatalf("unexpected blocker write error: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       "recreated.txt",
+		Hash:       "old-hash",
+		ModifiedAt: time.Now().Add(-time.Hour),
+	}, []index.ChunkRecord{{
+		Content:    "stale chunk",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32([]float32{1}),
+	}}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+
+	ext := &selectiveBlockingExtractor{
+		texts: map[string]string{
+			blockerPath:   "blocker contents",
+			recreatedPath: "recreated contents",
+		},
+		blockPath: blockerPath,
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  ext,
+		pathStates: make(map[string]*pathState),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- idx.initialSync(context.Background())
+	}()
+
+	select {
+	case <-ext.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for blocking extraction")
+	}
+
+	if err := os.WriteFile(recreatedPath, []byte("recreated"), 0644); err != nil {
+		t.Fatalf("unexpected recreated write error: %v", err)
+	}
+
+	close(ext.release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected both documents to remain indexed, got %d", len(docs))
+	}
+
+	recreatedDoc, err := store.GetDocumentByPath(context.Background(), "recreated.txt")
+	if err != nil {
+		t.Fatalf("unexpected recreated load error: %v", err)
+	}
+	if recreatedDoc == nil {
+		t.Fatal("expected recreated document to be indexed")
 	}
 }
 
