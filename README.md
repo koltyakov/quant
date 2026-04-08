@@ -206,8 +206,10 @@ flowchart TB
 - **Office docs** parsed with stdlib `archive/zip` + `encoding/xml`, preserving more document structure
 - **File watching** via `fsnotify` with 500ms debounce
 
-## Test
+## Contributing
 
-```
-make test
-```
+- Fork, branch, add tests, submit a pull request.
+
+## License
+
+MIT - see [LICENSE](./LICENSE).

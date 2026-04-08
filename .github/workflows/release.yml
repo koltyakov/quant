@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve release args
+        id: release_args
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          NOTES_FILE=".github/releases/${TAG}.md"
+          if [ -f "${NOTES_FILE}" ]; then
+            echo "args=release --clean --release-notes=${NOTES_FILE}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "args=release --clean" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: ${{ steps.release_args.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
