@@ -128,20 +128,46 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
 	s.embCacheMu.Lock()
+	if s.embCache == nil {
+		s.embCache = newEmbeddingLRU(embCacheMaxSize)
+	}
+	if s.embFlights == nil {
+		s.embFlights = make(map[string]*embeddingFlight)
+	}
 	if vec, ok := s.embCache.Get(text); ok {
 		s.embCacheMu.Unlock()
 		return vec, nil
 	}
+	if flight, ok := s.embFlights[text]; ok {
+		s.embCacheMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-flight.done:
+			return flight.vec, flight.err
+		}
+	}
+	flight := &embeddingFlight{done: make(chan struct{})}
+	s.embFlights[text] = flight
 	s.embCacheMu.Unlock()
 
 	vec, err := s.embedder.Embed(ctx, text)
 	if err != nil {
+		s.embCacheMu.Lock()
+		delete(s.embFlights, text)
+		flight.err = err
+		close(flight.done)
+		s.embCacheMu.Unlock()
 		return nil, err
 	}
 	vec = index.NormalizeFloat32(vec)
 
 	s.embCacheMu.Lock()
 	s.embCache.Put(text, vec)
+	delete(s.embFlights, text)
+	flight.vec = vec
+	flight.err = nil
+	close(flight.done)
 	s.embCacheMu.Unlock()
 
 	return vec, nil

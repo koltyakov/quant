@@ -21,16 +21,18 @@ type Server struct {
 
 	embCacheMu sync.Mutex
 	embCache   *embeddingLRU
+	embFlights map[string]*embeddingFlight
 }
 
 const embCacheMaxSize = 128
 
 func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder) *Server {
 	s := &Server{
-		cfg:      cfg,
-		store:    store,
-		embedder: embedder,
-		embCache: newEmbeddingLRU(embCacheMaxSize),
+		cfg:        cfg,
+		store:      store,
+		embedder:   embedder,
+		embCache:   newEmbeddingLRU(embCacheMaxSize),
+		embFlights: make(map[string]*embeddingFlight),
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", "1.0.0")
@@ -48,6 +50,12 @@ type embeddingLRU struct {
 	capacity int
 	ll       *list.List
 	items    map[string]*list.Element
+}
+
+type embeddingFlight struct {
+	done chan struct{}
+	vec  []float32
+	err  error
 }
 
 func newEmbeddingLRU(capacity int) *embeddingLRU {

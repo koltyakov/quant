@@ -76,3 +76,38 @@ func TestCachedEmbed_UsesLRUEviction(t *testing.T) {
 		t.Fatalf("expected c to be embedded once, got %d embed calls", embedder.calls["c"])
 	}
 }
+
+func TestCachedEmbed_DeduplicatesConcurrentRequests(t *testing.T) {
+	embedder := &countingEmbedder{}
+	s := &Server{
+		embedder:   embedder,
+		embCache:   newEmbeddingLRU(2),
+		embFlights: make(map[string]*embeddingFlight),
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.cachedEmbed(ctx, "same-query")
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("unexpected embed error: %v", err)
+		}
+	}
+
+	embedder.mu.Lock()
+	defer embedder.mu.Unlock()
+	if embedder.calls["same-query"] != 1 {
+		t.Fatalf("expected one embed call, got %d", embedder.calls["same-query"])
+	}
+}

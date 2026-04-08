@@ -36,7 +36,10 @@ type indexer struct {
 	embedder  embed.Embedder
 	extractor extract.Extractor
 
-	liveJobs chan liveIndexRequest
+	liveJobs chan string
+
+	liveMu     sync.Mutex
+	liveStates map[string]*livePathState
 
 	pathMu     sync.Mutex
 	pathStates map[string]*pathState
@@ -55,9 +58,11 @@ type pathState struct {
 	requestedMod time.Time
 }
 
-type liveIndexRequest struct {
-	path    string
-	modTime time.Time
+type livePathState struct {
+	modTime    time.Time
+	hasPending bool
+	queued     bool
+	running    bool
 }
 
 func main() {
@@ -120,6 +125,7 @@ func main() {
 		store:      store,
 		embedder:   embedder,
 		extractor:  extract.NewRouter(),
+		liveStates: make(map[string]*livePathState),
 		pathStates: make(map[string]*pathState),
 	}
 
@@ -266,37 +272,18 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		doc    *index.Document
 	}
 
-	var pending []pendingItem
-	scannedPaths := make(map[string]bool)
-	if err := scan.Walk(idx.cfg.WatchDir, gi, func(r scan.Result) error {
-		key, err := documentKey(idx.cfg.WatchDir, r.Path)
-		if err != nil {
-			return fmt.Errorf("computing document key for %s: %w", r.Path, err)
-		}
-		scannedPaths[key] = true
-		if !idx.extractor.Supports(r.Path) {
-			return nil
-		}
-		doc := docByPath[key]
-		if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
-			return nil
-		}
-		pending = append(pending, pendingItem{key: key, result: r, doc: doc})
-		return nil
-	}); err != nil {
-		return fmt.Errorf("scanning directory: %w", err)
-	}
-
 	type indexResult struct {
 		path   string
 		action indexAction
 		err    error
 	}
 
-	workers := idx.workerCount(len(pending))
+	workers := idx.workerCount(0)
 
 	jobs := make(chan pendingItem)
 	indexResults := make(chan indexResult, workers)
+	walkDone := make(chan error, 1)
+	scannedPaths := make(map[string]bool)
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -312,19 +299,31 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 	}
 
 	go func() {
-		for _, item := range pending {
+		err := scan.Walk(idx.cfg.WatchDir, gi, func(r scan.Result) error {
+			key, err := documentKey(idx.cfg.WatchDir, r.Path)
+			if err != nil {
+				return fmt.Errorf("computing document key for %s: %w", r.Path, err)
+			}
+			scannedPaths[key] = true
+			if !idx.extractor.Supports(r.Path) {
+				return nil
+			}
+			doc := docByPath[key]
+			if doc != nil && sameModTime(doc.ModifiedAt, r.ModifiedAt) {
+				return nil
+			}
+
 			select {
 			case <-ctx.Done():
-				close(jobs)
-				wg.Wait()
-				close(indexResults)
-				return
-			case jobs <- item:
+				return ctx.Err()
+			case jobs <- pendingItem{key: key, result: r, doc: doc}:
+				return nil
 			}
-		}
+		})
 		close(jobs)
 		wg.Wait()
 		close(indexResults)
+		walkDone <- err
 	}()
 
 	for result := range indexResults {
@@ -338,6 +337,12 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		case indexRemoved:
 			log.Printf("Removed from index: %s", result.path)
 		}
+	}
+	if walkErr := <-walkDone; walkErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("scanning directory: %w", walkErr)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -403,7 +408,7 @@ func (idx *indexer) liveQueueSize() int {
 
 func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGroup) {
 	if idx.liveJobs == nil {
-		idx.liveJobs = make(chan liveIndexRequest, idx.liveQueueSize())
+		idx.liveJobs = make(chan string, idx.liveQueueSize())
 	}
 
 	workers := idx.workerCount(0)
@@ -415,8 +420,8 @@ func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 				select {
 				case <-ctx.Done():
 					return
-				case req := <-idx.liveJobs:
-					idx.processLiveIndexRequest(ctx, req)
+				case path := <-idx.liveJobs:
+					idx.processLiveIndexRequest(ctx, path)
 				}
 			}
 		}()
@@ -425,31 +430,121 @@ func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 
 func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime time.Time) bool {
 	if idx.liveJobs == nil {
-		idx.processLiveIndexRequest(ctx, liveIndexRequest{path: path, modTime: modTime})
+		idx.processLiveIndexRequest(ctx, path)
+		return true
+	}
+
+	if !idx.markLivePending(path, modTime) {
 		return true
 	}
 
 	select {
-	case idx.liveJobs <- liveIndexRequest{path: path, modTime: modTime}:
+	case idx.liveJobs <- path:
 		return true
 	default:
+		idx.cancelLiveQueue(path)
 		log.Printf("warning: live index queue full for %s; scheduling resync", path)
 		idx.requestResync(ctx)
 		return false
 	}
 }
 
-func (idx *indexer) processLiveIndexRequest(ctx context.Context, req liveIndexRequest) {
-	action, err := idx.indexFile(ctx, req.path, req.modTime)
-	if err != nil {
-		log.Printf("Error indexing %s: %v", req.path, err)
+func (idx *indexer) markLivePending(path string, modTime time.Time) bool {
+	idx.liveMu.Lock()
+	defer idx.liveMu.Unlock()
+
+	if idx.liveStates == nil {
+		idx.liveStates = make(map[string]*livePathState)
+	}
+
+	state, ok := idx.liveStates[path]
+	if !ok {
+		state = &livePathState{}
+		idx.liveStates[path] = state
+	}
+	if !state.hasPending || modTime.After(state.modTime) {
+		state.modTime = modTime
+	}
+	state.hasPending = true
+	if state.queued || state.running {
+		return false
+	}
+	state.queued = true
+	return true
+}
+
+func (idx *indexer) cancelLiveQueue(path string) {
+	idx.liveMu.Lock()
+	defer idx.liveMu.Unlock()
+
+	state, ok := idx.liveStates[path]
+	if !ok || !state.queued || state.running {
 		return
 	}
-	switch action {
-	case indexUpdated:
-		log.Printf("Indexed: %s", req.path)
-	case indexRemoved:
-		log.Printf("Removed from index: %s", req.path)
+	state.queued = false
+	if !state.running {
+		delete(idx.liveStates, path)
+	}
+}
+
+func (idx *indexer) startLiveProcessing(path string) (time.Time, bool) {
+	idx.liveMu.Lock()
+	defer idx.liveMu.Unlock()
+
+	state, ok := idx.liveStates[path]
+	if !ok || !state.queued {
+		return time.Time{}, false
+	}
+	state.queued = false
+	state.running = true
+	modTime := state.modTime
+	state.hasPending = false
+	return modTime, true
+}
+
+func (idx *indexer) finishLiveProcessing(path string) bool {
+	idx.liveMu.Lock()
+	defer idx.liveMu.Unlock()
+
+	state, ok := idx.liveStates[path]
+	if !ok {
+		return false
+	}
+	state.running = false
+	if state.hasPending && !state.queued {
+		state.queued = true
+		return true
+	}
+	delete(idx.liveStates, path)
+	return false
+}
+
+func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
+	modTime, ok := idx.startLiveProcessing(path)
+	if !ok {
+		return
+	}
+
+	action, err := idx.indexFile(ctx, path, modTime)
+	if err != nil {
+		log.Printf("Error indexing %s: %v", path, err)
+	} else {
+		switch action {
+		case indexUpdated:
+			log.Printf("Indexed: %s", path)
+		case indexRemoved:
+			log.Printf("Removed from index: %s", path)
+		}
+	}
+
+	if idx.finishLiveProcessing(path) {
+		select {
+		case idx.liveJobs <- path:
+		default:
+			idx.cancelLiveQueue(path)
+			log.Printf("warning: live index queue full for %s; scheduling resync", path)
+			idx.requestResync(ctx)
+		}
 	}
 }
 
@@ -578,9 +673,6 @@ func (idx *indexer) syncDocumentOnce(ctx context.Context, key, path string, modT
 	}
 
 	effectiveModTime := info.ModTime()
-	if modTime != nil {
-		effectiveModTime = *modTime
-	}
 
 	doc, err = idx.loadDocument(ctx, key, doc)
 	if err != nil {

@@ -416,6 +416,38 @@ func TestHandleWatchEvent_QueuesLiveIndexWork(t *testing.T) {
 	}
 }
 
+func TestEnqueueLiveIndex_CoalescesByPath(t *testing.T) {
+	idx := &indexer{
+		cfg:        &config.Config{IndexWorkers: 1},
+		liveJobs:   make(chan string, 4),
+		liveStates: make(map[string]*livePathState),
+	}
+
+	first := time.Unix(100, 0)
+	second := time.Unix(200, 0)
+	if !idx.enqueueLiveIndex(context.Background(), "a.txt", first) {
+		t.Fatal("expected first enqueue to succeed")
+	}
+	if !idx.enqueueLiveIndex(context.Background(), "a.txt", second) {
+		t.Fatal("expected second enqueue to be coalesced")
+	}
+	if got := len(idx.liveJobs); got != 1 {
+		t.Fatalf("expected one queued path, got %d", got)
+	}
+
+	path := <-idx.liveJobs
+	if path != "a.txt" {
+		t.Fatalf("expected queued path a.txt, got %s", path)
+	}
+	modTime, ok := idx.startLiveProcessing(path)
+	if !ok {
+		t.Fatal("expected live processing to start")
+	}
+	if !modTime.Equal(second) {
+		t.Fatalf("expected latest modtime %v, got %v", second, modTime)
+	}
+}
+
 func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")
