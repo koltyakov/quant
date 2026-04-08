@@ -322,6 +322,50 @@ func TestStore_DeleteDocument(t *testing.T) {
 	}
 }
 
+func TestStore_DeleteDocumentsByPrefix(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	for _, path := range []string{"docs/readme.md", "docs/nested/guide.md", "src/main.go"} {
+		docID, err := store.UpsertDocument(ctx, &Document{
+			Path:       path,
+			Hash:       "hash-" + path,
+			ModifiedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("unexpected upsert error for %s: %v", path, err)
+		}
+		if err := store.InsertChunk(ctx, &ChunkRecord{
+			DocumentID: docID,
+			Content:    "chunk for " + path,
+			ChunkIndex: 0,
+			Embedding:  EncodeFloat32([]float32{1}),
+		}); err != nil {
+			t.Fatalf("unexpected insert error for %s: %v", path, err)
+		}
+	}
+
+	if err := store.DeleteDocumentsByPrefix(ctx, "docs"); err != nil {
+		t.Fatalf("unexpected delete-by-prefix error: %v", err)
+	}
+
+	docs, err := store.ListDocuments(ctx)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 remaining document, got %d", len(docs))
+	}
+	if docs[0].Path != "src/main.go" {
+		t.Fatalf("expected src/main.go to remain, got %s", docs[0].Path)
+	}
+}
+
 func TestStore_Stats(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")

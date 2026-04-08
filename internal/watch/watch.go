@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,11 +19,13 @@ const (
 	Create Op = "create"
 	Write  Op = "write"
 	Remove Op = "remove"
+	Resync Op = "resync"
 )
 
 type Event struct {
-	Path string
-	Op   Op
+	Path  string
+	Op    Op
+	IsDir bool
 }
 
 type Watcher struct {
@@ -32,8 +35,10 @@ type Watcher struct {
 	events  chan Event
 	done    chan struct{}
 
-	mu     sync.Mutex
-	timers map[string]*time.Timer
+	mu            sync.Mutex
+	timers        map[string]*time.Timer
+	watchedDirs   map[string]struct{}
+	resyncPending bool
 }
 
 func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
@@ -49,6 +54,9 @@ func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
 		events:  make(chan Event, 256),
 		done:    make(chan struct{}),
 		timers:  make(map[string]*time.Timer),
+		watchedDirs: map[string]struct{}{
+			dir: {},
+		},
 	}
 
 	if err := w.addRecursive(dir); err != nil {
@@ -87,7 +95,13 @@ func (w *Watcher) addRecursive(dir string) error {
 			}
 			w.matcher.Load(path)
 		}
-		return w.fsw.Add(path)
+		if err := w.fsw.Add(path); err != nil {
+			return err
+		}
+		w.mu.Lock()
+		w.watchedDirs[path] = struct{}{}
+		w.mu.Unlock()
+		return nil
 	})
 }
 
@@ -110,6 +124,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
 
 	base := filepath.Base(path)
+	if base == ".gitignore" {
+		w.handleGitIgnoreEvent(path)
+		return
+	}
 	if scan.IsHiddenName(base) {
 		return
 	}
@@ -130,7 +148,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 			return
 		}
-		w.debounce(path, Create)
+		w.debounce(path, Create, false)
 		return
 	}
 
@@ -142,16 +160,38 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		if info.IsDir() {
 			return
 		}
-		w.debounce(path, Write)
+		w.debounce(path, Write, false)
 		return
 	}
 
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-		w.debounce(path, Remove)
+		w.debounce(path, Remove, w.isWatchedDir(path))
 	}
 }
 
-func (w *Watcher) debounce(path string, op Op) {
+func (w *Watcher) handleGitIgnoreEvent(path string) {
+	dir := filepath.Dir(path)
+	w.matcher.Reload(dir)
+	w.signalResync()
+}
+
+func (w *Watcher) isWatchedDir(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	_, ok := w.watchedDirs[path]
+	if ok {
+		delete(w.watchedDirs, path)
+		for watched := range w.watchedDirs {
+			if strings.HasPrefix(watched, path+string(filepath.Separator)) {
+				delete(w.watchedDirs, watched)
+			}
+		}
+	}
+	return ok
+}
+
+func (w *Watcher) debounce(path string, op Op, isDir bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -165,9 +205,40 @@ func (w *Watcher) debounce(path string, op Op) {
 		w.mu.Unlock()
 
 		select {
-		case w.events <- Event{Path: path, Op: op}:
+		case w.events <- Event{Path: path, Op: op, IsDir: isDir}:
 		default:
 			log.Printf("warning: watcher event dropped for %s (channel full)", path)
+			w.signalResync()
 		}
 	})
+}
+
+func (w *Watcher) signalResync() {
+	w.mu.Lock()
+	if w.resyncPending {
+		w.mu.Unlock()
+		return
+	}
+	w.resyncPending = true
+	w.mu.Unlock()
+
+	w.trySendResync()
+}
+
+func (w *Watcher) trySendResync() {
+	select {
+	case w.events <- Event{Path: w.rootDir, Op: Resync, IsDir: true}:
+		w.mu.Lock()
+		w.resyncPending = false
+		w.mu.Unlock()
+	default:
+		time.AfterFunc(500*time.Millisecond, func() {
+			w.mu.Lock()
+			pending := w.resyncPending
+			w.mu.Unlock()
+			if pending {
+				w.trySendResync()
+			}
+		})
+	}
 }

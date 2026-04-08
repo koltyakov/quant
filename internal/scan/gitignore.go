@@ -28,20 +28,37 @@ func NewGitIgnoreMatcher(rootDir string, root *ignore.GitIgnore) *GitIgnoreMatch
 }
 
 func (m *GitIgnoreMatcher) Load(dir string) {
+	m.Reload(dir)
+}
+
+func (m *GitIgnoreMatcher) Reload(dir string) {
 	if dir == m.rootDir {
-		return
-	}
-	if _, ok := m.matchers[dir]; ok {
+		if matcher, err := ignore.CompileIgnoreFile(filepath.Join(dir, ".gitignore")); err == nil {
+			m.matchers[dir] = matcher
+		} else {
+			delete(m.matchers, dir)
+		}
 		return
 	}
 
 	nestedPath := filepath.Join(dir, ".gitignore")
 	if _, err := os.Stat(nestedPath); err != nil {
+		delete(m.matchers, dir)
 		return
 	}
 
 	if matcher, err := ignore.CompileIgnoreFile(nestedPath); err == nil {
 		m.matchers[dir] = matcher
+	} else {
+		delete(m.matchers, dir)
+	}
+}
+
+func (m *GitIgnoreMatcher) Remove(dir string) {
+	for path := range m.matchers {
+		if path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)) {
+			delete(m.matchers, path)
+		}
 	}
 }
 

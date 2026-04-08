@@ -138,12 +138,15 @@ Unsupported files are skipped.
 - Initial startup scans the target directory and indexes supported files that are new or changed.
 - Stored document paths are relative to the watch directory, so the index remains stable across different launch working directories.
 - Initial startup indexing runs with a bounded worker pool to overlap hashing, extraction, embedding, and database writes across files.
+- Concurrent startup and live updates are coalesced per path so the same file is not re-indexed twice at once.
 - Search results become richer as background indexing completes; already-indexed content is queryable immediately.
 - A filesystem watcher keeps the index in sync after startup.
+- Directory renames/removals delete the full indexed subtree, not just the top-level path.
 - Deleting a file from disk removes it from the index.
 - The index stores embedding metadata in SQLite. If the configured embedding model or dimensions change, the existing index is cleared and rebuilt from the filesystem projection.
 - Reindexing a document is transactional, so partial failures do not leave a document half-indexed.
 - Root and nested `.gitignore` files are applied during both initial scan and live watch updates.
+- If the watcher overflows during a burst of filesystem events, quant schedules a full resync instead of silently trusting dropped events.
 
 ## Architecture
 
@@ -205,6 +208,7 @@ flowchart TB
 - **Transactional indexing** - chunk replacement happens in a single SQLite transaction per document
 - **Office docs** parsed with stdlib `archive/zip` + `encoding/xml`, preserving more document structure
 - **File watching** via `fsnotify` with 500ms debounce
+- **Self-healing sync** - watcher overflow or `.gitignore` changes trigger a full filesystem resync
 
 ## Contributing
 

@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -19,9 +20,9 @@ import (
 )
 
 type Store struct {
-	db       *sql.DB
-	dbPath   string
-	backup   string // non-empty if a pre-existing DB was backed up due to migration failure
+	db     *sql.DB
+	dbPath string
+	backup string // non-empty if a pre-existing DB was backed up due to migration failure
 }
 
 // NewStore opens (or creates) a SQLite database at dbPath.
@@ -153,7 +154,6 @@ func (s *Store) migrate() error {
 	return err
 }
 
-
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
@@ -223,6 +223,21 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
 
 func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
+	return err
+}
+
+func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) error {
+	prefix = filepath.Clean(prefix)
+	if prefix == "." || prefix == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM documents`)
+		return err
+	}
+
+	likePrefix := prefix + string(filepath.Separator) + "%"
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM documents WHERE path = ? OR path LIKE ?`,
+		prefix, likePrefix,
+	)
 	return err
 }
 
@@ -775,4 +790,3 @@ func buildFTSQueries(query string) (andQuery, orQuery string) {
 	andQuery = strings.Join(tokens, " AND ")
 	return andQuery, orQuery
 }
-

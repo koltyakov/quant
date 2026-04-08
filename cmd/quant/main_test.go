@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,6 +75,23 @@ func (f *countingExtractor) Extract(context.Context, string) (string, error) {
 }
 
 func (f *countingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
+
+type blockingExtractor struct {
+	text    string
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+	once    sync.Once
+}
+
+func (f *blockingExtractor) Extract(context.Context, string) (string, error) {
+	f.calls.Add(1)
+	f.once.Do(func() { close(f.started) })
+	<-f.release
+	return f.text, nil
+}
+
+func (f *blockingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
 func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	dir := t.TempDir()
@@ -258,6 +276,128 @@ func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
 	}
 }
 
+func TestIndexFile_CoalescesConcurrentRequests(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+
+	emb := &countingEmbedder{}
+	ext := &blockingExtractor{
+		text:    "hello world",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:      store,
+		embedder:   emb,
+		extractor:  ext,
+		pathStates: make(map[string]*pathState),
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := idx.indexFile(context.Background(), path, info.ModTime())
+		errCh <- err
+	}()
+
+	select {
+	case <-ext.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first extraction to start")
+	}
+
+	go func() {
+		_, err := idx.indexFile(context.Background(), path, info.ModTime())
+		errCh <- err
+	}()
+
+	close(ext.release)
+
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("unexpected indexing error: %v", err)
+		}
+	}
+
+	if ext.calls.Load() != 1 {
+		t.Fatalf("expected one extraction, got %d", ext.calls.Load())
+	}
+	if emb.batchCalls.Load() != 1 {
+		t.Fatalf("expected one embedding batch call, got %d", emb.batchCalls.Load())
+	}
+}
+
+func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  fakeExtractor{text: "hello world"},
+		pathStates: make(map[string]*pathState),
+	}
+
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document after initial sync, got %d", len(docs))
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.txt\n"), 0644); err != nil {
+		t.Fatalf("unexpected gitignore write error: %v", err)
+	}
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatalf("unexpected resync error: %v", err)
+	}
+
+	docs, err = store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("expected ignored document to be removed, got %d docs", len(docs))
+	}
+}
+
 func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 	dir := t.TempDir()
 	subdir := filepath.Join(dir, "nested")
@@ -310,7 +450,7 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 		extractor: ext,
 	}
 
-	if err := idx.initialSync(context.Background(), nil); err != nil {
+	if err := idx.initialSync(context.Background()); err != nil {
 		t.Fatalf("unexpected initial sync error: %v", err)
 	}
 	if ext.calls.Load() != 0 {

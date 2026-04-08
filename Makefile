@@ -1,4 +1,4 @@
-.PHONY: build test lint clean
+.PHONY: build test fmt lint clean
 
 build:
 	mkdir -p bin
@@ -6,6 +6,9 @@ build:
 
 test:
 	go test ./...
+
+fmt:
+	gofmt -s -w .
 
 lint:
 	golangci-lint run

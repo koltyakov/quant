@@ -82,6 +82,61 @@ func TestWatcher_AddsNewDirectoriesRecursively(t *testing.T) {
 	}
 }
 
+func TestWatcher_GitIgnoreChangeRequestsResync(t *testing.T) {
+	dir := t.TempDir()
+	watcher, err := New(dir, nil)
+	if err != nil {
+		t.Fatalf("unexpected watcher error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte("*.tmp\n"), 0644); err != nil {
+		t.Fatalf("unexpected gitignore write error: %v", err)
+	}
+
+	event := waitForOp(t, watcher.Events(), Resync, 3*time.Second)
+	if event.Path != dir {
+		t.Fatalf("expected resync path %s, got %+v", dir, event)
+	}
+}
+
+func TestWatcher_DirectoryRemovalMarksEventAsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	watcher, err := New(dir, nil)
+	if err != nil {
+		t.Fatalf("unexpected watcher error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	if err := os.RemoveAll(subdir); err != nil {
+		t.Fatalf("unexpected remove error: %v", err)
+	}
+
+	event := waitForPath(t, watcher.Events(), subdir, 3*time.Second)
+	if event.Op != Remove {
+		t.Fatalf("expected remove event, got %+v", event)
+	}
+	if !event.IsDir {
+		t.Fatalf("expected directory remove event, got %+v", event)
+	}
+}
+
 func waitForPath(t *testing.T, events <-chan Event, wantPath string, timeout time.Duration) Event {
 	t.Helper()
 
@@ -110,6 +165,22 @@ func ensureNoEventForPath(t *testing.T, events <-chan Event, wantPath string, ti
 			}
 		case <-deadline:
 			return
+		}
+	}
+}
+
+func waitForOp(t *testing.T, events <-chan Event, wantOp Op, timeout time.Duration) Event {
+	t.Helper()
+
+	deadline := time.After(timeout)
+	for {
+		select {
+		case event := <-events:
+			if event.Op == wantOp {
+				return event
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for event with op %s", wantOp)
 		}
 	}
 }

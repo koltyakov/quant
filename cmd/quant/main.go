@@ -20,7 +20,6 @@ import (
 	"github.com/andrew/quant/internal/mcp"
 	"github.com/andrew/quant/internal/scan"
 	"github.com/andrew/quant/internal/watch"
-	ignore "github.com/sabhiram/go-gitignore"
 )
 
 type indexAction string
@@ -36,6 +35,18 @@ type indexer struct {
 	store     *index.Store
 	embedder  embed.Embedder
 	extractor extract.Extractor
+
+	pathMu     sync.Mutex
+	pathStates map[string]*pathState
+
+	resyncMu      sync.Mutex
+	resyncRunning bool
+	resyncPending bool
+}
+
+type pathState struct {
+	running bool
+	dirty   bool
 }
 
 func main() {
@@ -94,10 +105,11 @@ func main() {
 	}
 
 	idx := &indexer{
-		cfg:       cfg,
-		store:     store,
-		embedder:  embedder,
-		extractor: extract.NewRouter(),
+		cfg:        cfg,
+		store:      store,
+		embedder:   embedder,
+		extractor:  extract.NewRouter(),
+		pathStates: make(map[string]*pathState),
 	}
 
 	watcher, err := watch.New(cfg.WatchDir, gi)
@@ -121,7 +133,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		idx.runInitialSync(ctx, gi)
+		idx.runInitialSync(ctx)
 	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder)
@@ -138,26 +150,84 @@ func main() {
 	wg.Wait()
 }
 
-func (idx *indexer) runInitialSync(ctx context.Context, gi *ignore.GitIgnore) {
-	log.Printf("Starting initial scan of %s", idx.cfg.WatchDir)
-	if err := idx.initialSync(ctx, gi); err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		log.Printf("Error during initial scan: %v", err)
+func (idx *indexer) runInitialSync(ctx context.Context) {
+	if !idx.beginResync() {
 		return
 	}
-
-	docCount, chunkCount, err := idx.store.Stats(ctx)
-	if err != nil {
-		log.Printf("Error fetching index stats: %v", err)
-		return
-	}
-	log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
-	idx.store.RemoveBackup()
+	idx.runResyncLoop(ctx, true)
 }
 
-func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error {
+func (idx *indexer) requestResync(ctx context.Context) {
+	if !idx.beginResync() {
+		return
+	}
+	go idx.runResyncLoop(ctx, false)
+}
+
+func (idx *indexer) beginResync() bool {
+	idx.resyncMu.Lock()
+	defer idx.resyncMu.Unlock()
+
+	if idx.resyncRunning {
+		idx.resyncPending = true
+		return false
+	}
+	idx.resyncRunning = true
+	return true
+}
+
+func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
+	first := startup
+	for {
+		if first {
+			log.Printf("Starting initial scan of %s", idx.cfg.WatchDir)
+		} else {
+			log.Printf("Starting filesystem resync of %s", idx.cfg.WatchDir)
+		}
+
+		if err := idx.initialSync(ctx); err != nil {
+			if ctx.Err() != nil {
+				idx.finishResync(false)
+				return
+			}
+			log.Printf("Error during resync: %v", err)
+		} else if first {
+			docCount, chunkCount, err := idx.store.Stats(ctx)
+			if err != nil {
+				log.Printf("Error fetching index stats: %v", err)
+			} else {
+				log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
+				idx.store.RemoveBackup()
+			}
+		}
+
+		first = false
+		if !idx.finishResync(true) {
+			return
+		}
+	}
+}
+
+func (idx *indexer) finishResync(retryAllowed bool) bool {
+	idx.resyncMu.Lock()
+	defer idx.resyncMu.Unlock()
+
+	if retryAllowed && idx.resyncPending {
+		idx.resyncPending = false
+		return true
+	}
+
+	idx.resyncRunning = false
+	idx.resyncPending = false
+	return false
+}
+
+func (idx *indexer) initialSync(ctx context.Context) error {
+	gi, err := scan.LoadGitIgnore(idx.cfg.WatchDir)
+	if err != nil {
+		return fmt.Errorf("loading gitignore: %w", err)
+	}
+
 	results, err := scan.Scan(idx.cfg.WatchDir, gi)
 	if err != nil {
 		return fmt.Errorf("scanning directory: %w", err)
@@ -229,7 +299,8 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
-				action, err := idx.indexFileCore(ctx, item.key, item.result.Path, item.result.ModifiedAt, item.doc)
+				modTime := item.result.ModifiedAt
+				action, err := idx.syncDocument(ctx, item.key, item.result.Path, &modTime, item.doc)
 				indexResults <- indexResult{path: item.result.Path, action: action, err: err}
 			}
 		}()
@@ -280,6 +351,111 @@ func (idx *indexer) initialSync(ctx context.Context, gi *ignore.GitIgnore) error
 	return nil
 }
 
+func (idx *indexer) beginPathSync(key string) bool {
+	idx.pathMu.Lock()
+	defer idx.pathMu.Unlock()
+
+	if idx.pathStates == nil {
+		idx.pathStates = make(map[string]*pathState)
+	}
+
+	state, ok := idx.pathStates[key]
+	if !ok {
+		state = &pathState{}
+		idx.pathStates[key] = state
+	}
+	if state.running {
+		state.dirty = true
+		return false
+	}
+	state.running = true
+	return true
+}
+
+func (idx *indexer) finishPathSync(key string) bool {
+	idx.pathMu.Lock()
+	defer idx.pathMu.Unlock()
+
+	state, ok := idx.pathStates[key]
+	if !ok {
+		return false
+	}
+	if state.dirty {
+		state.dirty = false
+		return true
+	}
+	delete(idx.pathStates, key)
+	return false
+}
+
+func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
+	if !idx.beginPathSync(key) {
+		return indexNoop, nil
+	}
+
+	currentModTime := modTime
+	currentDoc := doc
+	for {
+		action, err := idx.syncDocumentOnce(ctx, key, path, currentModTime, currentDoc)
+		if !idx.finishPathSync(key) {
+			return action, err
+		}
+		currentModTime = nil
+		currentDoc = nil
+	}
+}
+
+func (idx *indexer) syncDocumentOnce(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			doc, err = idx.loadDocument(ctx, key, doc)
+			if err != nil {
+				return indexNoop, err
+			}
+			return removeDocumentIfPresent(ctx, idx.store, doc, key)
+		}
+		return indexNoop, fmt.Errorf("stating file: %w", err)
+	}
+	if info.IsDir() {
+		return indexNoop, nil
+	}
+
+	if !idx.extractor.Supports(path) {
+		doc, err = idx.loadDocument(ctx, key, doc)
+		if err != nil {
+			return indexNoop, err
+		}
+		return removeDocumentIfPresent(ctx, idx.store, doc, key)
+	}
+
+	effectiveModTime := info.ModTime()
+	if modTime != nil {
+		effectiveModTime = *modTime
+	}
+
+	doc, err = idx.loadDocument(ctx, key, doc)
+	if err != nil {
+		return indexNoop, err
+	}
+	if doc != nil && sameModTime(doc.ModifiedAt, effectiveModTime) {
+		return indexNoop, nil
+	}
+
+	return idx.indexFileCore(ctx, key, path, effectiveModTime, doc)
+}
+
+func (idx *indexer) loadDocument(ctx context.Context, key string, doc *index.Document) (*index.Document, error) {
+	if doc != nil {
+		return doc, nil
+	}
+	doc, err := idx.store.GetDocumentByPath(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("loading indexed document: %w", err)
+	}
+	return doc, nil
+}
+
 func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 	for {
 		select {
@@ -291,9 +467,16 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 			}
 
 			switch event.Op {
+			case watch.Resync:
+				idx.requestResync(ctx)
+
 			case watch.Create, watch.Write:
 				info, err := os.Stat(event.Path)
 				if err != nil {
+					if os.IsNotExist(err) {
+						continue
+					}
+					log.Printf("Error stating %s: %v", event.Path, err)
 					continue
 				}
 				if info.IsDir() {
@@ -318,9 +501,16 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 					log.Printf("Error removing %s: %v", event.Path, err)
 					continue
 				}
-				if err := idx.store.DeleteDocument(ctx, key); err != nil {
-					log.Printf("Error removing %s: %v", event.Path, err)
-					continue
+				if event.IsDir {
+					if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
+						log.Printf("Error removing directory %s: %v", event.Path, err)
+						continue
+					}
+				} else {
+					if err := idx.store.DeleteDocument(ctx, key); err != nil {
+						log.Printf("Error removing %s: %v", event.Path, err)
+						continue
+					}
 				}
 				log.Printf("Removed from index: %s", event.Path)
 			}
@@ -332,24 +522,11 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 // file type is supported, loads any existing document from the store, and
 // short-circuits when the modification time is unchanged.
 func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Time) (indexAction, error) {
-	if !idx.extractor.Supports(path) {
-		return indexNoop, nil
-	}
-
 	key, err := documentKey(idx.cfg.WatchDir, path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("computing document key: %w", err)
 	}
-
-	doc, err := idx.store.GetDocumentByPath(ctx, key)
-	if err != nil {
-		return indexNoop, fmt.Errorf("loading indexed document: %w", err)
-	}
-	if doc != nil && sameModTime(doc.ModifiedAt, modTime) {
-		return indexNoop, nil
-	}
-
-	return idx.indexFileCore(ctx, key, path, modTime, doc)
+	return idx.syncDocument(ctx, key, path, &modTime, nil)
 }
 
 // indexFileCore performs the actual indexing work: hashing, extracting,
