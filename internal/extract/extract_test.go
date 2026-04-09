@@ -36,7 +36,11 @@ func TestRouter_SupportsPDF(t *testing.T) {
 
 func TestRouter_SupportsOOXML(t *testing.T) {
 	r := NewRouter()
-	for _, path := range []string{"file.docx", "file.pptx", "file.xlsx"} {
+	for _, path := range []string{
+		"file.docx", "file.docm", "file.dotx", "file.dotm",
+		"file.pptx", "file.pptm", "file.ppsx", "file.ppsm", "file.potx", "file.potm",
+		"file.xlsx", "file.xlsm", "file.xltx", "file.xltm", "file.xlam",
+	} {
 		if !r.Supports(path) {
 			t.Errorf("expected support for %s", path)
 		}

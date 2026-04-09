@@ -17,12 +17,12 @@ import (
 type OOXMLExtractor struct{}
 
 func (o *OOXMLExtractor) Extract(_ context.Context, path string) (string, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".docx":
+	switch ooxmlKind(path) {
+	case "word":
 		return extractDOCX(path)
-	case ".pptx":
+	case "presentation":
 		return extractPPTX(path)
-	case ".xlsx":
+	case "spreadsheet":
 		return extractXLSX(path)
 	default:
 		return "", fmt.Errorf("unsupported ooxml format: %s", filepath.Ext(path))
@@ -30,11 +30,20 @@ func (o *OOXMLExtractor) Extract(_ context.Context, path string) (string, error)
 }
 
 func (o *OOXMLExtractor) Supports(path string) bool {
+	return ooxmlKind(path) != ""
+}
+
+func ooxmlKind(path string) string {
 	switch strings.ToLower(ext(path)) {
-	case ".docx", ".pptx", ".xlsx":
-		return true
+	case ".docx", ".docm", ".dotx", ".dotm":
+		return "word"
+	case ".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm":
+		return "presentation"
+	case ".xlsx", ".xlsm", ".xltx", ".xltm", ".xlam":
+		return "spreadsheet"
+	default:
+		return ""
 	}
-	return false
 }
 
 func extractDOCX(path string) (string, error) {
