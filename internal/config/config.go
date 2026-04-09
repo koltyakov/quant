@@ -28,6 +28,7 @@ type Config struct {
 	ListenAddr   string    `yaml:"listen"`
 	EmbedURL     string    `yaml:"embed_url"`
 	EmbedModel   string    `yaml:"embed_model"`
+	PDFOCRLang   string    `yaml:"pdf_ocr_lang"`
 	ChunkSize    int       `yaml:"chunk_size"`
 	ChunkOverlap float64   `yaml:"chunk_overlap"`
 	IndexWorkers int       `yaml:"index_workers"`
@@ -40,6 +41,7 @@ func Default() *Config {
 		ListenAddr:   ":8080",
 		EmbedURL:     "http://localhost:11434",
 		EmbedModel:   "nomic-embed-text",
+		PDFOCRLang:   "eng",
 		ChunkSize:    512,
 		ChunkOverlap: 0.15,
 		IndexWorkers: defaultIndexWorkers(),
@@ -78,6 +80,7 @@ func Parse() (*Config, error) {
 	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
 	flag.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flag.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
+	flag.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
 	flag.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flag.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flag.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
@@ -107,6 +110,8 @@ func Parse() (*Config, error) {
 			cfg.EmbedURL = f.Value.String()
 		case "embed-model":
 			cfg.EmbedModel = f.Value.String()
+		case "pdf-ocr-lang":
+			cfg.PDFOCRLang = f.Value.String()
 		case "chunk-size":
 			cfg.ChunkSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.ChunkSize)
 		case "chunk-overlap":
@@ -160,6 +165,7 @@ func loadYAML(cfg *Config, path string) error {
 		ListenAddr   string    `yaml:"listen"`
 		EmbedURL     string    `yaml:"embed_url"`
 		EmbedModel   string    `yaml:"embed_model"`
+		PDFOCRLang   string    `yaml:"pdf_ocr_lang"`
 		ChunkSize    int       `yaml:"chunk_size"`
 		ChunkOverlap float64   `yaml:"chunk_overlap"`
 		IndexWorkers int       `yaml:"index_workers"`
@@ -187,6 +193,9 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if parsed.EmbedModel != "" {
 		cfg.EmbedModel = parsed.EmbedModel
+	}
+	if parsed.PDFOCRLang != "" {
+		cfg.PDFOCRLang = parsed.PDFOCRLang
 	}
 	if parsed.ChunkSize != 0 {
 		cfg.ChunkSize = parsed.ChunkSize
@@ -219,6 +228,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_EMBED_MODEL"); v != "" {
 		cfg.EmbedModel = v
+	}
+	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
+		cfg.PDFOCRLang = v
 	}
 	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" {
 		cfg.ChunkSize = mustParseIntEnv("QUANT_CHUNK_SIZE", v, cfg.ChunkSize)

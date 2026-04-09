@@ -2,15 +2,60 @@ package extract
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ledongthuc/pdf"
 )
 
-type PDFExtractor struct{}
+const pdfOCRTimeout = 2 * time.Minute
 
-func (p *PDFExtractor) Extract(_ context.Context, path string) (string, error) {
+type PDFExtractor struct {
+	findOCRBinary func() (string, bool)
+	extractNative func(path string) (string, error)
+	runOCR        func(ctx context.Context, binaryPath, path, languages string) (string, error)
+	ocrLanguages  string
+
+	ocrLookupOnce sync.Once
+	ocrBinaryPath string
+	ocrAvailable  bool
+}
+
+func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error) {
+	text, err := p.nativeExtractor()(path)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(text) != "" {
+		return text, nil
+	}
+
+	binaryPath, ok := p.ocrBinary()
+	if !ok {
+		return "", nil
+	}
+
+	text, err = p.ocrRunner()(ctx, binaryPath, path, p.languages())
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		log.Printf("PDF OCR fallback skipped for %s: %v", path, err)
+		return "", nil
+	}
+
+	return strings.TrimSpace(text), nil
+}
+
+func extractPDFText(path string) (string, error) {
 	f, r, err := pdf.Open(path)
 	if err != nil {
 		return "", err
@@ -39,6 +84,91 @@ func (p *PDFExtractor) Extract(_ context.Context, path string) (string, error) {
 	}
 
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func (p *PDFExtractor) nativeExtractor() func(path string) (string, error) {
+	if p.extractNative != nil {
+		return p.extractNative
+	}
+	return extractPDFText
+}
+
+func (p *PDFExtractor) ocrBinary() (string, bool) {
+	if p.findOCRBinary != nil {
+		return p.findOCRBinary()
+	}
+
+	p.ocrLookupOnce.Do(func() {
+		path, err := exec.LookPath("ocrmypdf")
+		if err == nil {
+			p.ocrBinaryPath = path
+			p.ocrAvailable = true
+		}
+	})
+
+	return p.ocrBinaryPath, p.ocrAvailable
+}
+
+func (p *PDFExtractor) languages() string {
+	if strings.TrimSpace(p.ocrLanguages) == "" {
+		return "eng"
+	}
+	return strings.TrimSpace(p.ocrLanguages)
+}
+
+func (p *PDFExtractor) ocrRunner() func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+	if p.runOCR != nil {
+		return p.runOCR
+	}
+	return runOCRmyPDF
+}
+
+func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "quant-ocrmypdf-*")
+	if err != nil {
+		return "", fmt.Errorf("creating OCR temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	sidecarPath := filepath.Join(tmpDir, "ocr.txt")
+
+	ocrCtx, cancel := context.WithTimeout(ctx, pdfOCRTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ocrCtx, binaryPath,
+		"--skip-text",
+		"--rotate-pages",
+		"--deskew",
+		"-l",
+		languages,
+		"--sidecar",
+		sidecarPath,
+		"--output-type=none",
+		path,
+		"-",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if errors.Is(ocrCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return "", fmt.Errorf("ocrmypdf timed out after %s", pdfOCRTimeout)
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
+		msg := strings.TrimSpace(string(output))
+		if msg != "" {
+			return "", fmt.Errorf("ocrmypdf failed: %s", msg)
+		}
+		return "", fmt.Errorf("ocrmypdf failed: %w", err)
+	}
+
+	data, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		return "", fmt.Errorf("reading OCR sidecar: %w", err)
+	}
+
+	return strings.TrimSpace(string(data)), nil
 }
 
 func (p *PDFExtractor) Supports(path string) bool {

@@ -19,6 +19,9 @@ func TestDefault(t *testing.T) {
 	if cfg.EmbedModel != "nomic-embed-text" {
 		t.Errorf("expected nomic-embed-text, got %s", cfg.EmbedModel)
 	}
+	if cfg.PDFOCRLang != "eng" {
+		t.Errorf("expected PDF OCR lang eng, got %s", cfg.PDFOCRLang)
+	}
 	if cfg.IndexWorkers < 1 {
 		t.Errorf("expected positive index worker count, got %d", cfg.IndexWorkers)
 	}
@@ -55,6 +58,7 @@ func TestApplyEnv(t *testing.T) {
 	cfg := Default()
 
 	t.Setenv("QUANT_EMBED_MODEL", "all-minilm")
+	t.Setenv("QUANT_PDF_OCR_LANG", "rus+eng")
 	t.Setenv("QUANT_CHUNK_SIZE", "256")
 	t.Setenv("QUANT_INDEX_WORKERS", "6")
 
@@ -62,6 +66,9 @@ func TestApplyEnv(t *testing.T) {
 
 	if cfg.EmbedModel != "all-minilm" {
 		t.Errorf("expected embed model all-minilm, got %s", cfg.EmbedModel)
+	}
+	if cfg.PDFOCRLang != "rus+eng" {
+		t.Errorf("expected PDF OCR lang rus+eng, got %s", cfg.PDFOCRLang)
 	}
 	if cfg.ChunkSize != 256 {
 		t.Errorf("expected chunk size 256, got %d", cfg.ChunkSize)
@@ -74,7 +81,7 @@ func TestApplyEnv(t *testing.T) {
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
-	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\nchunk_size: 1024\nindex_workers: 5\n"), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\npdf_ocr_lang: rus+eng\nchunk_size: 1024\nindex_workers: 5\n"), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
 
@@ -85,6 +92,9 @@ func TestLoadYAML(t *testing.T) {
 	}
 	if cfg.EmbedModel != "all-minilm" {
 		t.Errorf("expected embed model all-minilm, got %s", cfg.EmbedModel)
+	}
+	if cfg.PDFOCRLang != "rus+eng" {
+		t.Errorf("expected PDF OCR lang rus+eng, got %s", cfg.PDFOCRLang)
 	}
 	if cfg.ChunkSize != 1024 {
 		t.Errorf("expected chunk size 1024, got %d", cfg.ChunkSize)

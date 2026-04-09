@@ -124,7 +124,7 @@ func main() {
 		cfg:        cfg,
 		store:      store,
 		embedder:   embedder,
-		extractor:  extract.NewRouter(),
+		extractor:  extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang}),
 		liveStates: make(map[string]*livePathState),
 		pathStates: make(map[string]*pathState),
 	}

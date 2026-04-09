@@ -7,16 +7,25 @@ type Extractor interface {
 	Supports(path string) bool
 }
 
+type Options struct {
+	PDFOCRLang string
+}
+
 type Router struct {
 	extractors []Extractor
 }
 
-func NewRouter() *Router {
+func NewRouter(opts ...Options) *Router {
+	var cfg Options
+	if len(opts) > 0 {
+		cfg = opts[0]
+	}
+
 	return &Router{
 		extractors: []Extractor{
 			&TextExtractor{},
 			&NotebookExtractor{},
-			&PDFExtractor{},
+			&PDFExtractor{ocrLanguages: cfg.PDFOCRLang},
 			&OOXMLExtractor{},
 			&ODFExtractor{},
 			&RTFExtractor{},

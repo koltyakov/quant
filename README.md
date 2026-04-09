@@ -20,6 +20,7 @@ Zero CGO. Pure Go.
   ```
   ollama pull nomic-embed-text
   ```
+- Optional for scanned PDFs: [ocrmypdf](https://ocrmypdf.readthedocs.io/) installed on your system `PATH`. If present, `quant` will automatically use it as a best-effort OCR sidecar for PDFs that contain no extractable text.
 
 ### Hardware guidance for Ollama
 
@@ -63,13 +64,14 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | `--listen` | `:8080` | Listen address for SSE/HTTP |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
 | `--embed-model` | `nomic-embed-text` | Embedding model |
+| `--pdf-ocr-lang` | `eng` | Tesseract language(s) for scanned PDF OCR, e.g. `eng`, `spa`, or `eng+spa` |
 | `--chunk-size` | `512` | Target chunk size in approximate words |
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0–1) |
 | `--index-workers` | auto (`2-8`) | Parallel workers for startup indexing |
 | `--config` | - | YAML config file path |
 
 All flags can also be set via env vars:
-`QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
+`QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_PDF_OCR_LANG`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
 Also `QUANT_INDEX_WORKERS`.
 
 Configuration precedence is:
@@ -88,7 +90,9 @@ Configuration precedence is:
 ./bin/quant --dir ./my-project --transport sse --listen :9090
 
 # Custom embedding endpoint via Ollama
-./bin/quant --dir ./docs --embed-url http://gpu-server:11434 --embed-model mxbai-embed-large
+./bin/quant --dir ./docs \
+  --embed-url http://gpu-server:11434 \
+  --embed-model mxbai-embed-large
 ```
 
 ### Config file
@@ -100,6 +104,7 @@ transport: stdio
 listen: :8080
 embed_url: http://localhost:11434
 embed_model: nomic-embed-text
+pdf_ocr_lang: eng
 chunk_size: 512
 chunk_overlap: 0.15
 index_workers: 4
@@ -218,6 +223,7 @@ For document-style content, current support includes:
 
 - Jupyter notebooks, with cell markers and captured text outputs when present
 - PDF, with page markers like `[Page N]`
+- Scanned PDF OCR via optional `ocrmypdf` fallback when a PDF has no embedded text and `ocrmypdf` is installed
 - Rich text via RTF
 - Modern Office/Open XML word-processing, presentation, and spreadsheet files, including common macro-enabled and template variants
 - OpenDocument text, spreadsheet, and presentation files

@@ -3,6 +3,7 @@ package extract
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +32,160 @@ func TestRouter_SupportsPDF(t *testing.T) {
 	r := NewRouter()
 	if !r.Supports("file.pdf") {
 		t.Error("expected support for .pdf")
+	}
+}
+
+func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
+	ext := &PDFExtractor{
+		extractNative: func(path string) (string, error) {
+			if path != "file.pdf" {
+				t.Fatalf("unexpected path: %s", path)
+			}
+			return "[Page 1]\nhello world", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			t.Fatal("ocrmypdf lookup should not run when native PDF text exists")
+			return "", false
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			t.Fatal("ocrmypdf should not run when native PDF text exists")
+			return "", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), "file.pdf")
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "[Page 1]\nhello world" {
+		t.Fatalf("unexpected extracted text: %q", text)
+	}
+}
+
+func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) {
+	ext := &PDFExtractor{
+		extractNative: func(path string) (string, error) {
+			if path != "scan.pdf" {
+				t.Fatalf("unexpected path: %s", path)
+			}
+			return "", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "/usr/bin/ocrmypdf", true
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			if binaryPath != "/usr/bin/ocrmypdf" {
+				t.Fatalf("unexpected ocrmypdf path: %s", binaryPath)
+			}
+			if path != "scan.pdf" {
+				t.Fatalf("unexpected pdf path: %s", path)
+			}
+			if languages != "eng" {
+				t.Fatalf("unexpected OCR languages: %s", languages)
+			}
+			return "[Page 1]\nscanned text", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), "scan.pdf")
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "[Page 1]\nscanned text" {
+		t.Fatalf("unexpected OCR text: %q", text)
+	}
+}
+
+func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
+	ext := &PDFExtractor{
+		extractNative: func(path string) (string, error) {
+			return "", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "", false
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			t.Fatal("ocrmypdf should not run when the binary is unavailable")
+			return "", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), "scan.pdf")
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected empty text when OCR is unavailable, got %q", text)
+	}
+}
+
+func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
+	ext := &PDFExtractor{
+		extractNative: func(path string) (string, error) {
+			return "", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "/usr/bin/ocrmypdf", true
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			return "", errors.New("boom")
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), "scan.pdf")
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected empty text after OCR failure, got %q", text)
+	}
+}
+
+func TestPDFExtractor_ExtractPropagatesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ext := &PDFExtractor{
+		extractNative: func(path string) (string, error) {
+			return "", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "/usr/bin/ocrmypdf", true
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			return "", ctx.Err()
+		},
+	}
+
+	_, err := ext.Extract(ctx, "scan.pdf")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+func TestPDFExtractor_ExtractUsesConfiguredLanguages(t *testing.T) {
+	ext := &PDFExtractor{
+		ocrLanguages: "rus+eng",
+		extractNative: func(path string) (string, error) {
+			return "", nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "/usr/bin/ocrmypdf", true
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+			if languages != "rus+eng" {
+				t.Fatalf("unexpected OCR languages: %s", languages)
+			}
+			return "text", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), "scan.pdf")
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "text" {
+		t.Fatalf("unexpected OCR text: %q", text)
 	}
 }
 
