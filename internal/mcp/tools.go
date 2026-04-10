@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -42,7 +43,11 @@ func (s *Server) registerTools() {
 // maxQueryLength is the maximum number of characters accepted in a search query.
 // Queries beyond this length are truncated before embedding to avoid sending
 // unnecessarily large payloads to the embedding backend.
-const maxQueryLength = 4000
+const (
+	maxQueryLength     = 4000
+	defaultSearchLimit = 5
+	maxSearchLimit     = 50
+)
 
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	args := request.GetArguments()
@@ -59,9 +64,15 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		query = string([]rune(query)[:maxQueryLength])
 	}
 
-	limit := 5
+	limit := defaultSearchLimit
 	if v, ok := args["limit"].(float64); ok {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("limit must be a finite number between 1 and %d", maxSearchLimit)
+		}
 		limit = int(v)
+	}
+	if limit < 1 || limit > maxSearchLimit {
+		return nil, fmt.Errorf("limit must be between 1 and %d", maxSearchLimit)
 	}
 
 	threshold := float32(0)

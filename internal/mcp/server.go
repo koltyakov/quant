@@ -25,7 +25,10 @@ type Server struct {
 	embFlights map[string]*embeddingFlight
 }
 
-const embCacheMaxSize = 128
+const (
+	embCacheMaxSize = 128
+	shutdownTimeout = 5 * time.Second
+)
 
 func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder) *Server {
 	s := &Server{
@@ -131,6 +134,8 @@ func (s *Server) serveWithShutdown(ctx context.Context, srv shutdownable, addr s
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
 	}
 }

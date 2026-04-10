@@ -95,6 +95,25 @@ func (e *cancelAwareEmbedder) Dimensions() int { return 1 }
 
 func (e *cancelAwareEmbedder) Close() error { return nil }
 
+type shutdownRecorder struct {
+	startErr    error
+	startBlock  chan struct{}
+	shutdownErr error
+	shutdownCtx context.Context
+}
+
+func (s *shutdownRecorder) Start(string) error {
+	if s.startBlock != nil {
+		<-s.startBlock
+	}
+	return s.startErr
+}
+
+func (s *shutdownRecorder) Shutdown(ctx context.Context) error {
+	s.shutdownCtx = ctx
+	return s.shutdownErr
+}
+
 func TestCachedEmbed_UsesLRUEviction(t *testing.T) {
 	embedder := &countingEmbedder{}
 	s := &Server{
@@ -471,6 +490,57 @@ func TestHandleSearch_EmptyQuery(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for whitespace-only query")
 	}
+}
+
+func TestHandleSearch_InvalidLimit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+
+	for _, limit := range []float64{0, -1, float64(maxSearchLimit + 1)} {
+		_, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{
+				Name:      "search",
+				Arguments: map[string]any{"query": "alpha", "limit": limit},
+			},
+		})
+		if err == nil {
+			t.Fatalf("expected error for invalid limit %v", limit)
+		}
+	}
+}
+
+func TestServeWithShutdown_UsesTimeoutContext(t *testing.T) {
+	s := &Server{}
+	recorder := &shutdownRecorder{startBlock: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := s.serveWithShutdown(ctx, recorder, ":0")
+	if err != nil {
+		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+	if recorder.shutdownCtx == nil {
+		t.Fatal("expected shutdown to be called")
+	}
+	deadline, ok := recorder.shutdownCtx.Deadline()
+	if !ok {
+		t.Fatal("expected shutdown context to have a deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > shutdownTimeout {
+		t.Fatalf("expected shutdown deadline within %s, got %s", shutdownTimeout, remaining)
+	}
+
+	close(recorder.startBlock)
 }
 
 func TestHandleListSources(t *testing.T) {
