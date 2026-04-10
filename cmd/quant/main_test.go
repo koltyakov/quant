@@ -128,6 +128,27 @@ func (f *countingExtractor) Extract(context.Context, string) (string, error) {
 
 func (f *countingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
+type flakyExtractor struct {
+	text        string
+	failures    int32
+	calls       atomic.Int32
+	started     chan struct{}
+	startedOnce sync.Once
+}
+
+func (f *flakyExtractor) Extract(context.Context, string) (string, error) {
+	f.calls.Add(1)
+	if f.started != nil {
+		f.startedOnce.Do(func() { close(f.started) })
+	}
+	if remaining := atomic.AddInt32(&f.failures, -1); remaining >= 0 {
+		return "", io.ErrUnexpectedEOF
+	}
+	return f.text, nil
+}
+
+func (f *flakyExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
+
 type blockingExtractor struct {
 	text    string
 	started chan struct{}
@@ -598,6 +619,79 @@ func TestHandleWatchEvent_QueuesLiveIndexWork(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for live worker to start extraction")
 	}
+}
+
+func TestHandleWatchEvent_RetriesTransientLiveIndexFailure(t *testing.T) {
+	oldRetryDelay := indexRetryBaseDelay
+	oldRetryAttempts := maxIndexRetryAttempts
+	indexRetryBaseDelay = 10 * time.Millisecond
+	maxIndexRetryAttempts = 2
+	t.Cleanup(func() {
+		indexRetryBaseDelay = oldRetryDelay
+		maxIndexRetryAttempts = oldRetryAttempts
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	ext := &flakyExtractor{
+		text:     "hello world",
+		failures: 1,
+		started:  make(chan struct{}),
+	}
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  ext,
+		pathStates: make(map[string]*pathState),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	idx.startLiveIndexWorkers(ctx, &wg)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	idx.handleWatchEvent(ctx, watch.Event{Path: path, Op: watch.Write})
+
+	select {
+	case <-ext.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first extraction attempt")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		doc, err := store.GetDocumentByPath(context.Background(), "sample.txt")
+		if err != nil {
+			t.Fatalf("unexpected load error: %v", err)
+		}
+		if doc != nil {
+			if ext.calls.Load() < 2 {
+				t.Fatalf("expected retry to re-run extraction, got %d calls", ext.calls.Load())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("expected retry to eventually index sample.txt, got %d extractor calls", ext.calls.Load())
 }
 
 func TestEnqueueLiveIndex_CoalescesByPath(t *testing.T) {

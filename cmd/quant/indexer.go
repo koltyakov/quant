@@ -41,6 +41,9 @@ type indexer struct {
 	pathMu     sync.Mutex
 	pathStates map[string]*pathState
 
+	retryMu     sync.Mutex
+	retryStates map[string]*retryState
+
 	resyncMu      sync.Mutex
 	resyncRunning bool
 	resyncPending bool
@@ -61,6 +64,17 @@ type livePathState struct {
 	queued     bool
 	running    bool
 }
+
+type retryState struct {
+	attempts int
+	modTime  time.Time
+	timer    *time.Timer
+}
+
+var (
+	indexRetryBaseDelay   = 2 * time.Second
+	maxIndexRetryAttempts = 3
+)
 
 func (idx *indexer) runInitialSync(ctx context.Context) {
 	if !idx.beginResync() {
@@ -166,9 +180,10 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 	}
 
 	type indexResult struct {
-		path   string
-		action indexAction
-		err    error
+		path    string
+		modTime time.Time
+		action  indexAction
+		err     error
 	}
 
 	workers := idx.workerCount(0)
@@ -186,7 +201,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 			for item := range jobs {
 				modTime := item.result.ModifiedAt
 				action, err := idx.syncDocument(ctx, item.key, item.result.Path, &modTime, item.doc)
-				indexResults <- indexResult{path: item.result.Path, action: action, err: err}
+				indexResults <- indexResult{path: item.result.Path, modTime: modTime, action: action, err: err}
 			}
 		}()
 	}
@@ -222,8 +237,10 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 	for result := range indexResults {
 		if result.err != nil {
 			log.Printf("Error indexing %s: %v", result.path, result.err)
+			idx.scheduleIndexRetry(ctx, result.path, result.modTime)
 			continue
 		}
+		idx.clearIndexRetry(result.path)
 		switch result.action {
 		case indexUpdated:
 			log.Printf("Indexed: %s", result.path)
@@ -421,7 +438,9 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 	action, err := idx.indexFile(ctx, path, modTime)
 	if err != nil {
 		log.Printf("Error indexing %s: %v", path, err)
+		idx.scheduleIndexRetry(ctx, path, modTime)
 	} else {
+		idx.clearIndexRetry(path)
 		switch action {
 		case indexUpdated:
 			log.Printf("Indexed: %s", path)
@@ -842,4 +861,80 @@ func removeDocumentIfPresent(ctx context.Context, store *index.Store, doc *index
 		return indexNoop, fmt.Errorf("deleting empty document: %w", err)
 	}
 	return indexRemoved, nil
+}
+
+func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime time.Time) {
+	if path == "" {
+		return
+	}
+
+	idx.retryMu.Lock()
+	if idx.retryStates == nil {
+		idx.retryStates = make(map[string]*retryState)
+	}
+
+	state, ok := idx.retryStates[path]
+	if !ok {
+		state = &retryState{}
+		idx.retryStates[path] = state
+	}
+	if state.timer != nil {
+		if state.modTime.IsZero() || modTime.After(state.modTime) {
+			state.modTime = modTime
+		}
+		idx.retryMu.Unlock()
+		return
+	}
+	if state.attempts >= maxIndexRetryAttempts {
+		attempts := state.attempts
+		idx.retryMu.Unlock()
+		log.Printf("warning: giving up retrying %s after %d attempts", path, attempts)
+		return
+	}
+
+	state.attempts++
+	if state.modTime.IsZero() || modTime.After(state.modTime) {
+		state.modTime = modTime
+	}
+	attempts := state.attempts
+	delay := time.Duration(attempts) * indexRetryBaseDelay
+	state.timer = time.AfterFunc(delay, func() {
+		idx.retryMu.Lock()
+		current, ok := idx.retryStates[path]
+		if !ok {
+			idx.retryMu.Unlock()
+			return
+		}
+		current.timer = nil
+		retryModTime := current.modTime
+		idx.retryMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		idx.enqueueLiveIndex(ctx, path, retryModTime)
+	})
+	idx.retryMu.Unlock()
+
+	log.Printf("Retrying %s in %s (attempt %d/%d)", path, delay, attempts, maxIndexRetryAttempts)
+}
+
+func (idx *indexer) clearIndexRetry(path string) {
+	idx.retryMu.Lock()
+	defer idx.retryMu.Unlock()
+
+	if idx.retryStates == nil {
+		return
+	}
+	state, ok := idx.retryStates[path]
+	if !ok {
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	delete(idx.retryStates, path)
 }

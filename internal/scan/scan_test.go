@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -214,6 +215,38 @@ func TestWalk_VisitorErrorPropagates(t *testing.T) {
 	err := Walk(dir, nil, func(Result) error { return want })
 	if !errors.Is(err, want) {
 		t.Fatalf("expected visitor error %v, got %v", want, err)
+	}
+}
+
+func TestWalk_SkipsUnreadableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission semantics differ on windows")
+	}
+
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "hello")
+
+	locked := filepath.Join(dir, "locked")
+	mustMkdirAll(t, locked)
+	mustWriteFile(t, filepath.Join(locked, "secret.txt"), "secret")
+
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatalf("unexpected chmod error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(locked, 0755)
+	})
+
+	results, err := Scan(dir, nil)
+	if err != nil {
+		t.Fatalf("expected scan to skip unreadable directory, got %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected only readable files to be returned, got %d", len(results))
+	}
+	if filepath.Base(results[0].Path) != "visible.txt" {
+		t.Fatalf("expected visible.txt, got %s", results[0].Path)
 	}
 }
 

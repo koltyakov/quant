@@ -394,15 +394,16 @@ func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, query
 	var rows *sql.Rows
 	var err error
 	if pathPrefix != "" {
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 			 FROM chunks_fts
 			 JOIN chunks c ON c.id = chunks_fts.rowid
 			 JOIN documents d ON c.document_id = d.id
-			 WHERE chunks_fts MATCH ? AND d.path LIKE ? || '%'
+			 WHERE chunks_fts MATCH ? AND d.path LIKE ? ESCAPE '\'
 			 ORDER BY bm25(chunks_fts), c.chunk_index
 			 LIMIT ?`,
-			ftsQuery, pathPrefix, candidateLimit,
+			ftsQuery, pathPattern, candidateLimit,
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
@@ -466,12 +467,13 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	var rows *sql.Rows
 	var err error
 	if pathPrefix != "" {
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id
-			 WHERE d.path LIKE ? || '%'`,
-			pathPrefix,
+			 WHERE d.path LIKE ? ESCAPE '\'`,
+			pathPattern,
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
@@ -672,6 +674,15 @@ func dotProductEncoded(query []float32, encoded []byte) float32 {
 
 func sqrt32(x float32) float32 {
 	return float32(math.Sqrt(float64(x)))
+}
+
+func sqlLikePrefixPattern(prefix string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`%`, `\%`,
+		`_`, `\_`,
+	)
+	return replacer.Replace(prefix) + "%"
 }
 
 func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc *Document) (int64, error) {

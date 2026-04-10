@@ -208,6 +208,58 @@ func TestStore_SearchWithPathPrefix(t *testing.T) {
 	}
 }
 
+func TestStore_SearchWithPathPrefix_TreatsWildcardsLiterally(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+
+	doc1 := &Document{Path: "docs_/match.md", Hash: "a1", ModifiedAt: time.Now()}
+	doc2 := &Document{Path: "docsa/other.md", Hash: "b2", ModifiedAt: time.Now()}
+
+	id1, err := store.UpsertDocument(ctx, doc1)
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
+	id2, err := store.UpsertDocument(ctx, doc2)
+	if err != nil {
+		t.Fatalf("unexpected upsert error: %v", err)
+	}
+
+	embedding := NormalizeFloat32([]float32{1})
+	for _, chunk := range []struct {
+		docID   int64
+		content string
+	}{
+		{docID: id1, content: "hello from literal underscore path"},
+		{docID: id2, content: "hello from wildcard lookalike path"},
+	} {
+		if err := store.InsertChunk(ctx, &ChunkRecord{
+			DocumentID: chunk.docID,
+			Content:    chunk.content,
+			ChunkIndex: 0,
+			Embedding:  EncodeFloat32(embedding),
+		}); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	results, err := store.Search(ctx, "hello", embedding, 10, "docs_")
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 literal-prefix result, got %d", len(results))
+	}
+	if results[0].DocumentPath != "docs_/match.md" {
+		t.Fatalf("expected docs_/match.md, got %s", results[0].DocumentPath)
+	}
+}
+
 func TestStore_SearchVectorFallback(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")

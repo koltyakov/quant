@@ -33,11 +33,18 @@ func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 // Walk streams file results to visit without materializing the full result set.
 // It respects .gitignore files at every level and skips hidden files/directories.
 func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("walking %s: %w", dir, err)
+	}
+
 	matcher := NewGitIgnoreMatcher(dir, gi)
 
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("walking %s: %w", path, err)
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		if d.IsDir() {
@@ -64,7 +71,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 		info, err := d.Info()
 		if err != nil {
-			return fmt.Errorf("stating %s: %w", path, err)
+			return nil
 		}
 
 		return visit(Result{
