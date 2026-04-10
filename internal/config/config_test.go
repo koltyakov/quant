@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"flag"
 	"os"
 	"testing"
 )
@@ -101,5 +103,20 @@ func TestLoadYAML(t *testing.T) {
 	}
 	if cfg.IndexWorkers != 5 {
 		t.Errorf("expected index workers 5, got %d", cfg.IndexWorkers)
+	}
+}
+
+func TestParseArgs_Help(t *testing.T) {
+	_, err := ParseArgs([]string{"--help"})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestParseArgs_RejectsUnexpectedPositionalArgs(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ParseArgs([]string{"--dir", dir, "extra"})
+	if err == nil {
+		t.Fatal("expected error for unexpected positional arguments")
 	}
 }

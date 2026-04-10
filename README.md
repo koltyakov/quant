@@ -45,6 +45,7 @@ make build
 ```
 
 Or directly:
+
 ```
 mkdir -p bin && go build -o bin/quant ./cmd/quant
 ```
@@ -52,11 +53,18 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 ## Usage
 
 ```
-./bin/quant [--dir <path>] [options]
-./bin/quant --version
+./bin/quant mcp [--dir <path>] [options]
+./bin/quant version
 ```
 
-**Options:**
+**Commands:**
+| Command | Description |
+|---------|-------------|
+| `mcp` | Start the MCP server |
+| `version` | Print the quant version and exit |
+| `help` | Show top-level CLI help |
+
+**MCP Flags:**
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir` | current working directory | Directory to watch and index |
@@ -70,13 +78,13 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0–1) |
 | `--index-workers` | auto (`2-8`) | Parallel workers for startup indexing |
 | `--config` | - | YAML config file path |
-| `--version` | - | Print the quant version and exit |
 
 All flags can also be set via env vars:
 `QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_PDF_OCR_LANG`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
 Also `QUANT_INDEX_WORKERS`.
 
 Configuration precedence is:
+
 1. Defaults
 2. YAML config file
 3. Environment variables
@@ -86,13 +94,13 @@ Configuration precedence is:
 
 ```bash
 # Basic - index a folder over stdio
-./bin/quant --dir ./my-project
+./bin/quant mcp --dir ./my-project
 
 # SSE transport for remote access
-./bin/quant --dir ./my-project --transport sse --listen :9090
+./bin/quant mcp --dir ./my-project --transport sse --listen :9090
 
 # Custom embedding endpoint via Ollama
-./bin/quant --dir ./docs \
+./bin/quant mcp --dir ./docs \
   --embed-url http://gpu-server:11434 \
   --embed-model mxbai-embed-large
 ```
@@ -136,11 +144,11 @@ If you later add a hosted backend, the cheapest widely-used OpenAI embedding opt
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold` |
-| `list_sources` | List indexed documents |
-| `index_status` | Stats: total docs, chunks, DB size, watch dir, model |
+| Tool           | Description                                                                           |
+| -------------- | ------------------------------------------------------------------------------------- |
+| `search`       | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold` |
+| `list_sources` | List indexed documents                                                                |
+| `index_status` | Stats: total docs, chunks, DB size, watch dir, model                                  |
 
 `search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity.
 
@@ -153,7 +161,7 @@ If you later add a hosted backend, the cheapest widely-used OpenAI embedding opt
 For Claude Code, project-scoped MCPs are usually the right default:
 
 ```bash
-claude mcp add --transport stdio --scope project quant -- quant --dir /path/to/project
+claude mcp add --transport stdio --scope project quant -- quant mcp --dir /path/to/project
 ```
 
 Or commit a project-level `.mcp.json`:
@@ -164,7 +172,7 @@ Or commit a project-level `.mcp.json`:
     "quant": {
       "type": "stdio",
       "command": "quant",
-      "args": ["--dir", "/path/to/project"]
+      "args": ["mcp", "--dir", "/path/to/project"]
     }
   }
 }
@@ -180,7 +188,7 @@ For VS Code with GitHub Copilot Agent mode, add a project-level `.vscode/mcp.jso
     "quant": {
       "type": "stdio",
       "command": "quant",
-      "args": ["--dir", "/path/to/project"]
+      "args": ["mcp", "--dir", "/path/to/project"]
     }
   }
 }
@@ -191,13 +199,13 @@ For VS Code with GitHub Copilot Agent mode, add a project-level `.vscode/mcp.jso
 Add a local stdio MCP with the Codex CLI:
 
 ```bash
-codex mcp add quant -- quant --dir /path/to/project
+codex mcp add quant -- quant mcp --dir /path/to/project
 ```
 
 If you prefer a domain-specific name:
 
 ```bash
-codex mcp add research-notes -- quant --dir /path/to/research-notes
+codex mcp add research-notes -- quant mcp --dir /path/to/research-notes
 ```
 
 ### OpenCode config
@@ -210,10 +218,10 @@ Add a local MCP in `opencode.json` or `opencode.jsonc`:
   "mcp": {
     "quant": {
       "type": "local",
-      "command": ["quant", "--dir", "/path/to/project"],
-      "enabled": true
-    }
-  }
+      "command": ["quant", "mcp", "--dir", "/path/to/project"],
+      "enabled": true,
+    },
+  },
 }
 ```
 

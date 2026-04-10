@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -935,6 +937,41 @@ func TestIsVersionRequest(t *testing.T) {
 	}
 }
 
+func TestResolveCommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCmd  string
+		wantArgs []string
+	}{
+		{name: "default to help", args: nil, wantCmd: "help"},
+		{name: "explicit mcp", args: []string{"mcp", "--dir", "./data"}, wantCmd: "mcp", wantArgs: []string{"--dir", "./data"}},
+		{name: "top level flags unsupported", args: []string{"--dir", "./data"}, wantCmd: "unknown"},
+		{name: "version", args: []string{"version"}, wantCmd: "version"},
+		{name: "help", args: []string{"help"}, wantCmd: "help"},
+		{name: "mcp help command", args: []string{"help", "mcp"}, wantCmd: "mcp-help"},
+		{name: "mcp help flag", args: []string{"mcp", "--help"}, wantCmd: "mcp-help"},
+		{name: "unknown", args: []string{"search"}, wantCmd: "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCmd, gotArgs := resolveCommand(tt.args)
+			if gotCmd != tt.wantCmd {
+				t.Fatalf("resolveCommand(%v) command = %q, want %q", tt.args, gotCmd, tt.wantCmd)
+			}
+			if len(gotArgs) != len(tt.wantArgs) {
+				t.Fatalf("resolveCommand(%v) args = %v, want %v", tt.args, gotArgs, tt.wantArgs)
+			}
+			for i := range gotArgs {
+				if gotArgs[i] != tt.wantArgs[i] {
+					t.Fatalf("resolveCommand(%v) args = %v, want %v", tt.args, gotArgs, tt.wantArgs)
+				}
+			}
+		})
+	}
+}
+
 func TestPrintVersion(t *testing.T) {
 	oldStdout := os.Stdout
 	oldVersion := Version
@@ -963,6 +1000,20 @@ func TestPrintVersion(t *testing.T) {
 	}
 	if got := string(out); got != "quant v9.9.9\n" {
 		t.Fatalf("printVersion() = %q, want %q", got, "quant v9.9.9\n")
+	}
+}
+
+func TestPrintMCPDefaults_UsesDoubleDash(t *testing.T) {
+	var out bytes.Buffer
+
+	printMCPDefaults(&out)
+
+	got := out.String()
+	if !strings.Contains(got, "  --dir string\n") {
+		t.Fatalf("printMCPDefaults() missing double-dash flag: %q", got)
+	}
+	if strings.Contains(got, "  -dir string\n") {
+		t.Fatalf("printMCPDefaults() unexpectedly contains single-dash flag: %q", got)
 	}
 }
 

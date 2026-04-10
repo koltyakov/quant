@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -72,21 +73,20 @@ func (c *Config) Validate() error {
 }
 
 func Parse() (*Config, error) {
-	cfg := Default()
+	return ParseArgs(os.Args[1:])
+}
 
-	flag.StringVar(&cfg.WatchDir, "dir", "", "Directory to watch (default: current directory)")
-	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/.index/quant.db)")
-	flag.StringVar((*string)(&cfg.Transport), "transport", string(cfg.Transport), "MCP transport: stdio, sse, http")
-	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
-	flag.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
-	flag.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
-	flag.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
-	flag.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
-	flag.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
-	flag.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
-	flag.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
+func ParseArgs(args []string) (*Config, error) {
+	flagSet, cfg := NewFlagSet("quant mcp")
+	flagSet.SetOutput(io.Discard)
 
-	flag.Parse()
+	if err := flagSet.Parse(args); err != nil {
+		return nil, err
+	}
+
+	if flagSet.NArg() > 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flagSet.Args(), " "))
+	}
 
 	if cfg.ConfigFile != "" {
 		if err := loadYAML(cfg, cfg.ConfigFile); err != nil {
@@ -96,7 +96,7 @@ func Parse() (*Config, error) {
 
 	applyEnv(cfg)
 
-	flag.Visit(func(f *flag.Flag) {
+	flagSet.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "dir":
 			cfg.WatchDir = f.Value.String()
@@ -150,6 +150,25 @@ func Parse() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func NewFlagSet(name string) (*flag.FlagSet, *Config) {
+	cfg := Default()
+	flagSet := flag.NewFlagSet(name, flag.ContinueOnError)
+
+	flagSet.StringVar(&cfg.WatchDir, "dir", "", "Directory to watch (default: current directory)")
+	flagSet.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/.index/quant.db)")
+	flagSet.StringVar((*string)(&cfg.Transport), "transport", string(cfg.Transport), "MCP transport: stdio, sse, http")
+	flagSet.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
+	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
+	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
+	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
+	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
+	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
+	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
+	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
+
+	return flagSet, cfg
 }
 
 func defaultDBPath(watchDir string) string {

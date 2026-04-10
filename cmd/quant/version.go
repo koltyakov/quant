@@ -37,6 +37,19 @@ func isVersionRequest(args []string) bool {
 	}
 }
 
+func isHelpRequest(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	switch args[0] {
+	case "help", "--help", "-h":
+		return true
+	default:
+		return false
+	}
+}
+
 func printVersion() {
 	fmt.Println("quant", Version)
 }

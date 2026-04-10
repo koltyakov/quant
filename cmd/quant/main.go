@@ -82,21 +82,13 @@ type rotatingLogWriter struct {
 }
 
 func main() {
-	if isVersionRequest(os.Args[1:]) {
-		printVersion()
-		return
-	}
+	os.Exit(run(os.Args[1:]))
+}
 
-	cfg, err := config.Parse()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
+func runMCP(cfg *config.Config) error {
 	logFile, err := configureLogging(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error configuring logging: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error configuring logging: %w", err)
 	}
 	defer func() { _ = logFile.Close() }()
 
@@ -105,8 +97,7 @@ func main() {
 
 	embedder, err := embed.NewOllama(cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error connecting to ollama: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error connecting to ollama: %w", err)
 	}
 	defer func() {
 		if err := embedder.Close(); err != nil {
@@ -118,8 +109,7 @@ func main() {
 
 	store, err := index.NewStore(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening database: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error opening database: %w", err)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -135,8 +125,7 @@ func main() {
 		Normalized: true,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error configuring embedding metadata: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error configuring embedding metadata: %w", err)
 	}
 	if rebuild {
 		log.Printf("Embedding metadata changed; rebuilding index from filesystem projection")
@@ -144,8 +133,7 @@ func main() {
 
 	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading gitignore: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error loading gitignore: %w", err)
 	}
 
 	idx := &indexer{
@@ -159,8 +147,7 @@ func main() {
 
 	watcher, err := watch.New(cfg.WatchDir, gi)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error starting watcher: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error starting watcher: %w", err)
 	}
 	defer func() {
 		if err := watcher.Close(); err != nil {
@@ -187,14 +174,14 @@ func main() {
 	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
 
 	if err := mcpServer.Serve(ctx, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		cancel()
 		wg.Wait()
-		os.Exit(1)
+		return err
 	}
 
 	cancel()
 	wg.Wait()
+	return nil
 }
 
 func (idx *indexer) runInitialSync(ctx context.Context) {
