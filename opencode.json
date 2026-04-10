@@ -6,5 +6,8 @@
       "command": ["go", "run", "./cmd/quant", "--dir", "./data"],
       "enabled": true
     }
+  },
+  "permission": {
+    "quant_*": "ask"
   }
 }
