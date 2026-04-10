@@ -288,6 +288,261 @@ func TestHandleSearch_LogsRequestAndSpotlight(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_ReturnsMatchingResults(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Seed two documents with distinct content.
+	for _, doc := range []struct {
+		path    string
+		content string
+	}{
+		{"notes/golang.txt", "Go is a statically typed compiled programming language"},
+		{"notes/python.txt", "Python is a dynamically typed interpreted language"},
+	} {
+		if err := store.ReindexDocument(context.Background(), &index.Document{
+			Path:       doc.path,
+			Hash:       doc.path + "-hash",
+			ModifiedAt: testTime(),
+		}, []index.ChunkRecord{{
+			Content:    doc.content,
+			ChunkIndex: 0,
+			Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+		}}); err != nil {
+			t.Fatalf("unexpected seed error for %s: %v", doc.path, err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	// Search should return results.
+	result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "compiled language", "limit": float64(5)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+	text := extractToolText(t, result)
+	if !strings.Contains(text, "notes/golang.txt") && !strings.Contains(text, "notes/python.txt") {
+		t.Fatalf("expected at least one document in results, got %q", text)
+	}
+	if !strings.Contains(text, "score:") {
+		t.Fatalf("expected score in results, got %q", text)
+	}
+}
+
+func TestHandleSearch_PathFilter(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, doc := range []struct {
+		path    string
+		content string
+	}{
+		{"src/main.go", "package main func main"},
+		{"docs/guide.md", "installation guide for the project"},
+	} {
+		if err := store.ReindexDocument(context.Background(), &index.Document{
+			Path:       doc.path,
+			Hash:       doc.path + "-hash",
+			ModifiedAt: testTime(),
+		}, []index.ChunkRecord{{
+			Content:    doc.content,
+			ChunkIndex: 0,
+			Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+		}}); err != nil {
+			t.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	// Search with path filter should only return docs/ results.
+	result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "guide project", "path": "docs/"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+	text := extractToolText(t, result)
+	if strings.Contains(text, "src/main.go") {
+		t.Fatalf("expected path filter to exclude src/ results, got %q", text)
+	}
+}
+
+func TestHandleSearch_EmptyQuery(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+
+	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": ""},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty query")
+	}
+
+	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "   "},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for whitespace-only query")
+	}
+}
+
+func TestHandleListSources(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       "readme.md",
+		Hash:       "readme-hash",
+		ModifiedAt: testTime(),
+	}, []index.ChunkRecord{{
+		Content:    "project readme",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+	}}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	result, err := s.handleListSources(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "list_sources"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected list_sources error: %v", err)
+	}
+	text := extractToolText(t, result)
+	if !strings.Contains(text, "readme.md") {
+		t.Fatalf("expected readme.md in list_sources output, got %q", text)
+	}
+}
+
+func TestHandleIndexStatus(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       "test.txt",
+		Hash:       "test-hash",
+		ModifiedAt: testTime(),
+	}, []index.ChunkRecord{
+		{Content: "chunk one", ChunkIndex: 0, Embedding: index.EncodeFloat32(index.NormalizeFloat32([]float32{1}))},
+		{Content: "chunk two", ChunkIndex: 1, Embedding: index.EncodeFloat32(index.NormalizeFloat32([]float32{1}))},
+	}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	result, err := s.handleIndexStatus(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "index_status"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected index_status error: %v", err)
+	}
+	text := extractToolText(t, result)
+	if !strings.Contains(text, "Documents: 1") {
+		t.Fatalf("expected 1 document in status, got %q", text)
+	}
+	if !strings.Contains(text, "Chunks: 2") {
+		t.Fatalf("expected 2 chunks in status, got %q", text)
+	}
+	if !strings.Contains(text, "test-model") {
+		t.Fatalf("expected model name in status, got %q", text)
+	}
+}
+
+func newTestServer(dir, dbPath string, store *index.Store) *Server {
+	return &Server{
+		cfg: &config.Config{
+			WatchDir:   dir,
+			DBPath:     dbPath,
+			EmbedModel: "test-model",
+		},
+		store:      store,
+		embedder:   &countingEmbedder{},
+		embCache:   newEmbeddingLRU(2),
+		embFlights: make(map[string]*embeddingFlight),
+	}
+}
+
+func suppressLogs(t *testing.T) {
+	t.Helper()
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&bytes.Buffer{})
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+}
+
+func extractToolText(t *testing.T, result *mcplib.CallToolResult) string {
+	t.Helper()
+	if result == nil || len(result.Content) == 0 {
+		t.Fatal("expected non-empty tool result")
+	}
+	txt, ok := mcplib.AsTextContent(result.Content[0])
+	if !ok {
+		t.Fatalf("expected text content, got %T", result.Content[0])
+	}
+	return txt.Text
+}
+
 func testTime() time.Time {
 	return time.Unix(1_700_000_000, 0).UTC()
 }

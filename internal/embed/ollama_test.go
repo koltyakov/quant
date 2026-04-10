@@ -3,11 +3,44 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func newTestHTTPClient(t *testing.T, statusCode int, body any) *http.Client {
+	t.Helper()
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal test response: %v", err)
+	}
+
+	return &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost {
+				t.Fatalf("expected POST request, got %s", req.Method)
+			}
+			if req.URL.String() != "http://ollama.test/api/embed" {
+				t.Fatalf("unexpected request URL: %s", req.URL.String())
+			}
+
+			return &http.Response{
+				StatusCode: statusCode,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(string(payload))),
+				Request:    req,
+			}, nil
+		}),
+	}
+}
 
 func TestTruncateForEmbeddingPrefersBoundaries(t *testing.T) {
 	text := strings.Repeat("alpha beta gamma ", 40) + "\n\n" + strings.Repeat("delta epsilon zeta ", 40)
@@ -25,18 +58,13 @@ func TestTruncateForEmbeddingPrefersBoundaries(t *testing.T) {
 }
 
 func TestOllamaEmbedBatchValidatesResponseCount(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+	o := &Ollama{
+		baseURL: "http://ollama.test",
+		model:   "test-model",
+		httpClient: newTestHTTPClient(t, http.StatusOK, ollamaEmbedResponse{
 			Model:      "test-model",
 			Embeddings: [][]float32{{1, 0, 0}},
-		})
-	}))
-	defer server.Close()
-
-	o := &Ollama{
-		baseURL:    server.URL,
-		model:      "test-model",
-		httpClient: server.Client(),
+		}),
 	}
 
 	_, err := o.EmbedBatch(context.Background(), []string{"one", "two"})
@@ -46,19 +74,14 @@ func TestOllamaEmbedBatchValidatesResponseCount(t *testing.T) {
 }
 
 func TestOllamaEmbedBatchValidatesDimensions(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+	o := &Ollama{
+		baseURL: "http://ollama.test",
+		model:   "test-model",
+		dims:    3,
+		httpClient: newTestHTTPClient(t, http.StatusOK, ollamaEmbedResponse{
 			Model:      "test-model",
 			Embeddings: [][]float32{{1, 0}},
-		})
-	}))
-	defer server.Close()
-
-	o := &Ollama{
-		baseURL:    server.URL,
-		model:      "test-model",
-		dims:       3,
-		httpClient: server.Client(),
+		}),
 	}
 
 	_, err := o.EmbedBatch(context.Background(), []string{"one"})

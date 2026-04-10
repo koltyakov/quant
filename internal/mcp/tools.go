@@ -39,12 +39,24 @@ func (s *Server) registerTools() {
 	), s.handleIndexStatus)
 }
 
+// maxQueryLength is the maximum number of characters accepted in a search query.
+// Queries beyond this length are truncated before embedding to avoid sending
+// unnecessarily large payloads to the embedding backend.
+const maxQueryLength = 4000
+
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	args := request.GetArguments()
 
 	query, ok := args["query"].(string)
 	if !ok || query == "" {
 		return nil, fmt.Errorf("query is required")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	if len([]rune(query)) > maxQueryLength {
+		query = string([]rune(query)[:maxQueryLength])
 	}
 
 	limit := 5

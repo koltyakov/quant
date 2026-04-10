@@ -166,6 +166,12 @@ func (o *Ollama) probeDimensions(ctx context.Context) (int, error) {
 	return len(vecs[0]), nil
 }
 
+// truncateForEmbedding cuts text to at most maxChars runes, preferring to break
+// at a natural boundary (paragraph, sentence, clause, or word). It searches a
+// 256-character window just before the cut point for the best break marker,
+// falling back to a hard cut if no suitable boundary is found within the window.
+// The window size balances break quality against preserving most of the allowed
+// length — a larger window would find better breaks but discard more text.
 func truncateForEmbedding(text string, maxChars int) string {
 	if maxChars <= 0 || utf8.RuneCountInString(text) <= maxChars {
 		return text

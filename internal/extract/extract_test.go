@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRouter_SupportsTextFiles(t *testing.T) {
@@ -47,7 +48,7 @@ func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
 			t.Fatal("ocrmypdf lookup should not run when native PDF text exists")
 			return "", false
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			t.Fatal("ocrmypdf should not run when native PDF text exists")
 			return "", nil
 		},
@@ -73,7 +74,7 @@ func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) 
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			if binaryPath != "/usr/bin/ocrmypdf" {
 				t.Fatalf("unexpected ocrmypdf path: %s", binaryPath)
 			}
@@ -104,7 +105,7 @@ func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
 		findOCRBinary: func() (string, bool) {
 			return "", false
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			t.Fatal("ocrmypdf should not run when the binary is unavailable")
 			return "", nil
 		},
@@ -127,7 +128,7 @@ func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			return "", errors.New("boom")
 		},
 	}
@@ -152,7 +153,7 @@ func TestPDFExtractor_ExtractPropagatesCancellation(t *testing.T) {
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			return "", ctx.Err()
 		},
 	}
@@ -172,7 +173,7 @@ func TestPDFExtractor_ExtractUsesConfiguredLanguages(t *testing.T) {
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
 		},
-		runOCR: func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 			if languages != "rus+eng" {
 				t.Fatalf("unexpected OCR languages: %s", languages)
 			}

@@ -1,6 +1,9 @@
 package extract
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Extractor interface {
 	Extract(ctx context.Context, path string) (string, error)
@@ -8,7 +11,8 @@ type Extractor interface {
 }
 
 type Options struct {
-	PDFOCRLang string
+	PDFOCRLang    string
+	PDFOCRTimeout time.Duration
 }
 
 type Router struct {
@@ -25,7 +29,7 @@ func NewRouter(opts ...Options) *Router {
 		extractors: []Extractor{
 			&TextExtractor{},
 			&NotebookExtractor{},
-			&PDFExtractor{ocrLanguages: cfg.PDFOCRLang},
+			&PDFExtractor{ocrLanguages: cfg.PDFOCRLang, ocrTimeout: cfg.PDFOCRTimeout},
 			&OOXMLExtractor{},
 			&ODFExtractor{},
 			&RTFExtractor{},

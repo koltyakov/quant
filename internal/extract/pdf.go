@@ -16,13 +16,14 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
-const pdfOCRTimeout = 2 * time.Minute
+const defaultPDFOCRTimeout = 2 * time.Minute
 
 type PDFExtractor struct {
 	findOCRBinary func() (string, bool)
 	extractNative func(path string) (string, error)
-	runOCR        func(ctx context.Context, binaryPath, path, languages string) (string, error)
+	runOCR        func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error)
 	ocrLanguages  string
+	ocrTimeout    time.Duration
 
 	ocrLookupOnce sync.Once
 	ocrBinaryPath string
@@ -43,7 +44,7 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 		return "", nil
 	}
 
-	text, err = p.ocrRunner()(ctx, binaryPath, path, p.languages())
+	text, err = p.ocrRunner()(ctx, binaryPath, path, p.languages(), p.timeout())
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -53,6 +54,13 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 	}
 
 	return strings.TrimSpace(text), nil
+}
+
+func (p *PDFExtractor) timeout() time.Duration {
+	if p.ocrTimeout > 0 {
+		return p.ocrTimeout
+	}
+	return defaultPDFOCRTimeout
 }
 
 func extractPDFText(path string) (string, error) {
@@ -116,14 +124,14 @@ func (p *PDFExtractor) languages() string {
 	return strings.TrimSpace(p.ocrLanguages)
 }
 
-func (p *PDFExtractor) ocrRunner() func(ctx context.Context, binaryPath, path, languages string) (string, error) {
+func (p *PDFExtractor) ocrRunner() func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 	if p.runOCR != nil {
 		return p.runOCR
 	}
 	return runOCRmyPDF
 }
 
-func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string) (string, error) {
+func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "quant-ocrmypdf-*")
 	if err != nil {
 		return "", fmt.Errorf("creating OCR temp dir: %w", err)
@@ -132,7 +140,7 @@ func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string) (strin
 
 	sidecarPath := filepath.Join(tmpDir, "ocr.txt")
 
-	ocrCtx, cancel := context.WithTimeout(ctx, pdfOCRTimeout)
+	ocrCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ocrCtx, binaryPath,
@@ -150,7 +158,7 @@ func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string) (strin
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if errors.Is(ocrCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return "", fmt.Errorf("ocrmypdf timed out after %s", pdfOCRTimeout)
+			return "", fmt.Errorf("ocrmypdf timed out after %s", timeout)
 		}
 		if ctx.Err() != nil {
 			return "", ctx.Err()

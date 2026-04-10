@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,29 +24,31 @@ const (
 )
 
 type Config struct {
-	WatchDir     string    `yaml:"dir"`
-	DBPath       string    `yaml:"db"`
-	Transport    Transport `yaml:"transport"`
-	ListenAddr   string    `yaml:"listen"`
-	EmbedURL     string    `yaml:"embed_url"`
-	EmbedModel   string    `yaml:"embed_model"`
-	PDFOCRLang   string    `yaml:"pdf_ocr_lang"`
-	ChunkSize    int       `yaml:"chunk_size"`
-	ChunkOverlap float64   `yaml:"chunk_overlap"`
-	IndexWorkers int       `yaml:"index_workers"`
-	ConfigFile   string    `yaml:"-"`
+	WatchDir      string        `yaml:"dir"`
+	DBPath        string        `yaml:"db"`
+	Transport     Transport     `yaml:"transport"`
+	ListenAddr    string        `yaml:"listen"`
+	EmbedURL      string        `yaml:"embed_url"`
+	EmbedModel    string        `yaml:"embed_model"`
+	PDFOCRLang    string        `yaml:"pdf_ocr_lang"`
+	PDFOCRTimeout time.Duration `yaml:"pdf_ocr_timeout"`
+	ChunkSize     int           `yaml:"chunk_size"`
+	ChunkOverlap  float64       `yaml:"chunk_overlap"`
+	IndexWorkers  int           `yaml:"index_workers"`
+	ConfigFile    string        `yaml:"-"`
 }
 
 func Default() *Config {
 	return &Config{
-		Transport:    TransportStdio,
-		ListenAddr:   ":8080",
-		EmbedURL:     "http://localhost:11434",
-		EmbedModel:   "nomic-embed-text",
-		PDFOCRLang:   "eng",
-		ChunkSize:    512,
-		ChunkOverlap: 0.15,
-		IndexWorkers: defaultIndexWorkers(),
+		Transport:     TransportStdio,
+		ListenAddr:    ":8080",
+		EmbedURL:      "http://localhost:11434",
+		EmbedModel:    "nomic-embed-text",
+		PDFOCRLang:    "eng",
+		PDFOCRTimeout: 2 * time.Minute,
+		ChunkSize:     512,
+		ChunkOverlap:  0.15,
+		IndexWorkers:  defaultIndexWorkers(),
 	}
 }
 
@@ -56,6 +59,12 @@ func (c *Config) Validate() error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("--dir must be a directory")
+	}
+	if c.DBPath != "" {
+		dbDir := filepath.Dir(c.DBPath)
+		if err := checkDirWritable(dbDir); err != nil {
+			return fmt.Errorf("database directory %s is not writable: %w", dbDir, err)
+		}
 	}
 	if c.Transport != TransportStdio && c.Transport != TransportSSE && c.Transport != TransportHTTP {
 		return fmt.Errorf("invalid transport %q; must be stdio, sse, or http", c.Transport)
@@ -69,6 +78,20 @@ func (c *Config) Validate() error {
 	if c.IndexWorkers < 1 || c.IndexWorkers > 64 {
 		return fmt.Errorf("index_workers must be between 1 and 64")
 	}
+	return nil
+}
+
+func checkDirWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".quant-writability-check-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
 	return nil
 }
 
@@ -182,16 +205,17 @@ func loadYAML(cfg *Config, path string) error {
 	}
 
 	type fileConfig struct {
-		WatchDir     string    `yaml:"dir"`
-		DBPath       string    `yaml:"db"`
-		Transport    Transport `yaml:"transport"`
-		ListenAddr   string    `yaml:"listen"`
-		EmbedURL     string    `yaml:"embed_url"`
-		EmbedModel   string    `yaml:"embed_model"`
-		PDFOCRLang   string    `yaml:"pdf_ocr_lang"`
-		ChunkSize    int       `yaml:"chunk_size"`
-		ChunkOverlap float64   `yaml:"chunk_overlap"`
-		IndexWorkers int       `yaml:"index_workers"`
+		WatchDir      string    `yaml:"dir"`
+		DBPath        string    `yaml:"db"`
+		Transport     Transport `yaml:"transport"`
+		ListenAddr    string    `yaml:"listen"`
+		EmbedURL      string    `yaml:"embed_url"`
+		EmbedModel    string    `yaml:"embed_model"`
+		PDFOCRLang    string    `yaml:"pdf_ocr_lang"`
+		PDFOCRTimeout string    `yaml:"pdf_ocr_timeout"`
+		ChunkSize     int       `yaml:"chunk_size"`
+		ChunkOverlap  float64   `yaml:"chunk_overlap"`
+		IndexWorkers  int       `yaml:"index_workers"`
 	}
 
 	var parsed fileConfig
@@ -219,6 +243,14 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if parsed.PDFOCRLang != "" {
 		cfg.PDFOCRLang = parsed.PDFOCRLang
+	}
+	if parsed.PDFOCRTimeout != "" {
+		d, err := time.ParseDuration(parsed.PDFOCRTimeout)
+		if err != nil {
+			log.Printf("Ignoring invalid pdf_ocr_timeout value %q: %v", parsed.PDFOCRTimeout, err)
+		} else {
+			cfg.PDFOCRTimeout = d
+		}
 	}
 	if parsed.ChunkSize != 0 {
 		cfg.ChunkSize = parsed.ChunkSize
@@ -254,6 +286,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
 		cfg.PDFOCRLang = v
+	}
+	if v := os.Getenv("QUANT_PDF_OCR_TIMEOUT"); v != "" {
+		cfg.PDFOCRTimeout = mustParseDurationEnv("QUANT_PDF_OCR_TIMEOUT", v, cfg.PDFOCRTimeout)
 	}
 	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" {
 		cfg.ChunkSize = mustParseIntEnv("QUANT_CHUNK_SIZE", v, cfg.ChunkSize)
@@ -306,6 +341,15 @@ func mustParseIntEnv(name, value string, fallback int) int {
 
 func mustParseFloatEnv(name, value string, fallback float64) float64 {
 	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
+}
+
+func mustParseDurationEnv(name, value string, fallback time.Duration) time.Duration {
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
 		return fallback
