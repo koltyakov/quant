@@ -98,6 +98,7 @@ func (w *Watcher) Close() error {
 func (w *Watcher) addRecursive(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			log.Printf("warning: watcher could not descend into %s: %v", path, err)
 			return nil
 		}
 		if !d.IsDir() {
@@ -172,6 +173,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 			w.matcher.Load(path)
 			if err := w.addRecursive(path); err != nil {
+				log.Printf("warning: watcher failed to add recursive directory %s: %v", path, err)
+				w.signalResync()
 				return
 			}
 			w.signalResync()

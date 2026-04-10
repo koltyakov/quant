@@ -779,6 +779,40 @@ func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
 	}
 }
 
+func TestInitialSyncWithReport_TracksIndexFailures(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   fakeEmbedder{},
+		extractor:  &flakyExtractor{text: "hello world", failures: 1},
+		pathStates: make(map[string]*pathState),
+	}
+
+	report, err := idx.initialSyncWithReport(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+	if !report.hadIndexFailures {
+		t.Fatal("expected initial sync report to record indexing failures")
+	}
+}
+
 func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")

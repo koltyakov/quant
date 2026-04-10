@@ -689,6 +689,76 @@ func TestHandleListSources(t *testing.T) {
 	}
 }
 
+func TestHandleListSources_LimitAndTruncation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, path := range []string{"a.md", "b.md"} {
+		if err := store.ReindexDocument(context.Background(), &index.Document{
+			Path:       path,
+			Hash:       path + "-hash",
+			ModifiedAt: testTime(),
+		}, []index.ChunkRecord{{
+			Content:    path,
+			ChunkIndex: 0,
+			Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+		}}); err != nil {
+			t.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	result, err := s.handleListSources(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "list_sources",
+			Arguments: map[string]any{"limit": float64(1)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected list_sources error: %v", err)
+	}
+	text := extractToolText(t, result)
+	if !strings.Contains(text, "showing first 1") {
+		t.Fatalf("expected truncation header, got %q", text)
+	}
+	if !strings.Contains(text, "... and 1 more") {
+		t.Fatalf("expected truncation summary, got %q", text)
+	}
+}
+
+func TestHandleListSources_InvalidLimit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+
+	for _, limit := range []float64{0, -1, math.NaN(), math.Inf(1), float64(maxSourcesLimit + 1)} {
+		_, err := s.handleListSources(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{
+				Name:      "list_sources",
+				Arguments: map[string]any{"limit": limit},
+			},
+		})
+		if err == nil {
+			t.Fatalf("expected error for invalid limit %v", limit)
+		}
+	}
+}
+
 func TestHandleIndexStatus(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")

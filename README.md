@@ -174,7 +174,7 @@ If you later add a hosted backend, the cheapest widely-used OpenAI embedding opt
 | Tool           | Description                                                                           |
 | -------------- | ------------------------------------------------------------------------------------- |
 | `search`       | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path` |
-| `list_sources` | List indexed documents                                                                |
+| `list_sources` | List indexed documents. Params: `limit`                                               |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model                                  |
 
 `search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity.

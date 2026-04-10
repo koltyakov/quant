@@ -71,6 +71,10 @@ type retryState struct {
 	timer    *time.Timer
 }
 
+type syncReport struct {
+	hadIndexFailures bool
+}
+
 var (
 	indexRetryBaseDelay   = 2 * time.Second
 	maxIndexRetryAttempts = 3
@@ -111,7 +115,8 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 			log.Printf("Starting filesystem resync of %s", idx.cfg.WatchDir)
 		}
 
-		if err := idx.initialSync(ctx); err != nil {
+		report, err := idx.initialSyncWithReport(ctx)
+		if err != nil {
 			if ctx.Err() != nil {
 				idx.finishResync(false)
 				return
@@ -123,7 +128,11 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 				log.Printf("Error fetching index stats: %v", err)
 			} else {
 				log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
-				idx.store.RemoveBackup()
+				if report.hadIndexFailures {
+					log.Printf("Initial scan completed with indexing failures; keeping database backup until a clean rebuild succeeds")
+				} else {
+					idx.store.RemoveBackup()
+				}
 			}
 		}
 
@@ -149,14 +158,21 @@ func (idx *indexer) finishResync(retryAllowed bool) bool {
 }
 
 func (idx *indexer) initialSync(ctx context.Context) error {
+	_, err := idx.initialSyncWithReport(ctx)
+	return err
+}
+
+func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, error) {
+	report := syncReport{}
+
 	gi, err := scan.LoadGitIgnore(idx.cfg.WatchDir)
 	if err != nil {
-		return fmt.Errorf("loading gitignore: %w", err)
+		return report, fmt.Errorf("loading gitignore: %w", err)
 	}
 
 	docs, err := idx.store.ListDocuments(ctx)
 	if err != nil {
-		return fmt.Errorf("listing indexed documents: %w", err)
+		return report, fmt.Errorf("listing indexed documents: %w", err)
 	}
 	docByPath := make(map[string]*index.Document, len(docs))
 	for i := range docs {
@@ -166,7 +182,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		}
 		if key != docs[i].Path {
 			if err := idx.store.RenameDocumentPath(ctx, docs[i].Path, key); err != nil {
-				return fmt.Errorf("renaming indexed document %s to %s: %w", docs[i].Path, key, err)
+				return report, fmt.Errorf("renaming indexed document %s to %s: %w", docs[i].Path, key, err)
 			}
 			docs[i].Path = key
 		}
@@ -236,6 +252,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 
 	for result := range indexResults {
 		if result.err != nil {
+			report.hadIndexFailures = true
 			log.Printf("Error indexing %s: %v", result.path, result.err)
 			idx.scheduleIndexRetry(ctx, result.path, result.modTime)
 			continue
@@ -250,17 +267,17 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 	}
 	if walkErr := <-walkDone; walkErr != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return report, ctx.Err()
 		}
-		return fmt.Errorf("scanning directory: %w", walkErr)
+		return report, fmt.Errorf("scanning directory: %w", walkErr)
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return report, err
 	}
 
 	reconcileMatcher, err := idx.newReconcileMatcher()
 	if err != nil {
-		return err
+		return report, err
 	}
 
 	for _, doc := range docs {
@@ -272,6 +289,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 			} else if shouldIndex {
 				action, err := idx.syncDocument(ctx, doc.Path, absPath, nil, &doc)
 				if err != nil {
+					report.hadIndexFailures = true
 					log.Printf("Error reconciling existing document %s: %v", doc.Path, err)
 					continue
 				}
@@ -291,7 +309,7 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	return report, nil
 }
 
 func (idx *indexer) workerCount(maxPending int) int {

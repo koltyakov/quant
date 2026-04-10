@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/koltyakov/quant/internal/scan"
 )
 
@@ -227,6 +229,55 @@ func TestWatcher_BackendErrorRequestsResync(t *testing.T) {
 	}
 	if buf.Len() == 0 {
 		t.Fatal("expected backend error to be logged")
+	}
+}
+
+func TestWatcher_DirectoryAddFailureRequestsResync(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("unexpected watcher creation error: %v", err)
+	}
+	if err := fsw.Close(); err != nil {
+		t.Fatalf("unexpected watcher close error: %v", err)
+	}
+
+	watcher := &Watcher{
+		fsw:         fsw,
+		matcher:     scan.NewGitIgnoreMatcher(dir, nil),
+		rootDir:     dir,
+		events:      make(chan Event, 1),
+		done:        make(chan struct{}),
+		timers:      make(map[string]*time.Timer),
+		watchedDirs: map[string]struct{}{dir: {}},
+	}
+
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+
+	watcher.handleEvent(fsnotify.Event{Name: subdir, Op: fsnotify.Create})
+
+	event := waitForOp(t, watcher.Events(), Resync, time.Second)
+	if event.Path != dir {
+		t.Fatalf("expected resync path %s, got %+v", dir, event)
+	}
+	if !strings.Contains(buf.String(), "failed to add recursive directory") {
+		t.Fatalf("expected add failure to be logged, got %q", buf.String())
 	}
 }
 

@@ -34,6 +34,9 @@ func (s *Server) registerTools() {
 
 	s.mcp.AddTool(mcplib.NewTool("list_sources",
 		mcplib.WithDescription("List indexed documents"),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Maximum number of documents to return (default: 100)"),
+		),
 	), s.handleListSources)
 
 	s.mcp.AddTool(mcplib.NewTool("index_status",
@@ -45,9 +48,11 @@ func (s *Server) registerTools() {
 // Queries beyond this length are truncated before embedding to avoid sending
 // unnecessarily large payloads to the embedding backend.
 const (
-	maxQueryLength     = 4000
-	defaultSearchLimit = 5
-	maxSearchLimit     = 50
+	maxQueryLength      = 4000
+	defaultSearchLimit  = 5
+	maxSearchLimit      = 50
+	defaultSourcesLimit = 100
+	maxSourcesLimit     = 500
 )
 
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -168,6 +173,18 @@ func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {
 }
 
 func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := request.GetArguments()
+	limit := defaultSourcesLimit
+	if v, ok := args["limit"].(float64); ok {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("limit must be a finite number between 1 and %d", maxSourcesLimit)
+		}
+		limit = int(v)
+	}
+	if limit < 1 || limit > maxSourcesLimit {
+		return nil, fmt.Errorf("limit must be between 1 and %d", maxSourcesLimit)
+	}
+
 	docs, err := s.store.ListDocuments(ctx)
 	if err != nil {
 		log.Printf("MCP list_sources error: %v", err)
@@ -180,9 +197,21 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 		return mcplib.NewToolResultText("No documents indexed."), nil
 	}
 
-	output := fmt.Sprintf("Indexed documents (%d):\n", len(docs))
+	total := len(docs)
+	if len(docs) > limit {
+		docs = docs[:limit]
+	}
+
+	output := fmt.Sprintf("Indexed documents (%d total", total)
+	if len(docs) != total {
+		output += fmt.Sprintf(", showing first %d", len(docs))
+	}
+	output += "):\n"
 	for _, doc := range docs {
 		output += fmt.Sprintf("  %s (indexed: %s)\n", doc.Path, doc.IndexedAt.Format("2006-01-02 15:04:05"))
+	}
+	if len(docs) != total {
+		output += fmt.Sprintf("  ... and %d more\n", total-len(docs))
 	}
 
 	return mcplib.NewToolResultText(output), nil
