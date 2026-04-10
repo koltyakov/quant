@@ -640,7 +640,7 @@ func (idx *indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path
 	if idx.shouldIgnorePath(path) {
 		return false, nil
 	}
-	if scan.IsHiddenName(filepath.Base(path)) || !idx.extractor.Supports(path) {
+	if !idx.extractor.Supports(path) {
 		return false, nil
 	}
 

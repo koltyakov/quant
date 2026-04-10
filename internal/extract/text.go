@@ -1,9 +1,16 @@
 package extract
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"strings"
+)
+
+const (
+	maxTextReadBytes = 8 << 20
+	binarySniffBytes = 8192
 )
 
 var textExtensions = map[string]bool{
@@ -112,10 +119,27 @@ var textBasenames = map[string]bool{
 type TextExtractor struct{}
 
 func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
+	defer func() { _ = f.Close() }()
+
+	if info, err := f.Stat(); err == nil && info.Size() > maxTextReadBytes {
+		return "", nil
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxTextReadBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(data)) > maxTextReadBytes {
+		return "", nil
+	}
+	if looksBinaryTextSample(data) {
+		return "", nil
+	}
+
 	return string(data), nil
 }
 
@@ -129,4 +153,29 @@ func (t *TextExtractor) Supports(path string) bool {
 	}
 	base := strings.ToLower(basename(path))
 	return textBasenames[base]
+}
+
+func looksBinaryTextSample(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	sample := data
+	if len(sample) > binarySniffBytes {
+		sample = sample[:binarySniffBytes]
+	}
+	if bytes.IndexByte(sample, 0) >= 0 {
+		return true
+	}
+
+	controlBytes := 0
+	for _, b := range sample {
+		switch {
+		case b == '\n' || b == '\r' || b == '\t' || b == '\f':
+		case b < 0x20 || b == 0x7f:
+			controlBytes++
+		}
+	}
+
+	return controlBytes > len(sample)/10
 }

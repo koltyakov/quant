@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -87,5 +88,21 @@ func TestOllamaEmbedBatchValidatesDimensions(t *testing.T) {
 	_, err := o.EmbedBatch(context.Background(), []string{"one"})
 	if err == nil || !strings.Contains(err.Error(), "expected 3") {
 		t.Fatalf("expected dimension validation error, got %v", err)
+	}
+}
+
+func TestNewOllama_RespectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, req.Context().Err()
+		}),
+	}
+
+	_, err := newOllama(ctx, "http://ollama.test", "test-model", client)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %v", err)
 	}
 }

@@ -22,7 +22,7 @@ func TestScan_BasicFiles(t *testing.T) {
 	}
 }
 
-func TestScan_SkipsHidden(t *testing.T) {
+func TestScan_IncludesHiddenFiles(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "visible.txt"), "hello")
 	mustWriteFile(t, filepath.Join(dir, ".hidden"), "hidden")
@@ -31,8 +31,8 @@ func TestScan_SkipsHidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
 	}
 }
 

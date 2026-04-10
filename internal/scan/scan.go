@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ type Result struct {
 type Visitor func(Result) error
 
 // Scan walks the directory tree, respecting .gitignore files at every level
-// and skipping hidden files/directories.
+// and skipping hidden directories.
 func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 	var results []Result
 	err := Walk(dir, gi, func(result Result) error {
@@ -31,7 +32,7 @@ func Scan(dir string, gi *ignore.GitIgnore) ([]Result, error) {
 }
 
 // Walk streams file results to visit without materializing the full result set.
-// It respects .gitignore files at every level and skips hidden files/directories.
+// It respects .gitignore files at every level and skips hidden directories.
 func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("walking %s: %w", dir, err)
@@ -41,6 +42,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			log.Printf("warning: skipping unreadable path %s: %v", path, err)
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -61,16 +63,13 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 			return nil
 		}
 
-		if IsHiddenName(d.Name()) {
-			return nil
-		}
-
 		if matcher.Matches(path) {
 			return nil
 		}
 
 		info, err := d.Info()
 		if err != nil {
+			log.Printf("warning: skipping path with unreadable metadata %s: %v", path, err)
 			return nil
 		}
 

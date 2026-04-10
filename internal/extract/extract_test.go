@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -259,6 +260,42 @@ func TestTextExtractor_Extract(t *testing.T) {
 	}
 	if text != content {
 		t.Errorf("expected %q, got %q", content, text)
+	}
+}
+
+func TestTextExtractor_SkipsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.log")
+	content := strings.Repeat("a", maxTextReadBytes+1)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &TextExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected oversized file to be skipped, got %q", text[:min(len(text), 32)])
+	}
+}
+
+func TestTextExtractor_SkipsBinaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.log")
+	content := []byte("header\x00payload")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &TextExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected binary file to be skipped, got %q", text)
 	}
 }
 

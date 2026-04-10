@@ -39,7 +39,7 @@ func runMCP(cfg *config.Config) error {
 		}
 	}
 
-	embedder, err := embed.NewOllama(cfg.EmbedURL, cfg.EmbedModel)
+	embedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
 		return fmt.Errorf("error connecting to ollama: %w", err)
 	}

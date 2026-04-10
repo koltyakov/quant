@@ -156,9 +156,6 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		w.handleGitIgnoreEvent(path)
 		return
 	}
-	if scan.IsHiddenName(base) {
-		return
-	}
 
 	if w.matcher.Matches(path) {
 		return
@@ -170,6 +167,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		if info.IsDir() {
+			if scan.IsHiddenName(base) {
+				return
+			}
 			w.matcher.Load(path)
 			if err := w.addRecursive(path); err != nil {
 				return
@@ -195,6 +195,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 		isDir := w.isWatchedDir(path)
+		if isDir && scan.IsHiddenName(base) {
+			return
+		}
 		if isDir {
 			w.matcher.Remove(path)
 		}

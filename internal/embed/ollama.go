@@ -29,14 +29,18 @@ type ollamaEmbedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
-func NewOllama(baseURL, model string) (*Ollama, error) {
+func NewOllama(ctx context.Context, baseURL, model string) (*Ollama, error) {
+	return newOllama(ctx, baseURL, model, &http.Client{Timeout: 60 * time.Second})
+}
+
+func newOllama(ctx context.Context, baseURL, model string, httpClient *http.Client) (*Ollama, error) {
 	o := &Ollama{
 		baseURL:    baseURL,
 		model:      model,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: httpClient,
 	}
 
-	dims, err := o.probeDimensions(context.Background())
+	dims, err := o.probeDimensions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("probing embedding dimensions: %w", err)
 	}

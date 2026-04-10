@@ -145,6 +145,29 @@ func TestWatcher_GitIgnoreChangeRequestsResync(t *testing.T) {
 	}
 }
 
+func TestWatcher_EmitsEventsForHiddenFiles(t *testing.T) {
+	dir := t.TempDir()
+	watcher, err := New(dir, nil)
+	if err != nil {
+		t.Fatalf("unexpected watcher error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	hiddenPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(hiddenPath, []byte("TOKEN=1"), 0644); err != nil {
+		t.Fatalf("unexpected hidden file write error: %v", err)
+	}
+
+	event := waitForPath(t, watcher.Events(), hiddenPath, 3*time.Second)
+	if event.Path != hiddenPath {
+		t.Fatalf("expected hidden file event for %s, got %+v", hiddenPath, event)
+	}
+}
+
 func TestWatcher_DirectoryRemovalMarksEventAsDirectory(t *testing.T) {
 	dir := t.TempDir()
 	watcher, err := New(dir, nil)
