@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrew/quant/internal/selfupdate"
+	"github.com/koltyakov/quant/internal/selfupdate"
 )
 
 const autoUpdateCheckInterval = 30 * time.Minute

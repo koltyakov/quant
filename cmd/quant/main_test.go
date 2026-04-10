@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrew/quant/internal/config"
-	"github.com/andrew/quant/internal/index"
-	"github.com/andrew/quant/internal/scan"
-	"github.com/andrew/quant/internal/watch"
+	"github.com/koltyakov/quant/internal/config"
+	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/scan"
+	"github.com/koltyakov/quant/internal/watch"
 )
 
 type fakeEmbedder struct{}

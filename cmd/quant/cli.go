@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/andrew/quant/internal/config"
+	"github.com/koltyakov/quant/internal/config"
 )
 
 func run(args []string) int {

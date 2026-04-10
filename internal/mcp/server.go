@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
-	"github.com/andrew/quant/internal/config"
-	"github.com/andrew/quant/internal/embed"
-	"github.com/andrew/quant/internal/index"
+	"github.com/koltyakov/quant/internal/config"
+	"github.com/koltyakov/quant/internal/embed"
+	"github.com/koltyakov/quant/internal/index"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -55,6 +56,8 @@ type embeddingLRU struct {
 type embeddingFlight struct {
 	done    chan struct{}
 	waiters int
+	cancel  context.CancelFunc
+	timer   *time.Timer
 	vec     []float32
 	err     error
 }

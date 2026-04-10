@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/andrew/quant/internal/config"
-	"github.com/andrew/quant/internal/embed"
-	"github.com/andrew/quant/internal/extract"
-	"github.com/andrew/quant/internal/index"
-	"github.com/andrew/quant/internal/mcp"
-	"github.com/andrew/quant/internal/scan"
-	"github.com/andrew/quant/internal/watch"
+	"github.com/koltyakov/quant/internal/config"
+	"github.com/koltyakov/quant/internal/embed"
+	"github.com/koltyakov/quant/internal/extract"
+	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/mcp"
+	"github.com/koltyakov/quant/internal/scan"
+	"github.com/koltyakov/quant/internal/watch"
 )
 
 func main() {

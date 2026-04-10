@@ -1,5 +1,5 @@
 APP := quant
-PKG := github.com/andrew/quant
+PKG := github.com/koltyakov/quant
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_LDFLAGS := -s -w -X main.Version=$(VERSION)
 BUILD_FLAGS := -trimpath -ldflags "$(BUILD_LDFLAGS)"

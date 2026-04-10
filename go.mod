@@ -1,4 +1,4 @@
-module github.com/andrew/quant
+module github.com/koltyakov/quant
 
 go 1.26.1
 

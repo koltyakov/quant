@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/andrew/quant/internal/scan"
 	"github.com/fsnotify/fsnotify"
+	"github.com/koltyakov/quant/internal/scan"
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
@@ -37,8 +37,10 @@ type Watcher struct {
 
 	mu            sync.Mutex
 	timers        map[string]*time.Timer
+	resyncTimer   *time.Timer
 	watchedDirs   map[string]struct{}
 	resyncPending bool
+	closed        bool
 }
 
 func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
@@ -74,7 +76,22 @@ func (w *Watcher) Events() <-chan Event {
 }
 
 func (w *Watcher) Close() error {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return nil
+	}
+	w.closed = true
+	for path, timer := range w.timers {
+		timer.Stop()
+		delete(w.timers, path)
+	}
+	if w.resyncTimer != nil {
+		w.resyncTimer.Stop()
+		w.resyncTimer = nil
+	}
 	close(w.done)
+	w.mu.Unlock()
 	return w.fsw.Close()
 }
 
@@ -146,6 +163,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			if err := w.addRecursive(path); err != nil {
 				return
 			}
+			w.signalResync()
 			return
 		}
 		w.debounce(path, Create, false)
@@ -165,7 +183,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-		w.debounce(path, Remove, w.isWatchedDir(path))
+		isDir := w.isWatchedDir(path)
+		if isDir {
+			w.matcher.Remove(path)
+		}
+		w.debounce(path, Remove, isDir)
 	}
 }
 
@@ -194,6 +216,9 @@ func (w *Watcher) isWatchedDir(path string) bool {
 func (w *Watcher) debounce(path string, op Op, isDir bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
 
 	if t, ok := w.timers[path]; ok {
 		t.Stop()
@@ -202,9 +227,15 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 	w.timers[path] = time.AfterFunc(500*time.Millisecond, func() {
 		w.mu.Lock()
 		delete(w.timers, path)
+		closed := w.closed
 		w.mu.Unlock()
+		if closed {
+			return
+		}
 
 		select {
+		case <-w.done:
+			return
 		case w.events <- Event{Path: path, Op: op, IsDir: isDir}:
 		default:
 			log.Printf("warning: watcher event dropped for %s (channel full)", path)
@@ -215,6 +246,10 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 
 func (w *Watcher) signalResync() {
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
 	if w.resyncPending {
 		w.mu.Unlock()
 		return
@@ -227,18 +262,32 @@ func (w *Watcher) signalResync() {
 
 func (w *Watcher) trySendResync() {
 	select {
+	case <-w.done:
+		return
 	case w.events <- Event{Path: w.rootDir, Op: Resync, IsDir: true}:
 		w.mu.Lock()
 		w.resyncPending = false
+		w.resyncTimer = nil
 		w.mu.Unlock()
 	default:
-		time.AfterFunc(500*time.Millisecond, func() {
+		w.mu.Lock()
+		if w.closed {
+			w.mu.Unlock()
+			return
+		}
+		if w.resyncTimer != nil {
+			w.resyncTimer.Stop()
+		}
+		w.resyncTimer = time.AfterFunc(500*time.Millisecond, func() {
 			w.mu.Lock()
 			pending := w.resyncPending
+			closed := w.closed
+			w.resyncTimer = nil
 			w.mu.Unlock()
-			if pending {
+			if pending && !closed {
 				w.trySendResync()
 			}
 		})
+		w.mu.Unlock()
 	}
 }

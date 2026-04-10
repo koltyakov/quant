@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrew/quant/internal/config"
-	"github.com/andrew/quant/internal/index"
+	"github.com/koltyakov/quant/internal/config"
+	"github.com/koltyakov/quant/internal/index"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -48,12 +48,14 @@ func (e *countingEmbedder) Dimensions() int { return 1 }
 func (e *countingEmbedder) Close() error { return nil }
 
 type cancelAwareEmbedder struct {
-	started chan struct{}
-	release chan struct{}
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
 
-	mu    sync.Mutex
-	calls map[string]int
-	once  sync.Once
+	mu         sync.Mutex
+	calls      map[string]int
+	once       sync.Once
+	cancelOnce sync.Once
 }
 
 func (e *cancelAwareEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -68,6 +70,9 @@ func (e *cancelAwareEmbedder) Embed(ctx context.Context, text string) ([]float32
 
 	select {
 	case <-ctx.Done():
+		if e.canceled != nil {
+			e.cancelOnce.Do(func() { close(e.canceled) })
+		}
 		return nil, ctx.Err()
 	case <-e.release:
 		return []float32{1}, nil
@@ -206,6 +211,51 @@ func TestCachedEmbed_LeaderCancellationDoesNotAbortSharedFlight(t *testing.T) {
 	defer embedder.mu.Unlock()
 	if embedder.calls["shared-query"] != 1 {
 		t.Fatalf("expected one shared embed call, got %d", embedder.calls["shared-query"])
+	}
+}
+
+func TestCachedEmbed_CanceledFlightRestartsForNextCaller(t *testing.T) {
+	embedder := &cancelAwareEmbedder{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	s := &Server{
+		embedder:   embedder,
+		embCache:   newEmbeddingLRU(2),
+		embFlights: make(map[string]*embeddingFlight),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstErrCh := make(chan error, 1)
+	go func() {
+		_, err := s.cachedEmbed(ctx, "abandoned-query")
+		firstErrCh <- err
+	}()
+
+	<-embedder.started
+	cancel()
+
+	if err := <-firstErrCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation error, got %v", err)
+	}
+
+	select {
+	case <-embedder.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for embedder cancellation")
+	}
+
+	close(embedder.release)
+
+	if _, err := s.cachedEmbed(context.Background(), "abandoned-query"); err != nil {
+		t.Fatalf("expected restarted flight to succeed, got %v", err)
+	}
+
+	embedder.mu.Lock()
+	defer embedder.mu.Unlock()
+	if embedder.calls["abandoned-query"] != 2 {
+		t.Fatalf("expected restarted flight to re-embed, got %d calls", embedder.calls["abandoned-query"])
 	}
 }
 

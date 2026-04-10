@@ -106,6 +106,23 @@ func TestLoadYAML(t *testing.T) {
 	}
 }
 
+func TestLoadYAML_AllowsZeroChunkOverlap(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte("chunk_overlap: 0\n"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	cfg := Default()
+	err := loadYAML(cfg, cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ChunkOverlap != 0 {
+		t.Fatalf("expected chunk overlap 0, got %f", cfg.ChunkOverlap)
+	}
+}
+
 func TestParseArgs_Help(t *testing.T) {
 	_, err := ParseArgs([]string{"--help"})
 	if !errors.Is(err, flag.ErrHelp) {
@@ -118,5 +135,16 @@ func TestParseArgs_RejectsUnexpectedPositionalArgs(t *testing.T) {
 	_, err := ParseArgs([]string{"--dir", dir, "extra"})
 	if err == nil {
 		t.Fatal("expected error for unexpected positional arguments")
+	}
+}
+
+func TestParseArgs_AcceptsPDFOCRTimeoutFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := ParseArgs([]string{"--dir", dir, "--pdf-ocr-timeout", "45s"})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if cfg.PDFOCRTimeout.Seconds() != 45 {
+		t.Fatalf("expected OCR timeout 45s, got %s", cfg.PDFOCRTimeout)
 	}
 }

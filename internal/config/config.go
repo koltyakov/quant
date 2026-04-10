@@ -135,6 +135,8 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.EmbedModel = f.Value.String()
 		case "pdf-ocr-lang":
 			cfg.PDFOCRLang = f.Value.String()
+		case "pdf-ocr-timeout":
+			cfg.PDFOCRTimeout = mustParseDurationFlag(f.Name, f.Value.String(), cfg.PDFOCRTimeout)
 		case "chunk-size":
 			cfg.ChunkSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.ChunkSize)
 		case "chunk-overlap":
@@ -186,6 +188,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
+	flagSet.DurationVar(&cfg.PDFOCRTimeout, "pdf-ocr-timeout", cfg.PDFOCRTimeout, "Timeout for scanned PDF OCR fallback")
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
@@ -212,10 +215,10 @@ func loadYAML(cfg *Config, path string) error {
 		EmbedURL      string    `yaml:"embed_url"`
 		EmbedModel    string    `yaml:"embed_model"`
 		PDFOCRLang    string    `yaml:"pdf_ocr_lang"`
-		PDFOCRTimeout string    `yaml:"pdf_ocr_timeout"`
-		ChunkSize     int       `yaml:"chunk_size"`
-		ChunkOverlap  float64   `yaml:"chunk_overlap"`
-		IndexWorkers  int       `yaml:"index_workers"`
+		PDFOCRTimeout *string   `yaml:"pdf_ocr_timeout"`
+		ChunkSize     *int      `yaml:"chunk_size"`
+		ChunkOverlap  *float64  `yaml:"chunk_overlap"`
+		IndexWorkers  *int      `yaml:"index_workers"`
 	}
 
 	var parsed fileConfig
@@ -244,22 +247,22 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.PDFOCRLang != "" {
 		cfg.PDFOCRLang = parsed.PDFOCRLang
 	}
-	if parsed.PDFOCRTimeout != "" {
-		d, err := time.ParseDuration(parsed.PDFOCRTimeout)
+	if parsed.PDFOCRTimeout != nil {
+		d, err := time.ParseDuration(*parsed.PDFOCRTimeout)
 		if err != nil {
-			log.Printf("Ignoring invalid pdf_ocr_timeout value %q: %v", parsed.PDFOCRTimeout, err)
+			log.Printf("Ignoring invalid pdf_ocr_timeout value %q: %v", *parsed.PDFOCRTimeout, err)
 		} else {
 			cfg.PDFOCRTimeout = d
 		}
 	}
-	if parsed.ChunkSize != 0 {
-		cfg.ChunkSize = parsed.ChunkSize
+	if parsed.ChunkSize != nil {
+		cfg.ChunkSize = *parsed.ChunkSize
 	}
-	if parsed.ChunkOverlap != 0 {
-		cfg.ChunkOverlap = parsed.ChunkOverlap
+	if parsed.ChunkOverlap != nil {
+		cfg.ChunkOverlap = *parsed.ChunkOverlap
 	}
-	if parsed.IndexWorkers != 0 {
-		cfg.IndexWorkers = parsed.IndexWorkers
+	if parsed.IndexWorkers != nil {
+		cfg.IndexWorkers = *parsed.IndexWorkers
 	}
 
 	return nil
@@ -323,6 +326,15 @@ func mustParseIntFlag(name, value string, fallback int) int {
 
 func mustParseFloatFlag(name, value string, fallback float64) float64 {
 	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		return fallback
+	}
+	return parsed
+}
+
+func mustParseDurationFlag(name, value string, fallback time.Duration) time.Duration {
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
 		return fallback

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrew/quant/internal/index"
+	"github.com/koltyakov/quant/internal/index"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -182,18 +182,24 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 		return vec, nil
 	}
 	if flight, ok := s.embFlights[text]; ok {
+		if flight.timer != nil {
+			flight.timer.Stop()
+			flight.timer = nil
+		}
 		flight.waiters++
 		s.embCacheMu.Unlock()
 		return s.waitForEmbeddingFlight(ctx, text, flight)
 	}
+	flightCtx, cancel := context.WithCancel(context.Background())
 	flight := &embeddingFlight{
 		done:    make(chan struct{}),
 		waiters: 1,
+		cancel:  cancel,
 	}
 	s.embFlights[text] = flight
 	s.embCacheMu.Unlock()
 
-	go s.runEmbeddingFlight(context.Background(), text, flight)
+	go s.runEmbeddingFlight(flightCtx, text, flight)
 
 	return s.waitForEmbeddingFlight(ctx, text, flight)
 }
@@ -218,6 +224,10 @@ func (s *Server) runEmbeddingFlight(ctx context.Context, text string, flight *em
 	s.embCacheMu.Lock()
 	defer s.embCacheMu.Unlock()
 
+	if flight.timer != nil {
+		flight.timer.Stop()
+		flight.timer = nil
+	}
 	if err == nil {
 		if s.embCache == nil {
 			s.embCache = newEmbeddingLRU(embCacheMaxSize)
@@ -236,6 +246,25 @@ func (s *Server) releaseEmbeddingFlight(_ string, flight *embeddingFlight) {
 
 	if flight.waiters > 0 {
 		flight.waiters--
+	}
+	if flight.waiters == 0 && flight.cancel != nil && flight.timer == nil {
+		flight.timer = time.AfterFunc(25*time.Millisecond, func() {
+			s.embCacheMu.Lock()
+			defer s.embCacheMu.Unlock()
+
+			if flight.timer != nil {
+				flight.timer = nil
+			}
+			if flight.waiters != 0 {
+				return
+			}
+			select {
+			case <-flight.done:
+				return
+			default:
+				flight.cancel()
+			}
+		})
 	}
 }
 

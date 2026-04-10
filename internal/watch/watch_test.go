@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/andrew/quant/internal/scan"
+	"github.com/koltyakov/quant/internal/scan"
 )
 
 func TestWatcher_RespectsNestedGitIgnore(t *testing.T) {
@@ -79,6 +79,43 @@ func TestWatcher_AddsNewDirectoriesRecursively(t *testing.T) {
 	event := waitForPath(t, watcher.Events(), filePath, 3*time.Second)
 	if event.Path != filePath {
 		t.Fatalf("expected file event for %s, got %+v", filePath, event)
+	}
+}
+
+func TestWatcher_PopulatedDirectoryCreationRequestsResync(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "watched")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	watcher, err := New(dir, nil)
+	if err != nil {
+		t.Fatalf("unexpected watcher error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	incoming := filepath.Join(parent, "incoming")
+	if err := os.MkdirAll(incoming, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(incoming, "file.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatalf("unexpected file write error: %v", err)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	if err := os.Rename(incoming, filepath.Join(dir, "incoming")); err != nil {
+		t.Fatalf("unexpected rename error: %v", err)
+	}
+
+	event := waitForOp(t, watcher.Events(), Resync, 3*time.Second)
+	if event.Path != dir {
+		t.Fatalf("expected resync path %s, got %+v", dir, event)
 	}
 }
 
