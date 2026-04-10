@@ -53,6 +53,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 
 ```
 ./bin/quant [--dir <path>] [options]
+./bin/quant --version
 ```
 
 **Options:**
@@ -69,6 +70,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0–1) |
 | `--index-workers` | auto (`2-8`) | Parallel workers for startup indexing |
 | `--config` | - | YAML config file path |
+| `--version` | - | Print the quant version and exit |
 
 All flags can also be set via env vars:
 `QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_PDF_OCR_LANG`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.

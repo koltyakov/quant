@@ -82,6 +82,11 @@ type rotatingLogWriter struct {
 }
 
 func main() {
+	if isVersionRequest(os.Args[1:]) {
+		printVersion()
+		return
+	}
+
 	cfg, err := config.Parse()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

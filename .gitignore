@@ -9,6 +9,7 @@ bin/
 *.so
 *.dylib
 ./quant
+.index/
 
 # Test binary, built with `go test -c`
 *.test

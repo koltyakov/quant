@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -909,6 +910,59 @@ func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	expectedDBPath := filepath.Join(expectedDir, ".index", "quant.db")
 	if cfg.DBPath != expectedDBPath {
 		t.Fatalf("expected db path %q, got %q", expectedDBPath, cfg.DBPath)
+	}
+}
+
+func TestIsVersionRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "long flag", args: []string{"--version"}, want: true},
+		{name: "short flag", args: []string{"-v"}, want: true},
+		{name: "command", args: []string{"version"}, want: true},
+		{name: "empty", args: nil, want: false},
+		{name: "other arg", args: []string{"--dir", "."}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isVersionRequest(tt.args); got != tt.want {
+				t.Fatalf("isVersionRequest(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintVersion(t *testing.T) {
+	oldStdout := os.Stdout
+	oldVersion := Version
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("unexpected pipe error: %v", err)
+	}
+
+	Version = "v9.9.9"
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		Version = oldVersion
+	})
+
+	printVersion()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if got := string(out); got != "quant v9.9.9\n" {
+		t.Fatalf("printVersion() = %q, want %q", got, "quant v9.9.9\n")
 	}
 }
 
