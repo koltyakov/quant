@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -71,6 +72,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	logFile, err := configureLogging(cfg.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error configuring logging: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = logFile.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -300,6 +308,9 @@ func (idx *indexer) initialSync(ctx context.Context) error {
 
 	go func() {
 		err := scan.Walk(idx.cfg.WatchDir, gi, func(r scan.Result) error {
+			if idx.shouldIgnorePath(r.Path) {
+				return nil
+			}
 			key, err := documentKey(idx.cfg.WatchDir, r.Path)
 			if err != nil {
 				return fmt.Errorf("computing document key for %s: %w", r.Path, err)
@@ -722,6 +733,9 @@ func (idx *indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path
 	if info.IsDir() {
 		return false, nil
 	}
+	if idx.shouldIgnorePath(path) {
+		return false, nil
+	}
 	if scan.IsHiddenName(filepath.Base(path)) || !idx.extractor.Supports(path) {
 		return false, nil
 	}
@@ -756,6 +770,10 @@ func (idx *indexer) watchLoop(ctx context.Context, watcher *watch.Watcher) {
 }
 
 func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
+	if idx.shouldIgnorePath(event.Path) {
+		return
+	}
+
 	switch event.Op {
 	case watch.Resync:
 		idx.requestResync(ctx)
@@ -889,6 +907,31 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 	}
 
 	return indexUpdated, nil
+}
+
+func logPathForDB(dbPath string) string {
+	ext := filepath.Ext(dbPath)
+	if ext == "" {
+		return dbPath + ".log"
+	}
+	return strings.TrimSuffix(dbPath, ext) + ".log"
+}
+
+func configureLogging(dbPath string) (*os.File, error) {
+	logPath := logPathForDB(dbPath)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("opening log file %s: %w", logPath, err)
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+	return logFile, nil
+}
+
+func (idx *indexer) shouldIgnorePath(path string) bool {
+	if idx == nil || idx.cfg == nil || idx.cfg.DBPath == "" {
+		return false
+	}
+	return filepath.Clean(path) == filepath.Clean(logPathForDB(idx.cfg.DBPath))
 }
 
 func documentKey(root, path string) (string, error) {

@@ -77,6 +77,25 @@ func (fileExtractor) Extract(_ context.Context, path string) (string, error) {
 
 func (fileExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
 
+type textLogExtractor struct{}
+
+func (textLogExtractor) Extract(_ context.Context, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (textLogExtractor) Supports(path string) bool {
+	switch filepath.Ext(path) {
+	case ".txt", ".log":
+		return true
+	default:
+		return false
+	}
+}
+
 type countingExtractor struct {
 	text  string
 	calls atomic.Int32
@@ -890,5 +909,101 @@ func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	expectedDBPath := filepath.Join(expectedDir, "quant.db")
 	if cfg.DBPath != expectedDBPath {
 		t.Fatalf("expected db path %q, got %q", expectedDBPath, cfg.DBPath)
+	}
+}
+
+func TestLogPathForDB(t *testing.T) {
+	tests := []struct {
+		name   string
+		dbPath string
+		want   string
+	}{
+		{
+			name:   "replaces extension",
+			dbPath: filepath.Join("tmp", "quant.db"),
+			want:   filepath.Join("tmp", "quant.log"),
+		},
+		{
+			name:   "replaces multi-part extension",
+			dbPath: filepath.Join("tmp", "quant.sqlite3"),
+			want:   filepath.Join("tmp", "quant.log"),
+		},
+		{
+			name:   "adds extension when missing",
+			dbPath: filepath.Join("tmp", "quant"),
+			want:   filepath.Join("tmp", "quant.log"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := logPathForDB(tt.dbPath); got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	logPath := logPathForDB(dbPath)
+	notePath := filepath.Join(dir, "note.txt")
+
+	if err := os.WriteFile(notePath, []byte("kept document"), 0644); err != nil {
+		t.Fatalf("unexpected error writing note: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("log output"), 0644); err != nil {
+		t.Fatalf("unexpected error writing log: %v", err)
+	}
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       filepath.Base(logPath),
+		Hash:       "stale-log-hash",
+		ModifiedAt: time.Now().Add(-time.Hour),
+	}, []index.ChunkRecord{{
+		Content:    "stale log chunk",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32([]float32{1}),
+	}}); err != nil {
+		t.Fatalf("unexpected error seeding stale log document: %v", err)
+	}
+
+	idx := &indexer{
+		cfg: &config.Config{
+			WatchDir:     dir,
+			DBPath:       dbPath,
+			ChunkSize:    128,
+			ChunkOverlap: 0,
+			IndexWorkers: 1,
+		},
+		store:     store,
+		embedder:  fakeEmbedder{},
+		extractor: textLogExtractor{},
+	}
+
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected list documents error: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 indexed document, got %d", len(docs))
+	}
+	if docs[0].Path != filepath.Base(notePath) {
+		t.Fatalf("expected %q to remain indexed, got %q", filepath.Base(notePath), docs[0].Path)
 	}
 }
