@@ -1,10 +1,19 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/andrew/quant/internal/config"
+	"github.com/andrew/quant/internal/index"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
 type countingEmbedder struct {
@@ -198,4 +207,87 @@ func TestCachedEmbed_LeaderCancellationDoesNotAbortSharedFlight(t *testing.T) {
 	if embedder.calls["shared-query"] != 1 {
 		t.Fatalf("expected one shared embed call, got %d", embedder.calls["shared-query"])
 	}
+}
+
+func TestHandleSearch_LogsRequestAndSpotlight(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       "notes/alpha.txt",
+		Hash:       "alpha-hash",
+		ModifiedAt: testTime(),
+	}, []index.ChunkRecord{{
+		Content:    "alpha search phrase with useful spotlight text",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+	}}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+
+	s := &Server{
+		cfg: &config.Config{
+			WatchDir:   dir,
+			DBPath:     dbPath,
+			EmbedModel: "test-model",
+		},
+		store:      store,
+		embedder:   &countingEmbedder{},
+		embCache:   newEmbeddingLRU(2),
+		embFlights: make(map[string]*embeddingFlight),
+	}
+
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+
+	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name: "search",
+			Arguments: map[string]any{
+				"query": "alpha search phrase",
+				"limit": float64(3),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected handleSearch error: %v", err)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, `MCP search request: query="alpha search phrase"`) {
+		t.Fatalf("expected request log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, `MCP search result: query="alpha search phrase"`) {
+		t.Fatalf("expected result log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, `notes/alpha.txt#0`) {
+		t.Fatalf("expected spotlight path in log, got %q", logOutput)
+	}
+	if !strings.Contains(logOutput, `snippet="alpha search phrase with useful spotlight text"`) {
+		t.Fatalf("expected spotlight snippet in log, got %q", logOutput)
+	}
+}
+
+func testTime() time.Time {
+	return time.Unix(1_700_000_000, 0).UTC()
 }

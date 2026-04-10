@@ -3,7 +3,10 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/andrew/quant/internal/index"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -59,13 +62,18 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		pathPrefix = v
 	}
 
+	startedAt := time.Now()
+	log.Printf("MCP search request: query=%q limit=%d threshold=%.4f path=%q", summarizeLogText(query, 120), limit, threshold, pathPrefix)
+
 	queryEmbedding, err := s.cachedEmbed(ctx, query)
 	if err != nil {
+		log.Printf("MCP search error: query=%q stage=embed path=%q err=%v duration=%s", summarizeLogText(query, 120), pathPrefix, err, time.Since(startedAt).Round(time.Millisecond))
 		return nil, fmt.Errorf("embedding query: %w", err)
 	}
 
 	results, err := s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
 	if err != nil {
+		log.Printf("MCP search error: query=%q stage=search path=%q err=%v duration=%s", summarizeLogText(query, 120), pathPrefix, err, time.Since(startedAt).Round(time.Millisecond))
 		return nil, fmt.Errorf("searching: %w", err)
 	}
 
@@ -75,6 +83,16 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 			filtered = append(filtered, r)
 		}
 	}
+
+	log.Printf(
+		"MCP search result: query=%q path=%q raw_hits=%d returned=%d duration=%s spotlight=%s",
+		summarizeLogText(query, 120),
+		pathPrefix,
+		len(results),
+		len(filtered),
+		time.Since(startedAt).Round(time.Millisecond),
+		formatSearchSpotlights(filtered, 3),
+	)
 
 	if len(filtered) == 0 {
 		return mcplib.NewToolResultText("No results found."), nil
@@ -92,8 +110,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	docs, err := s.store.ListDocuments(ctx)
 	if err != nil {
+		log.Printf("MCP list_sources error: %v", err)
 		return nil, fmt.Errorf("listing documents: %w", err)
 	}
+
+	log.Printf("MCP list_sources: count=%d spotlight=%s", len(docs), formatDocumentSpotlights(docs, 5))
 
 	if len(docs) == 0 {
 		return mcplib.NewToolResultText("No documents indexed."), nil
@@ -110,6 +131,7 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	docCount, chunkCount, err := s.store.Stats(ctx)
 	if err != nil {
+		log.Printf("MCP index_status error: %v", err)
 		return nil, fmt.Errorf("getting stats: %w", err)
 	}
 
@@ -121,6 +143,15 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	output := fmt.Sprintf(
 		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s",
 		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel,
+	)
+
+	log.Printf(
+		"MCP index_status: documents=%d chunks=%d db_size=%s watch_dir=%q model=%q",
+		docCount,
+		chunkCount,
+		formatBytes(dbSize),
+		s.cfg.WatchDir,
+		s.cfg.EmbedModel,
 	)
 
 	return mcplib.NewToolResultText(output), nil
@@ -207,4 +238,53 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func summarizeLogText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return text[:limit]
+	}
+	return text[:limit-3] + "..."
+}
+
+func formatSearchSpotlights(results []index.SearchResult, limit int) string {
+	if len(results) == 0 {
+		return "none"
+	}
+	if limit <= 0 || limit > len(results) {
+		limit = len(results)
+	}
+
+	parts := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		r := results[i]
+		parts = append(parts, fmt.Sprintf(
+			"%s#%d score=%.4f %s snippet=%q",
+			r.DocumentPath,
+			r.ChunkIndex,
+			r.Score,
+			r.ScoreKind,
+			summarizeLogText(r.ChunkContent, 72),
+		))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatDocumentSpotlights(docs []index.Document, limit int) string {
+	if len(docs) == 0 {
+		return "none"
+	}
+	if limit <= 0 || limit > len(docs) {
+		limit = len(docs)
+	}
+
+	parts := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, docs[i].Path)
+	}
+	return strings.Join(parts, ", ")
 }
