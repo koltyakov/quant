@@ -53,3 +53,10 @@ func isHelpRequest(args []string) bool {
 func printVersion() {
 	fmt.Println("quant", Version)
 }
+
+func ensureVPrefix(s string) string {
+	if s != "" && !strings.HasPrefix(s, "v") {
+		return "v" + s
+	}
+	return s
+}

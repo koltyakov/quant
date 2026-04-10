@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -95,6 +96,12 @@ func runMCP(cfg *config.Config) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if isAutoUpdateEnabled() {
+		if autoUpdateOnStart(ctx, Version) {
+			return errRestartRequired
+		}
+	}
+
 	embedder, err := embed.NewOllama(cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
 		return fmt.Errorf("error connecting to ollama: %w", err)
@@ -156,31 +163,48 @@ func runMCP(cfg *config.Config) error {
 	}()
 
 	var wg sync.WaitGroup
-	idx.startLiveIndexWorkers(ctx, &wg)
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	defer serverCancel()
+
+	var needsRestart atomic.Bool
+	if isAutoUpdateEnabled() {
+		go startAutoUpdateLoop(serverCtx, Version, func() {
+			needsRestart.Store(true)
+			serverCancel()
+		})
+	}
+
+	idx.startLiveIndexWorkers(serverCtx, &wg)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		idx.watchLoop(ctx, watcher)
+		idx.watchLoop(serverCtx, watcher)
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		idx.runInitialSync(ctx)
+		idx.runInitialSync(serverCtx)
 	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder)
 	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
 
-	if err := mcpServer.Serve(ctx, cfg); err != nil {
-		cancel()
+	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
+		serverCancel()
 		wg.Wait()
+		if needsRestart.Load() {
+			return errRestartRequired
+		}
 		return err
 	}
 
-	cancel()
+	serverCancel()
 	wg.Wait()
+	if needsRestart.Load() {
+		return errRestartRequired
+	}
 	return nil
 }
 

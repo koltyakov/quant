@@ -946,11 +946,14 @@ func TestResolveCommand(t *testing.T) {
 	}{
 		{name: "default to help", args: nil, wantCmd: "help"},
 		{name: "explicit mcp", args: []string{"mcp", "--dir", "./data"}, wantCmd: "mcp", wantArgs: []string{"--dir", "./data"}},
+		{name: "explicit update", args: []string{"update"}, wantCmd: "update"},
 		{name: "top level flags unsupported", args: []string{"--dir", "./data"}, wantCmd: "unknown"},
 		{name: "version", args: []string{"version"}, wantCmd: "version"},
 		{name: "help", args: []string{"help"}, wantCmd: "help"},
 		{name: "mcp help command", args: []string{"help", "mcp"}, wantCmd: "mcp-help"},
 		{name: "mcp help flag", args: []string{"mcp", "--help"}, wantCmd: "mcp-help"},
+		{name: "update help command", args: []string{"help", "update"}, wantCmd: "update-help"},
+		{name: "update help flag", args: []string{"update", "--help"}, wantCmd: "update-help"},
 		{name: "unknown", args: []string{"search"}, wantCmd: "unknown"},
 	}
 

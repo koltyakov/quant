@@ -54,6 +54,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 
 ```
 ./bin/quant mcp [--dir <path>] [options]
+./bin/quant update
 ./bin/quant version
 ```
 
@@ -61,6 +62,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | Command | Description |
 |---------|-------------|
 | `mcp` | Start the MCP server |
+| `update` | Check for and apply the latest GitHub release |
 | `version` | Print the quant version and exit |
 | `help` | Show top-level CLI help |
 
@@ -83,6 +85,8 @@ All flags can also be set via env vars:
 `QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_PDF_OCR_LANG`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
 Also `QUANT_INDEX_WORKERS`.
 
+Automatic self-update is controlled separately via `QUANT_AUTOUPDATE=true`.
+
 Configuration precedence is:
 
 1. Defaults
@@ -103,7 +107,28 @@ Configuration precedence is:
 ./bin/quant mcp --dir ./docs \
   --embed-url http://gpu-server:11434 \
   --embed-model mxbai-embed-large
+
+# Manually update to the latest release
+./bin/quant update
 ```
+
+## Auto-Update
+
+`quant` can update its own binary from GitHub Releases.
+
+- Manual update: run `quant update`
+- Automatic update: set `QUANT_AUTOUPDATE=true`
+- Accepted truthy values: `true`, `1`, `yes`
+
+When auto-update is enabled for `quant mcp`:
+
+1. It checks for a newer release on startup.
+2. It keeps checking every 30 minutes in the background.
+3. If an update is applied, the process restarts with the same arguments.
+
+Development builds (`dev` or versions ending in `-dev`) do not auto-update.
+
+For self-update to work, the running user must be able to replace the binary on disk. A writable user-owned install location such as `~/.local/bin/quant` is the safest default.
 
 ### Config file
 

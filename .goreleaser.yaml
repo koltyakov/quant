@@ -1,5 +1,6 @@
 # GoReleaser configuration for quant
 version: 2
+project_name: quant
 
 before:
   hooks:

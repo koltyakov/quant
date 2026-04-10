@@ -2,22 +2,30 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/andrew/quant/internal/config"
 )
 
 func run(args []string) int {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	command, commandArgs := resolveCommand(args)
 
 	switch command {
 	case "mcp":
 		return runMCPCommand(commandArgs)
+	case "update":
+		return runUpdateCommand(ctx, commandArgs)
 	case "version":
 		printVersion()
 		return 0
@@ -26,6 +34,9 @@ func run(args []string) int {
 		return 0
 	case "mcp-help":
 		printMCPUsage()
+		return 0
+	case "update-help":
+		printUpdateUsage()
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
@@ -45,6 +56,9 @@ func resolveCommand(args []string) (string, []string) {
 		if len(args) > 1 && args[1] == "mcp" {
 			return "mcp-help", nil
 		}
+		if len(args) > 1 && args[1] == "update" {
+			return "update-help", nil
+		}
 		return "help", nil
 	}
 
@@ -54,6 +68,11 @@ func resolveCommand(args []string) (string, []string) {
 			return "mcp-help", nil
 		}
 		return "mcp", args[1:]
+	case "update":
+		if len(args) > 1 && isHelpRequest(args[1:]) {
+			return "update-help", nil
+		}
+		return "update", args[1:]
 	default:
 		return "unknown", nil
 	}
@@ -71,6 +90,9 @@ func runMCPCommand(args []string) int {
 	}
 
 	if err := runMCP(cfg); err != nil {
+		if errors.Is(err, errRestartRequired) {
+			return restartProcess()
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -83,6 +105,7 @@ func printUsage() {
 
 Usage:
   quant mcp [flags]      Start the MCP server
+  quant update           Update to the latest release
   quant version          Print version
   quant help             Show help
 
