@@ -471,6 +471,84 @@ func TestOOXMLExtractor_ExtractPPTX(t *testing.T) {
 	}
 }
 
+func TestOOXMLExtractor_ExtractPPTX_UsesPresentationOrderAndNotesRelationships(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "slides-ordered.pptx")
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("unexpected error creating pptx: %v", err)
+	}
+
+	zw := zip.NewWriter(file)
+	writeZipEntry := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("unexpected error creating zip entry %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("unexpected error writing zip entry %s: %v", name, err)
+		}
+	}
+
+	writeZipEntry("ppt/presentation.xml", `
+		<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+			<p:sldIdLst>
+				<p:sldId id="256" r:id="rId10"/>
+				<p:sldId id="257" r:id="rId2"/>
+			</p:sldIdLst>
+		</p:presentation>
+	`)
+	writeZipEntry("ppt/_rels/presentation.xml.rels", `
+		<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+			<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide10.xml"/>
+			<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+		</Relationships>
+	`)
+	writeZipEntry("ppt/slides/slide10.xml", `
+		<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+			<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Tenth slide first.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+		</p:sld>
+	`)
+	writeZipEntry("ppt/slides/slide2.xml", `
+		<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+			<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Second slide second.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+		</p:sld>
+	`)
+	writeZipEntry("ppt/slides/_rels/slide10.xml.rels", `
+		<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+			<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide7.xml"/>
+		</Relationships>
+	`)
+	writeZipEntry("ppt/notesSlides/notesSlide7.xml", `
+		<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+		         xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+			<p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Notes bound through slide rels.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+		</p:notes>
+	`)
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("unexpected error closing zip writer: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("unexpected error closing pptx: %v", err)
+	}
+
+	ext := &OOXMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+
+	want := "[Slide 10]\nTenth slide first.\n\n[Notes]\nNotes bound through slide rels.\n\n[Slide 2]\nSecond slide second."
+	if text != want {
+		t.Fatalf("unexpected pptx extraction order: %q", text)
+	}
+}
+
 func TestNotebookExtractor_ExtractIPYNB(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notebook.ipynb")
@@ -505,6 +583,43 @@ func TestNotebookExtractor_ExtractIPYNB(t *testing.T) {
 	want := "[Markdown Cell 1]\n# Title\nNotebook intro.\n\n[Code Cell 2]\nprint('hi')\n\n[Output]\nhi"
 	if text != want {
 		t.Fatalf("unexpected notebook extraction: %q", text)
+	}
+}
+
+func TestNotebookExtractor_DeduplicatesEquivalentOutputs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dedupe.ipynb")
+
+	content := `{
+	  "cells": [
+	    {
+	      "cell_type": "code",
+	      "source": ["print('hi')\n"],
+	      "outputs": [
+	        {
+	          "text": ["hi\n"],
+	          "data": {
+	            "text/plain": ["hi\n"],
+	            "text/markdown": ["hi\n"]
+	          }
+	        }
+	      ]
+	    }
+	  ]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected notebook write error: %v", err)
+	}
+
+	ext := &NotebookExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected notebook extract error: %v", err)
+	}
+
+	want := "[Code Cell 1]\nprint('hi')\n\n[Output]\nhi"
+	if text != want {
+		t.Fatalf("unexpected deduped notebook extraction: %q", text)
 	}
 }
 

@@ -20,6 +20,12 @@ func TestIsNewerExported(t *testing.T) {
 	if IsNewer("1.2.3", "1.2.3") {
 		t.Fatal("IsNewer() = true for identical versions, want false")
 	}
+	if !IsNewer("1.2.3-rc1", "1.2.3") {
+		t.Fatal("IsNewer() = false for prerelease to stable, want true")
+	}
+	if IsNewer("1.2.3", "1.2.3-rc1") {
+		t.Fatal("IsNewer() = true for stable to prerelease, want false")
+	}
 }
 
 func TestExtractBinary(t *testing.T) {
@@ -128,6 +134,14 @@ func TestCheck(t *testing.T) {
 	}
 	if rel != nil {
 		t.Fatalf("Check(dev) = %#v, want nil", rel)
+	}
+
+	rel, err = Check(context.Background(), "v1.2.3-rc1")
+	if err != nil {
+		t.Fatalf("Check(prerelease to stable) error = %v", err)
+	}
+	if rel == nil || rel.TagName != tagName {
+		t.Fatalf("Check(prerelease to stable) = %#v, want release %q", rel, tagName)
 	}
 }
 

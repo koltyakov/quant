@@ -16,6 +16,14 @@ import (
 
 type OOXMLExtractor struct{}
 
+const officeDocumentRelationshipNS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+type pptxSlide struct {
+	Number      int
+	Target      string
+	NotesTarget string
+}
+
 func (o *OOXMLExtractor) Extract(_ context.Context, path string) (string, error) {
 	switch ooxmlKind(path) {
 	case "word":
@@ -92,59 +100,36 @@ func extractPPTX(path string) (string, error) {
 	}
 	defer func() { _ = zr.Close() }()
 
-	var slides []string
-	notesMap := make(map[int]string)
-
-	for _, f := range zr.File {
-		if isPPTXSlide(f.Name) {
-			slides = append(slides, f.Name)
-		}
-	}
-	sort.Strings(slides)
-
-	// Extract speaker notes from notesSlideN.xml files.
-	for _, f := range zr.File {
-		if !strings.HasPrefix(f.Name, "ppt/notesSlides/notesSlide") || !strings.HasSuffix(f.Name, ".xml") {
-			continue
-		}
-		// Parse slide number from notesSlideN.xml.
-		base := filepath.Base(f.Name)
-		numStr := strings.TrimPrefix(base, "notesSlide")
-		numStr = strings.TrimSuffix(numStr, ".xml")
-		slideNum, err := strconv.Atoi(numStr)
-		if err != nil {
-			continue
-		}
-		data, err := readZipFile(zr.File, f.Name)
-		if err != nil {
-			continue
-		}
-		notes := strings.TrimSpace(extractNotesText(data))
-		if notes != "" {
-			notesMap[slideNum] = notes
-		}
+	slides, err := parsePPTXSlides(zr.File)
+	if err != nil {
+		return "", err
 	}
 
 	var parts []string
-	for i, name := range slides {
-		slideNum := i + 1
-		data, err := readZipFile(zr.File, name)
+	for _, slide := range slides {
+		data, err := readZipFile(zr.File, slide.Target)
 		if err != nil {
 			return "", err
 		}
 		text := strings.TrimSpace(extractDrawingMLText(data))
+		notes := ""
+		if slide.NotesTarget != "" {
+			if notesData, err := readZipFile(zr.File, slide.NotesTarget); err == nil {
+				notes = strings.TrimSpace(extractNotesText(notesData))
+			}
+		}
 
 		var section strings.Builder
-		_, _ = fmt.Fprintf(&section, "[Slide %d]", slideNum)
+		_, _ = fmt.Fprintf(&section, "[Slide %d]", slide.Number)
 		if text != "" {
 			section.WriteString("\n")
 			section.WriteString(text)
 		}
-		if notes, ok := notesMap[slideNum]; ok {
+		if notes != "" {
 			section.WriteString("\n\n[Notes]\n")
 			section.WriteString(notes)
 		}
-		if text != "" || notesMap[slideNum] != "" {
+		if text != "" || notes != "" {
 			parts = append(parts, section.String())
 		}
 	}
@@ -202,6 +187,172 @@ func isPPTXSlide(name string) bool {
 	return strings.HasPrefix(name, "ppt/slides/slide") &&
 		strings.HasSuffix(name, ".xml") &&
 		strings.Count(name, "/") == 2
+}
+
+func parsePPTXSlides(files []*zip.File) ([]pptxSlide, error) {
+	if slides, err := parsePPTXSlidesFromPresentation(files); err == nil && len(slides) > 0 {
+		return slides, nil
+	}
+	return fallbackPPTXSlides(files), nil
+}
+
+func parsePPTXSlidesFromPresentation(files []*zip.File) ([]pptxSlide, error) {
+	presentationData, err := readZipFile(files, "ppt/presentation.xml")
+	if err != nil {
+		return nil, err
+	}
+	relsData, err := readZipFile(files, "ppt/_rels/presentation.xml.rels")
+	if err != nil {
+		return nil, err
+	}
+
+	rels := parseRelationships(relsData, "ppt")
+	decoder := xml.NewDecoder(bytes.NewReader(presentationData))
+	var slides []pptxSlide
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		se, ok := token.(xml.StartElement)
+		if !ok || se.Name.Local != "sldId" {
+			continue
+		}
+
+		relID := ""
+		for _, attr := range se.Attr {
+			if attr.Name.Local == "id" && attr.Name.Space == officeDocumentRelationshipNS {
+				relID = attr.Value
+				break
+			}
+		}
+		target := rels[relID]
+		slideNum, ok := parsePPTXSlideNumber(target)
+		if relID == "" || target == "" || !ok {
+			continue
+		}
+		slides = append(slides, pptxSlide{
+			Number:      slideNum,
+			Target:      target,
+			NotesTarget: parsePPTXNotesTarget(files, target),
+		})
+	}
+
+	return slides, nil
+}
+
+func fallbackPPTXSlides(files []*zip.File) []pptxSlide {
+	var slides []pptxSlide
+	for _, f := range files {
+		if !isPPTXSlide(f.Name) {
+			continue
+		}
+		slideNum, ok := parsePPTXSlideNumber(f.Name)
+		if !ok {
+			continue
+		}
+		slides = append(slides, pptxSlide{
+			Number:      slideNum,
+			Target:      f.Name,
+			NotesTarget: parsePPTXNotesTarget(files, f.Name),
+		})
+	}
+	sort.Slice(slides, func(i, j int) bool {
+		return slides[i].Number < slides[j].Number
+	})
+	return slides
+}
+
+func parsePPTXSlideNumber(name string) (int, bool) {
+	base := filepath.Base(name)
+	if !strings.HasPrefix(base, "slide") || !strings.HasSuffix(base, ".xml") {
+		return 0, false
+	}
+	numStr := strings.TrimSuffix(strings.TrimPrefix(base, "slide"), ".xml")
+	n, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func parsePPTXNotesTarget(files []*zip.File, slideTarget string) string {
+	relsPath := pathpkg.Join(pathpkg.Dir(slideTarget), "_rels", pathpkg.Base(slideTarget)+".rels")
+	relsData, err := readZipFile(files, relsPath)
+	if err == nil {
+		slideDir := pathpkg.Dir(slideTarget)
+		for _, rel := range parseRelationshipEntries(relsData, slideDir) {
+			if strings.HasSuffix(rel.Type, "/notesSlide") {
+				return rel.Target
+			}
+		}
+	}
+
+	if slideNum, ok := parsePPTXSlideNumber(slideTarget); ok {
+		fallback := pathpkg.Join("ppt", "notesSlides", fmt.Sprintf("notesSlide%d.xml", slideNum))
+		if hasZipEntry(files, fallback) {
+			return fallback
+		}
+	}
+	return ""
+}
+
+type relationshipEntry struct {
+	ID     string
+	Target string
+	Type   string
+}
+
+func parseRelationships(data []byte, baseDir string) map[string]string {
+	entries := parseRelationshipEntries(data, baseDir)
+	rels := make(map[string]string, len(entries))
+	for _, rel := range entries {
+		rels[rel.ID] = rel.Target
+	}
+	return rels
+}
+
+func hasZipEntry(files []*zip.File, name string) bool {
+	for _, f := range files {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRelationshipEntries(data []byte, baseDir string) []relationshipEntry {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	var rels []relationshipEntry
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		se, ok := token.(xml.StartElement)
+		if !ok || se.Name.Local != "Relationship" {
+			continue
+		}
+
+		var rel relationshipEntry
+		for _, attr := range se.Attr {
+			switch attr.Name.Local {
+			case "Id":
+				rel.ID = attr.Value
+			case "Target":
+				rel.Target = pathpkg.Clean(pathpkg.Join(baseDir, attr.Value))
+			case "Type":
+				rel.Type = attr.Value
+			}
+		}
+		if rel.Target != "" {
+			rels = append(rels, rel)
+		}
+	}
+
+	return rels
 }
 
 func sectionOrdinal(name string) string {

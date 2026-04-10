@@ -80,20 +80,32 @@ func renderNotebookCell(cell notebookCell) string {
 
 func renderNotebookOutputs(outputs []notebookOutput) string {
 	var parts []string
+	seen := make(map[string]struct{})
 	for _, output := range outputs {
 		text := strings.TrimSpace(notebookText(output.Text))
 		if text != "" {
-			parts = append(parts, text)
+			parts = appendNotebookOutput(parts, seen, text)
 		}
 
 		for _, key := range []string{"text/plain", "text/markdown"} {
 			text = strings.TrimSpace(notebookText(output.Data[key]))
 			if text != "" {
-				parts = append(parts, text)
+				parts = appendNotebookOutput(parts, seen, text)
 			}
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func appendNotebookOutput(parts []string, seen map[string]struct{}, text string) []string {
+	if text == "" {
+		return parts
+	}
+	if _, ok := seen[text]; ok {
+		return parts
+	}
+	seen[text] = struct{}{}
+	return append(parts, text)
 }
 
 func notebookText(raw json.RawMessage) string {
