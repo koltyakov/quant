@@ -944,10 +944,81 @@ func TestLogPathForDB(t *testing.T) {
 	}
 }
 
+func TestIsCompanionLogPathForDB(t *testing.T) {
+	dbPath := filepath.Join("tmp", "quant.db")
+	logPath := logPathForDB(dbPath)
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "active log", path: logPath, want: true},
+		{name: "rotated log", path: rotatedLogPath(logPath, 1), want: true},
+		{name: "deep rotated log", path: rotatedLogPath(logPath, 12), want: true},
+		{name: "non numeric suffix", path: logPath + ".bak", want: false},
+		{name: "different file", path: filepath.Join("tmp", "notes.log"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCompanionLogPathForDB(dbPath, tt.path); got != tt.want {
+				t.Fatalf("expected %v, got %v for %q", tt.want, got, tt.path)
+			}
+		})
+	}
+}
+
+func TestRotatingLogWriter_RotatesAndRetains(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "quant.log")
+
+	w, err := newRotatingLogWriter(logPath, 10, 2)
+	if err != nil {
+		t.Fatalf("unexpected writer error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	for _, entry := range []string{
+		"111111111\n",
+		"222222222\n",
+		"333333333\n",
+		"444444444\n",
+	} {
+		if _, err := w.Write([]byte(entry)); err != nil {
+			t.Fatalf("unexpected write error: %v", err)
+		}
+	}
+
+	assertFileContent := func(path, want string) {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("unexpected read error for %s: %v", path, err)
+		}
+		if string(data) != want {
+			t.Fatalf("expected %q in %s, got %q", want, path, string(data))
+		}
+	}
+
+	assertFileContent(logPath, "444444444\n")
+	assertFileContent(rotatedLogPath(logPath, 1), "333333333\n")
+	assertFileContent(rotatedLogPath(logPath, 2), "222222222\n")
+
+	if _, err := os.Stat(rotatedLogPath(logPath, 3)); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be absent, got err=%v", rotatedLogPath(logPath, 3), err)
+	}
+}
+
 func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
 	logPath := logPathForDB(dbPath)
+	rotatedPath := rotatedLogPath(logPath, 1)
 	notePath := filepath.Join(dir, "note.txt")
 
 	if err := os.WriteFile(notePath, []byte("kept document"), 0644); err != nil {
@@ -955,6 +1026,9 @@ func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 	}
 	if err := os.WriteFile(logPath, []byte("log output"), 0644); err != nil {
 		t.Fatalf("unexpected error writing log: %v", err)
+	}
+	if err := os.WriteFile(rotatedPath, []byte("rotated log output"), 0644); err != nil {
+		t.Fatalf("unexpected error writing rotated log: %v", err)
 	}
 
 	store, err := index.NewStore(dbPath)
@@ -977,6 +1051,17 @@ func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 		Embedding:  index.EncodeFloat32([]float32{1}),
 	}}); err != nil {
 		t.Fatalf("unexpected error seeding stale log document: %v", err)
+	}
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       filepath.Base(rotatedPath),
+		Hash:       "stale-rotated-log-hash",
+		ModifiedAt: time.Now().Add(-2 * time.Hour),
+	}, []index.ChunkRecord{{
+		Content:    "stale rotated log chunk",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32([]float32{1}),
+	}}); err != nil {
+		t.Fatalf("unexpected error seeding stale rotated log document: %v", err)
 	}
 
 	idx := &indexer{
