@@ -37,7 +37,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return fmt.Errorf("walking %s: %w", path, err)
 		}
 
 		if d.IsDir() {
@@ -64,7 +64,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			return fmt.Errorf("stating %s: %w", path, err)
 		}
 
 		return visit(Result{

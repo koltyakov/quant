@@ -144,6 +144,45 @@ func TestReplaceBinaryCopy(t *testing.T) {
 	}
 }
 
+func TestReplaceBinaryCopyStaged_RestoresOriginalOnCreateFailure(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "quant")
+	staged := filepath.Join(dir, "staged")
+	oldContent := []byte("old")
+	if err := os.WriteFile(exe, oldContent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	failedCreate := false
+	err := replaceBinaryCopyStaged(staged, exe, 0o755, "", replaceOps{
+		rename: func(oldPath, newPath string) error {
+			return errors.New("rename blocked")
+		},
+		remove: os.Remove,
+		copy: func(srcPath, dstPath string, mode os.FileMode) error {
+			if dstPath == exe && !failedCreate {
+				failedCreate = true
+				return errors.New("copy failed")
+			}
+			return copyFilePath(srcPath, dstPath, mode)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "create new binary") {
+		t.Fatalf("expected create failure, got %v", err)
+	}
+
+	got, readErr := os.ReadFile(exe)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, oldContent) {
+		t.Fatalf("binary content = %q, want %q", got, oldContent)
+	}
+}
+
 func TestShouldFallbackToCopy(t *testing.T) {
 	tests := []struct {
 		name string

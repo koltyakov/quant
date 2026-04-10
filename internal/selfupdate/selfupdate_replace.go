@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+type replaceOps struct {
+	rename func(oldPath, newPath string) error
+	remove func(path string) error
+	copy   func(srcPath, dstPath string, mode os.FileMode) error
+}
+
 func replaceBinary(newBinary []byte) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -99,26 +105,51 @@ func replaceBinaryCopy(exe string, newBinary []byte, caps string) error {
 		return err
 	}
 
+	return replaceBinaryCopyStaged(tmpPath, exe, mode, caps, replaceOps{
+		rename: os.Rename,
+		remove: os.Remove,
+		copy:   copyFilePath,
+	})
+}
+
+func replaceBinaryCopyStaged(stagedPath, exe string, mode os.FileMode, caps string, ops replaceOps) error {
+	if ops.rename == nil {
+		ops.rename = os.Rename
+	}
+	if ops.remove == nil {
+		ops.remove = os.Remove
+	}
+	if ops.copy == nil {
+		ops.copy = copyFilePath
+	}
+
 	backupPath := fmt.Sprintf("%s.old.%d", exe, time.Now().UnixNano())
-	swappedWithBackup := false
-	if err := os.Rename(exe, backupPath); err == nil {
-		swappedWithBackup = true
+	hasBackup := false
+	if err := ops.rename(exe, backupPath); err == nil {
+		hasBackup = true
 	} else {
-		if err := os.Remove(exe); err != nil {
+		if err := ops.copy(exe, backupPath, mode); err != nil {
+			return fmt.Errorf("backup old binary: %w", err)
+		}
+		hasBackup = true
+		if err := ops.remove(exe); err != nil {
+			_ = ops.remove(backupPath)
 			return fmt.Errorf("remove old binary (the binary must be in a directory writable by the running user): %w", err)
 		}
 	}
 
-	if err := copyFilePath(tmpPath, exe, mode); err != nil {
-		if swappedWithBackup {
-			if restoreErr := os.Rename(backupPath, exe); restoreErr != nil {
-				return fmt.Errorf("create new binary: %w (restore old binary failed: %v)", err, restoreErr)
+	if err := ops.copy(stagedPath, exe, mode); err != nil {
+		if hasBackup {
+			if restoreErr := ops.rename(backupPath, exe); restoreErr != nil {
+				if copyRestoreErr := ops.copy(backupPath, exe, mode); copyRestoreErr != nil {
+					return fmt.Errorf("create new binary: %w (restore old binary failed: %v; copy restore failed: %v)", err, restoreErr, copyRestoreErr)
+				}
 			}
 		}
 		return fmt.Errorf("create new binary: %w", err)
 	}
-	if swappedWithBackup {
-		_ = os.Remove(backupPath)
+	if hasBackup {
+		_ = ops.remove(backupPath)
 	}
 
 	setFileCaps(exe, caps)

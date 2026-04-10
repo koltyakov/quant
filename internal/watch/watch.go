@@ -132,9 +132,20 @@ func (w *Watcher) loop() {
 				return
 			}
 			w.handleEvent(event)
-		case <-w.fsw.Errors:
+		case err, ok := <-w.fsw.Errors:
+			if !ok {
+				return
+			}
+			w.handleBackendError(err)
 		}
 	}
+}
+
+func (w *Watcher) handleBackendError(err error) {
+	if err != nil {
+		log.Printf("warning: watcher backend error: %v", err)
+	}
+	w.signalResync()
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {

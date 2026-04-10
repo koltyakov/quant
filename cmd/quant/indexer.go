@@ -774,11 +774,17 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		if err != nil {
 			return indexNoop, fmt.Errorf("embedding chunks %d-%d: %w", batchStart, batchEnd-1, err)
 		}
+		if len(embeddings) != len(batch) {
+			return indexNoop, fmt.Errorf(
+				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
+				batchStart,
+				batchEnd-1,
+				len(embeddings),
+				len(batch),
+			)
+		}
 
 		for i, c := range batch {
-			if i >= len(embeddings) {
-				break
-			}
 			chunkRecords = append(chunkRecords, index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,

@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -194,6 +195,25 @@ func TestWalk_MatchesScanResults(t *testing.T) {
 		if results[i].Path != walked[i].Path {
 			t.Fatalf("result %d: expected %s, got %s", i, results[i].Path, walked[i].Path)
 		}
+	}
+}
+
+func TestWalk_MissingRootReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	err := Walk(filepath.Join(dir, "missing"), nil, func(Result) error { return nil })
+	if err == nil {
+		t.Fatal("expected error for missing root")
+	}
+}
+
+func TestWalk_VisitorErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "a.txt"), "hello")
+
+	want := errors.New("stop")
+	err := Walk(dir, nil, func(Result) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatalf("expected visitor error %v, got %v", want, err)
 	}
 }
 

@@ -1,6 +1,9 @@
 package watch
 
 import (
+	"bytes"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,6 +174,36 @@ func TestWatcher_DirectoryRemovalMarksEventAsDirectory(t *testing.T) {
 	}
 	if !event.IsDir {
 		t.Fatalf("expected directory remove event, got %+v", event)
+	}
+}
+
+func TestWatcher_BackendErrorRequestsResync(t *testing.T) {
+	watcher := &Watcher{
+		events: make(chan Event, 1),
+		done:   make(chan struct{}),
+	}
+
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+
+	watcher.handleBackendError(errors.New("backend failed"))
+
+	event := waitForOp(t, watcher.Events(), Resync, time.Second)
+	if event.Op != Resync {
+		t.Fatalf("expected resync event, got %+v", event)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected backend error to be logged")
 	}
 }
 

@@ -58,6 +58,23 @@ func (f *countingEmbedder) Dimensions() int { return 1 }
 
 func (f *countingEmbedder) Close() error { return nil }
 
+type shortBatchEmbedder struct{}
+
+func (shortBatchEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return []float32{1}, nil
+}
+
+func (shortBatchEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	return [][]float32{{1}}, nil
+}
+
+func (shortBatchEmbedder) Dimensions() int { return 1 }
+
+func (shortBatchEmbedder) Close() error { return nil }
+
 type fakeExtractor struct {
 	text string
 }
@@ -273,6 +290,52 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	}
 	if emb.batchCalls.Load() != 0 {
 		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	}
+}
+
+func TestIndexFile_FailsOnShortEmbedBatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("alpha beta gamma delta epsilon zeta eta theta"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 2, ChunkOverlap: 0},
+		store:     store,
+		embedder:  shortBatchEmbedder{},
+		extractor: fileExtractor{},
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unexpected error stating file: %v", err)
+	}
+
+	action, err := idx.indexFile(context.Background(), path, info.ModTime())
+	if err == nil || !strings.Contains(err.Error(), "returned 1 embeddings") {
+		t.Fatalf("expected short batch error, got action=%s err=%v", action, err)
+	}
+	if action != indexNoop {
+		t.Fatalf("expected noop action on embed mismatch, got %s", action)
+	}
+
+	doc, err := store.GetDocumentByPath(context.Background(), "sample.txt")
+	if err != nil {
+		t.Fatalf("unexpected error loading document: %v", err)
+	}
+	if doc != nil {
+		t.Fatalf("expected no partial document to be written, got %+v", doc)
 	}
 }
 
