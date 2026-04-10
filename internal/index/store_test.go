@@ -2,6 +2,8 @@ package index
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -14,6 +16,19 @@ func TestNewStore(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	mustCloseStore(t, store)
+}
+
+func TestNewStore_CreatesParentDirectory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), ".index", "quant.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("expected database file to exist: %v", err)
+	}
 }
 
 func TestStore_UpsertAndGetDocument(t *testing.T) {

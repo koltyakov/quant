@@ -59,7 +59,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir` | current working directory | Directory to watch and index |
-| `--db` | `<dir>/quant.db` | SQLite database path |
+| `--db` | `<dir>/.index/quant.db` | SQLite database path |
 | `--transport` | `stdio` | MCP transport: `stdio`, `sse`, `http` |
 | `--listen` | `:8080` | Listen address for SSE/HTTP |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
@@ -99,7 +99,7 @@ Configuration precedence is:
 
 ```yaml
 dir: ./my-project
-db: ./quant.db
+db: ./.index/quant.db
 transport: stdio
 listen: :8080
 embed_url: http://localhost:11434

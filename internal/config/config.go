@@ -75,7 +75,7 @@ func Parse() (*Config, error) {
 	cfg := Default()
 
 	flag.StringVar(&cfg.WatchDir, "dir", "", "Directory to watch (default: current directory)")
-	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/quant.db)")
+	flag.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/.index/quant.db)")
 	flag.StringVar((*string)(&cfg.Transport), "transport", string(cfg.Transport), "MCP transport: stdio, sse, http")
 	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
 	flag.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
@@ -136,7 +136,7 @@ func Parse() (*Config, error) {
 	cfg.WatchDir = filepath.Clean(watchDir)
 
 	if cfg.DBPath == "" {
-		cfg.DBPath = filepath.Join(cfg.WatchDir, "quant.db")
+		cfg.DBPath = defaultDBPath(cfg.WatchDir)
 	} else {
 		dbPath, err := filepath.Abs(cfg.DBPath)
 		if err != nil {
@@ -150,6 +150,10 @@ func Parse() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultDBPath(watchDir string) string {
+	return filepath.Join(watchDir, ".index", "quant.db")
 }
 
 func loadYAML(cfg *Config, path string) error {

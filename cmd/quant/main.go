@@ -988,6 +988,10 @@ func (w *rotatingLogWriter) Close() error {
 }
 
 func (w *rotatingLogWriter) open() error {
+	if err := os.MkdirAll(filepath.Dir(w.path), 0755); err != nil {
+		return err
+	}
+
 	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err

@@ -906,7 +906,7 @@ func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	if cfg.WatchDir != expectedDir {
 		t.Fatalf("expected watch dir %q, got %q", expectedDir, cfg.WatchDir)
 	}
-	expectedDBPath := filepath.Join(expectedDir, "quant.db")
+	expectedDBPath := filepath.Join(expectedDir, ".index", "quant.db")
 	if cfg.DBPath != expectedDBPath {
 		t.Fatalf("expected db path %q, got %q", expectedDBPath, cfg.DBPath)
 	}
@@ -922,6 +922,11 @@ func TestLogPathForDB(t *testing.T) {
 			name:   "replaces extension",
 			dbPath: filepath.Join("tmp", "quant.db"),
 			want:   filepath.Join("tmp", "quant.log"),
+		},
+		{
+			name:   "uses sibling log for default state dir",
+			dbPath: filepath.Join("tmp", ".index", "quant.db"),
+			want:   filepath.Join("tmp", ".index", "quant.log"),
 		},
 		{
 			name:   "replaces multi-part extension",
@@ -1014,13 +1019,39 @@ func TestRotatingLogWriter_RotatesAndRetains(t *testing.T) {
 	}
 }
 
+func TestRotatingLogWriter_CreatesParentDir(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".index", "quant.log")
+
+	w, err := newRotatingLogWriter(logPath, 1024, 1)
+	if err != nil {
+		t.Fatalf("unexpected writer error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	if _, err := w.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("expected log file to exist: %v", err)
+	}
+}
+
 func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "quant.db")
+	dbPath := filepath.Join(dir, ".index", "quant.db")
 	logPath := logPathForDB(dbPath)
 	rotatedPath := rotatedLogPath(logPath, 1)
 	notePath := filepath.Join(dir, "note.txt")
 
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+		t.Fatalf("unexpected error creating state dir: %v", err)
+	}
 	if err := os.WriteFile(notePath, []byte("kept document"), 0644); err != nil {
 		t.Fatalf("unexpected error writing note: %v", err)
 	}
