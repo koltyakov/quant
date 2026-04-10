@@ -145,6 +145,8 @@ chunk_overlap: 0.15
 index_workers: 4
 ```
 
+Relative paths in the YAML file are resolved against the config file's directory.
+
 ## Recommended Deployment Model
 
 `quant` is typically better when scoped to the work you are doing right now instead of acting as one giant universal index.
@@ -171,7 +173,7 @@ If you later add a hosted backend, the cheapest widely-used OpenAI embedding opt
 
 | Tool           | Description                                                                           |
 | -------------- | ------------------------------------------------------------------------------------- |
-| `search`       | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold` |
+| `search`       | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path` |
 | `list_sources` | List indexed documents                                                                |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model                                  |
 

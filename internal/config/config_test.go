@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -120,6 +121,49 @@ func TestLoadYAML_AllowsZeroChunkOverlap(t *testing.T) {
 	}
 	if cfg.ChunkOverlap != 0 {
 		t.Fatalf("expected chunk overlap 0, got %f", cfg.ChunkOverlap)
+	}
+}
+
+func TestParseArgs_ResolvesConfigPathsRelativeToConfigFile(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "configs", "project")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	cfgDir := filepath.Join(root, "configs")
+	cfgPath := filepath.Join(cfgDir, "quant.yaml")
+	if err := os.WriteFile(cfgPath, []byte("dir: ./project\ndb: ./.index/quant.db\n"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	otherDir := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("unexpected getwd error: %v", err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("unexpected chdir error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	cfg, err := ParseArgs([]string{"--config", cfgPath})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	if cfg.WatchDir != projectDir {
+		t.Fatalf("expected watch dir %q, got %q", projectDir, cfg.WatchDir)
+	}
+	wantDB := filepath.Join(cfgDir, ".index", "quant.db")
+	if cfg.DBPath != wantDB {
+		t.Fatalf("expected db path %q, got %q", wantDB, cfg.DBPath)
 	}
 }
 

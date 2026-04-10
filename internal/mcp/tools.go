@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -77,12 +78,19 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 
 	threshold := float32(0)
 	if v, ok := args["threshold"].(float64); ok {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("threshold must be a finite number")
+		}
 		threshold = float32(v)
 	}
 
 	pathPrefix := ""
 	if v, ok := args["path"].(string); ok {
-		pathPrefix = v
+		normalizedPath, normErr := normalizeSearchPathPrefix(s.cfg.WatchDir, v)
+		if normErr != nil {
+			return nil, normErr
+		}
+		pathPrefix = normalizedPath
 	}
 
 	startedAt := time.Now()
@@ -128,6 +136,35 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	}
 
 	return mcplib.NewToolResultText(output), nil
+}
+
+func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+
+	hasTrailingSep := strings.HasSuffix(raw, "/") || strings.HasSuffix(raw, `\`)
+	path := raw
+	if filepath.IsAbs(path) {
+		rel, err := filepath.Rel(watchDir, path)
+		if err != nil {
+			return "", fmt.Errorf("invalid search path %q: %w", raw, err)
+		}
+		path = rel
+	}
+
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." {
+		return "", nil
+	}
+	if path == ".." || strings.HasPrefix(path, "../") {
+		return "", fmt.Errorf("search path %q is outside watch dir", raw)
+	}
+	if hasTrailingSep && path != "" && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	return path, nil
 }
 
 func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -459,6 +460,89 @@ func TestHandleSearch_PathFilter(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_PathFilterNormalizesRelativeAndAbsolutePaths(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, doc := range []struct {
+		path    string
+		content string
+	}{
+		{"docs/guide.md", "installation guide for the project"},
+		{"src/main.go", "package main func main"},
+	} {
+		if err := store.ReindexDocument(context.Background(), &index.Document{
+			Path:       doc.path,
+			Hash:       doc.path + "-hash",
+			ModifiedAt: testTime(),
+		}, []index.ChunkRecord{{
+			Content:    doc.content,
+			ChunkIndex: 0,
+			Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+		}}); err != nil {
+			t.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	for _, pathArg := range []string{"./docs", filepath.Join(dir, "docs")} {
+		result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{
+				Name:      "search",
+				Arguments: map[string]any{"query": "guide project", "path": pathArg},
+			},
+		})
+		if err != nil {
+			t.Fatalf("unexpected search error for %q: %v", pathArg, err)
+		}
+		text := extractToolText(t, result)
+		if !strings.Contains(text, "docs/guide.md") || strings.Contains(text, "src/main.go") {
+			t.Fatalf("unexpected filtered results for %q: %q", pathArg, text)
+		}
+	}
+}
+
+func TestHandleSearch_PathFilterRejectsPathsOutsideWatchDir(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+
+	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "alpha", "path": "../outside"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for relative path outside watch dir")
+	}
+
+	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "alpha", "path": filepath.Join(filepath.Dir(dir), "outside")},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for absolute path outside watch dir")
+	}
+}
+
 func TestHandleSearch_EmptyQuery(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
@@ -513,6 +597,31 @@ func TestHandleSearch_InvalidLimit(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatalf("expected error for invalid limit %v", limit)
+		}
+	}
+}
+
+func TestHandleSearch_InvalidThreshold(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+
+	for _, threshold := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{
+				Name:      "search",
+				Arguments: map[string]any{"query": "alpha", "threshold": threshold},
+			},
+		})
+		if err == nil {
+			t.Fatalf("expected error for invalid threshold %v", threshold)
 		}
 	}
 }

@@ -206,6 +206,7 @@ func loadYAML(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
+	baseDir := filepath.Dir(path)
 
 	type fileConfig struct {
 		WatchDir      string    `yaml:"dir"`
@@ -227,10 +228,10 @@ func loadYAML(cfg *Config, path string) error {
 	}
 
 	if parsed.WatchDir != "" {
-		cfg.WatchDir = parsed.WatchDir
+		cfg.WatchDir = resolveConfigPath(baseDir, parsed.WatchDir)
 	}
 	if parsed.DBPath != "" {
-		cfg.DBPath = parsed.DBPath
+		cfg.DBPath = resolveConfigPath(baseDir, parsed.DBPath)
 	}
 	if parsed.Transport != "" {
 		cfg.Transport = parsed.Transport
@@ -266,6 +267,13 @@ func loadYAML(cfg *Config, path string) error {
 	}
 
 	return nil
+}
+
+func resolveConfigPath(baseDir, path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(baseDir, path)
 }
 
 func applyEnv(cfg *Config) {
