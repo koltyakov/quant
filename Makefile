@@ -4,7 +4,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_LDFLAGS := -s -w -X main.Version=$(VERSION)
 BUILD_FLAGS := -trimpath -ldflags "$(BUILD_LDFLAGS)"
 
-.PHONY: build test fmt lint clean install
+.PHONY: build test cov fmt lint clean install
 
 build:
 	mkdir -p bin
@@ -16,6 +16,10 @@ install: build
 
 test:
 	go test ./...
+
+cov:
+	go test -coverprofile=coverage.out ./...
+	@go tool cover -func=coverage.out | tail -1
 
 fmt:
 	gofmt -s -w .
