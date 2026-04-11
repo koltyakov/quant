@@ -252,6 +252,29 @@ func (s *Store) HNSWReady() bool {
 	return s.hnsw != nil && s.hnsw.ready.Load()
 }
 
+// HNSWLen returns the number of nodes in the HNSW graph, or 0 if not ready.
+func (s *Store) HNSWLen() int {
+	if s.hnsw == nil {
+		return 0
+	}
+	return s.hnsw.Len()
+}
+
+// ResetHNSW marks the in-memory HNSW graph as not-ready so it will be rebuilt
+// on the next BuildHNSW call. Used when staleness is detected after a crash.
+func (s *Store) ResetHNSW() {
+	if s.hnsw == nil {
+		return
+	}
+	s.hnsw.mu.Lock()
+	s.hnsw.graph = hnsw.NewGraph[int]()
+	s.hnsw.graph.M = hnswM
+	s.hnsw.graph.EfSearch = hnswEfSearch
+	s.hnsw.ready.Store(false)
+	s.hnsw.dirty.Store(false)
+	s.hnsw.mu.Unlock()
+}
+
 // FlushHNSW schedules a debounced HNSW graph flush. Multiple calls within the
 // flush window are coalesced into a single disk write.
 func (s *Store) FlushHNSW() {

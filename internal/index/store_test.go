@@ -740,8 +740,8 @@ func TestStore_SearchResultScoreKinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected vector search error: %v", err)
 	}
-	if len(vectorOnly) != 1 || vectorOnly[0].ScoreKind != "cosine" {
-		t.Fatalf("expected vector result with cosine score kind, got %+v", vectorOnly)
+	if len(vectorOnly) != 1 || vectorOnly[0].ScoreKind != "rrf" {
+		t.Fatalf("expected vector result with rrf score kind, got %+v", vectorOnly)
 	}
 }
 

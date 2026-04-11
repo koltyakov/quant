@@ -22,7 +22,8 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 		return nil
 	}
 
-	// Extract text block for each boundary range.
+	charBudget := codeCharBudget(chunkSize)
+
 	var blocks []string
 	for i, start := range boundaries {
 		end := len(lines)
@@ -40,10 +41,9 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 		return nil
 	}
 
-	// Overlap is skipped for code chunks - declaration boundaries are cleaner split points.
 	var chunks []Chunk
 	var current []string
-	currentWords := 0
+	currentChars := 0
 
 	flush := func() {
 		if len(current) == 0 {
@@ -60,11 +60,11 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 	}
 
 	for _, block := range blocks {
-		blockWords := wordCount(block)
-		if blockWords > chunkSize {
+		blockChars := runeCount(block)
+		if blockChars > charBudget {
 			flush()
 			current = nil
-			currentWords = 0
+			currentChars = 0
 			subChunks := Split(block, chunkSize, overlapFraction)
 			for _, sc := range subChunks {
 				chunks = append(chunks, Chunk{
@@ -75,14 +75,14 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 			continue
 		}
 
-		if currentWords > 0 && currentWords+blockWords > chunkSize {
+		if currentChars > 0 && currentChars+blockChars > charBudget {
 			flush()
 			current = nil
-			currentWords = 0
+			currentChars = 0
 		}
 
 		current = append(current, block)
-		currentWords += blockWords
+		currentChars += blockChars
 	}
 
 	flush()

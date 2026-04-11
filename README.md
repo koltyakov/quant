@@ -81,7 +81,7 @@ For the full flag reference, environment variables, YAML config, and auto-update
 | `list_sources` | List indexed documents. Params: `limit` |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model |
 
-`search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity.
+`search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common scale.
 
 ## Supported File Types
 

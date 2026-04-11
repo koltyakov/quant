@@ -398,6 +398,20 @@ func wordCount(text string) int {
 	return len(strings.Fields(text))
 }
 
+func runeCount(text string) int {
+	return len([]rune(text))
+}
+
+// codeCharBudget converts a word-based chunk size to a character budget for
+// code files. Code has different "word" boundaries than prose (braces,
+// operators, semicolons each count as words via strings.Fields), making
+// wordCount unreliable. A character budget produces more consistent chunk sizes.
+const avgCodeCharsPerWord = 5
+
+func codeCharBudget(chunkSize int) int {
+	return chunkSize * avgCodeCharsPerWord
+}
+
 func normalizeLineEndings(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	return strings.ReplaceAll(text, "\r", "\n")

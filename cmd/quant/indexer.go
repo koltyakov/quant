@@ -33,42 +33,13 @@ type indexer struct {
 	embedder  embed.Embedder
 	extractor extract.Extractor
 
-	liveJobs chan string
-
-	liveMu     sync.Mutex
-	liveStates map[string]*livePathState
-
-	pathMu     sync.Mutex
-	pathStates map[string]*pathState
-
-	retryMu     sync.Mutex
-	retryStates map[string]*retryState
+	paths   *pathSyncTracker
+	live    *liveIndexQueue
+	retries *retryScheduler
 
 	resyncMu      sync.Mutex
 	resyncRunning bool
 	resyncPending bool
-}
-
-type pathState struct {
-	running bool
-	dirty   bool
-	version uint64
-
-	hasModTime   bool
-	requestedMod time.Time
-}
-
-type livePathState struct {
-	modTime    time.Time
-	hasPending bool
-	queued     bool
-	running    bool
-}
-
-type retryState struct {
-	attempts int
-	modTime  time.Time
-	timer    *time.Timer
 }
 
 type pendingEmbed struct {
@@ -97,7 +68,24 @@ func (idx *indexer) runInitialSync(ctx context.Context) {
 		return
 	}
 	idx.store.LoadHNSW()
+	idx.checkHNSWStaleness(ctx)
 	idx.runResyncLoop(ctx, true)
+}
+
+func (idx *indexer) checkHNSWStaleness(ctx context.Context) {
+	if !idx.store.HNSWReady() {
+		return
+	}
+	_, chunkCount, err := idx.store.Stats(ctx)
+	if err != nil {
+		logx.Warn("could not verify hnsw staleness", "err", err)
+		return
+	}
+	hnswNodes := idx.store.HNSWLen()
+	if hnswNodes != chunkCount {
+		logx.Warn("hnsw graph stale, discarding for rebuild", "hnsw_nodes", hnswNodes, "db_chunks", chunkCount)
+		idx.store.ResetHNSW()
+	}
 }
 
 func (idx *indexer) requestResync(ctx context.Context) {
@@ -147,7 +135,6 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 					idx.store.RemoveBackup()
 				}
 			}
-			// Build HNSW graph in background after initial sync (if not loaded from disk).
 			if !idx.store.HNSWReady() {
 				go func() {
 					if err := idx.store.BuildHNSW(ctx); err != nil {
@@ -275,10 +262,22 @@ func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, erro
 		if result.err != nil {
 			report.hadIndexFailures = true
 			logx.Error("indexing failed", "path", result.path, "err", result.err)
-			idx.scheduleIndexRetry(ctx, result.path, result.modTime)
+			if idx.retries != nil {
+				idx.retries.schedule(result.path, result.modTime, func(retryModTime time.Time) {
+					select {
+					case <-ctx.Done():
+						idx.retries.clear(result.path)
+						return
+					default:
+					}
+					idx.enqueueLiveIndex(ctx, result.path, retryModTime)
+				})
+			}
 			continue
 		}
-		idx.clearIndexRetry(result.path)
+		if idx.retries != nil {
+			idx.retries.clear(result.path)
+		}
 		switch result.action {
 		case indexUpdated:
 			logx.Info("indexed document", "path", result.path)
@@ -345,7 +344,14 @@ func (idx *indexer) workerCount(maxPending int) int {
 }
 
 func (idx *indexer) liveQueueSize() int {
-	size := idx.workerCount(0) * liveQueueMultiplier
+	return liveQueueSizeForWorkers(idx.cfg.IndexWorkers)
+}
+
+func liveQueueSizeForWorkers(workers int) int {
+	if workers < 1 {
+		workers = 1
+	}
+	size := workers * liveQueueMultiplier
 	if size < minLiveQueueSize {
 		size = minLiveQueueSize
 	}
@@ -356,8 +362,8 @@ func (idx *indexer) liveQueueSize() int {
 }
 
 func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGroup) {
-	if idx.liveJobs == nil {
-		idx.liveJobs = make(chan string, idx.liveQueueSize())
+	if idx.live == nil {
+		idx.live = newLiveIndexQueue(idx.liveQueueSize())
 	}
 
 	workers := idx.workerCount(0)
@@ -369,7 +375,7 @@ func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 				select {
 				case <-ctx.Done():
 					return
-				case path := <-idx.liveJobs:
+				case path := <-idx.live.jobs:
 					idx.processLiveIndexRequest(ctx, path)
 				}
 			}
@@ -378,108 +384,64 @@ func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 }
 
 func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime time.Time) bool {
-	if idx.liveJobs == nil {
-		idx.processLiveIndexRequest(ctx, path)
+	if idx.live == nil {
+		idx.processLiveIndexRequestDirect(ctx, path, modTime)
 		return true
 	}
 
-	if !idx.markLivePending(path, modTime) {
+	if !idx.live.markPending(path, modTime) {
 		return true
 	}
 
 	select {
-	case idx.liveJobs <- path:
+	case idx.live.jobs <- path:
 		return true
 	default:
-		idx.cancelLiveQueue(path)
+		idx.live.cancel(path)
 		logx.Warn("live index queue full; scheduling resync", "path", path)
 		idx.requestResync(ctx)
 		return false
 	}
 }
 
-func (idx *indexer) markLivePending(path string, modTime time.Time) bool {
-	idx.liveMu.Lock()
-	defer idx.liveMu.Unlock()
-
-	if idx.liveStates == nil {
-		idx.liveStates = make(map[string]*livePathState)
-	}
-
-	state, ok := idx.liveStates[path]
-	if !ok {
-		state = &livePathState{}
-		idx.liveStates[path] = state
-	}
-	if !state.hasPending || modTime.After(state.modTime) {
-		state.modTime = modTime
-	}
-	state.hasPending = true
-	if state.queued || state.running {
-		return false
-	}
-	state.queued = true
-	return true
-}
-
-func (idx *indexer) cancelLiveQueue(path string) {
-	idx.liveMu.Lock()
-	defer idx.liveMu.Unlock()
-
-	state, ok := idx.liveStates[path]
-	if !ok || !state.queued || state.running {
-		return
-	}
-	state.queued = false
-	if !state.running {
-		delete(idx.liveStates, path)
-	}
-}
-
-func (idx *indexer) startLiveProcessing(path string) (time.Time, bool) {
-	idx.liveMu.Lock()
-	defer idx.liveMu.Unlock()
-
-	state, ok := idx.liveStates[path]
-	if !ok || !state.queued {
-		return time.Time{}, false
-	}
-	state.queued = false
-	state.running = true
-	modTime := state.modTime
-	state.hasPending = false
-	return modTime, true
-}
-
-func (idx *indexer) finishLiveProcessing(path string) bool {
-	idx.liveMu.Lock()
-	defer idx.liveMu.Unlock()
-
-	state, ok := idx.liveStates[path]
-	if !ok {
-		return false
-	}
-	state.running = false
-	if state.hasPending && !state.queued {
-		state.queued = true
-		return true
-	}
-	delete(idx.liveStates, path)
-	return false
-}
-
 func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
-	modTime, ok := idx.startLiveProcessing(path)
+	modTime, ok := idx.live.startProcessing(path)
 	if !ok {
 		return
 	}
 
+	idx.processLiveIndexRequestDirect(ctx, path, modTime)
+
+	if idx.live.finishProcessing(path) {
+		select {
+		case idx.live.jobs <- path:
+		default:
+			idx.live.cancel(path)
+			logx.Warn("live index queue full; scheduling resync", "path", path)
+			idx.requestResync(ctx)
+		}
+	}
+}
+
+func (idx *indexer) processLiveIndexRequestDirect(ctx context.Context, path string, modTime time.Time) {
 	action, err := idx.indexFile(ctx, path, modTime)
 	if err != nil {
 		logx.Error("indexing failed", "path", path, "err", err)
-		idx.scheduleIndexRetry(ctx, path, modTime)
+		if idx.retries != nil {
+			idx.retries.schedule(path, modTime, func(retryModTime time.Time) {
+				select {
+				case <-ctx.Done():
+					idx.retries.clear(path)
+					return
+				default:
+				}
+				idx.enqueueLiveIndex(ctx, path, retryModTime)
+			})
+		}
 	} else {
-		idx.clearIndexRetry(path)
+		if idx.retries != nil {
+			idx.retries.clear(path)
+		}
 		switch action {
 		case indexUpdated:
 			logx.Info("indexed document", "path", path)
@@ -487,102 +449,10 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 			logx.Info("removed document from index", "path", path)
 		}
 	}
-
-	if idx.finishLiveProcessing(path) {
-		select {
-		case idx.liveJobs <- path:
-		default:
-			idx.cancelLiveQueue(path)
-			logx.Warn("live index queue full; scheduling resync", "path", path)
-			idx.requestResync(ctx)
-		}
-	}
-}
-
-func (idx *indexer) beginPathSync(key string, modTime *time.Time) (uint64, bool) {
-	idx.pathMu.Lock()
-	defer idx.pathMu.Unlock()
-
-	if idx.pathStates == nil {
-		idx.pathStates = make(map[string]*pathState)
-	}
-
-	state, ok := idx.pathStates[key]
-	if !ok {
-		state = &pathState{}
-		idx.pathStates[key] = state
-	}
-	if state.running {
-		if idx.pathRequestInvalidates(state, modTime) {
-			state.version++
-			state.dirty = true
-			state.hasModTime = modTime != nil
-			if modTime != nil {
-				state.requestedMod = *modTime
-			}
-		}
-		return state.version, false
-	}
-	state.version++
-	state.running = true
-	state.hasModTime = modTime != nil
-	if modTime != nil {
-		state.requestedMod = *modTime
-	}
-	return state.version, true
-}
-
-func (idx *indexer) pathRequestInvalidates(state *pathState, modTime *time.Time) bool {
-	if state == nil {
-		return true
-	}
-	if modTime == nil {
-		return state.hasModTime
-	}
-	if !state.hasModTime {
-		return true
-	}
-	return !sameModTime(state.requestedMod, *modTime)
-}
-
-func (idx *indexer) finishPathSync(key string) (uint64, bool) {
-	idx.pathMu.Lock()
-	defer idx.pathMu.Unlock()
-
-	state, ok := idx.pathStates[key]
-	if !ok {
-		return 0, false
-	}
-	if state.dirty {
-		state.dirty = false
-		return state.version, true
-	}
-	delete(idx.pathStates, key)
-	return 0, false
-}
-
-func (idx *indexer) isCurrentPathGeneration(key string, version uint64) bool {
-	idx.pathMu.Lock()
-	defer idx.pathMu.Unlock()
-
-	state, ok := idx.pathStates[key]
-	return ok && state.running && state.version == version
-}
-
-func (idx *indexer) invalidatePrefix(prefix string) {
-	idx.pathMu.Lock()
-	defer idx.pathMu.Unlock()
-
-	for key, state := range idx.pathStates {
-		if key == prefix || strings.HasPrefix(key, prefix+string(filepath.Separator)) {
-			state.version++
-			state.dirty = true
-		}
-	}
 }
 
 func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
-	version, started := idx.beginPathSync(key, modTime)
+	version, started := idx.paths.begin(key, modTime)
 	if !started {
 		return indexNoop, nil
 	}
@@ -592,7 +462,7 @@ func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime 
 	currentVersion := version
 	for {
 		action, err := idx.syncDocumentOnce(ctx, key, path, currentModTime, currentDoc, currentVersion)
-		nextVersion, rerun := idx.finishPathSync(key)
+		nextVersion, rerun := idx.paths.finish(key)
 		if !rerun {
 			return action, err
 		}
@@ -742,7 +612,7 @@ func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
 			return
 		}
 		if event.IsDir {
-			idx.invalidatePrefix(key)
+			idx.paths.invalidatePrefix(key)
 			if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
 				logx.Error("removing directory from index failed", "path", event.Path, "err", err)
 				return
@@ -761,9 +631,6 @@ func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
 	}
 }
 
-// indexFile is the full entry point used by watchLoop. It checks whether the
-// file type is supported, loads any existing document from the store, and
-// short-circuits when the modification time is unchanged.
 func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Time) (indexAction, error) {
 	key, err := documentKey(idx.cfg.WatchDir, path)
 	if err != nil {
@@ -772,10 +639,6 @@ func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Tim
 	return idx.syncDocument(ctx, key, path, &modTime, nil)
 }
 
-// indexFileCore performs the actual indexing work: hashing, extracting,
-// chunking, embedding, and storing. It accepts an optional pre-loaded document
-// so that callers who already have it (e.g. initialSync) can skip the extra
-// database lookup.
 func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (indexAction, error) {
 	hash := precomputedHash
 	if hash == "" {
@@ -789,7 +652,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return indexNoop, nil
 	}
 
-	if !idx.isCurrentPathGeneration(key, version) {
+	if !idx.paths.isCurrent(key, version) {
 		return indexNoop, nil
 	}
 
@@ -831,9 +694,6 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 	return indexUpdated, nil
 }
 
-// diffChunks compares new chunks against existing stored chunks and produces
-// a slice of ChunkRecords. Unchanged chunks reuse their stored embedding;
-// new or modified chunks get placeholder entries that embedChunks fills in.
 func (idx *indexer) diffChunks(chunks []chunk.Chunk, existingByContent map[string]index.ChunkRecord) (
 	[]index.ChunkRecord, []chunk.Chunk, []pendingEmbed, error) {
 
@@ -858,9 +718,6 @@ func (idx *indexer) diffChunks(chunks []chunk.Chunk, existingByContent map[strin
 	return chunkRecords, toEmbed, embedPositions, nil
 }
 
-// embedChunks fills placeholder ChunkRecords with newly computed embeddings.
-// It uses pipelined batching: a producer goroutine sends batches to the
-// embedder while the main goroutine accumulates results.
 func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, embedPositions []pendingEmbed, chunkRecords []index.ChunkRecord) error {
 	if len(toEmbed) == 0 {
 		return nil
@@ -915,7 +772,7 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 			chunkRecords[globalIdx] = index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
-				Embedding:  index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i])),
+				Embedding:  index.EncodeFloat32(index.NormalizeFloat32(result.embeddings[i])),
 			}
 		}
 	}
@@ -929,18 +786,8 @@ func (idx *indexer) shouldIgnorePath(path string) bool {
 	return isCompanionLogPathForDB(idx.cfg.DBPath, path)
 }
 
-// buildEmbedInput prepends a structured metadata prefix to the chunk content
-// so the embedding model has context about which file/section a chunk belongs to.
-// Format:  "File: <key> | Section: <heading>\n\n<content>"  (section omitted when empty)
-func buildEmbedInput(key, heading, content string) string {
-	if key == "" {
-		return content
-	}
-	prefix := "File: " + key
-	if heading != "" {
-		prefix += " | Section: " + heading
-	}
-	return prefix + "\n\n" + content
+func buildEmbedInput(_, _ string, content string) string {
+	return content
 }
 
 func documentKey(root, path string) (string, error) {
@@ -978,82 +825,4 @@ func removeDocumentIfPresent(ctx context.Context, store *index.Store, doc *index
 		return indexNoop, fmt.Errorf("deleting empty document: %w", err)
 	}
 	return indexRemoved, nil
-}
-
-func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime time.Time) {
-	if path == "" {
-		return
-	}
-
-	idx.retryMu.Lock()
-	if idx.retryStates == nil {
-		idx.retryStates = make(map[string]*retryState)
-	}
-
-	state, ok := idx.retryStates[path]
-	if !ok {
-		state = &retryState{}
-		idx.retryStates[path] = state
-	}
-	if state.timer != nil {
-		if state.modTime.IsZero() || modTime.After(state.modTime) {
-			state.modTime = modTime
-		}
-		idx.retryMu.Unlock()
-		return
-	}
-	if state.attempts >= maxIndexRetryAttempts {
-		attempts := state.attempts
-		delete(idx.retryStates, path)
-		idx.retryMu.Unlock()
-		logx.Warn("giving up retrying path", "path", path, "attempts", attempts)
-		return
-	}
-
-	state.attempts++
-	if state.modTime.IsZero() || modTime.After(state.modTime) {
-		state.modTime = modTime
-	}
-	attempts := state.attempts
-	delay := time.Duration(attempts) * indexRetryBaseDelay
-	state.timer = time.AfterFunc(delay, func() {
-		idx.retryMu.Lock()
-		current, ok := idx.retryStates[path]
-		if !ok {
-			idx.retryMu.Unlock()
-			return
-		}
-		current.timer = nil
-		retryModTime := current.modTime
-		idx.retryMu.Unlock()
-
-		select {
-		case <-ctx.Done():
-			idx.clearIndexRetry(path)
-			return
-		default:
-		}
-
-		idx.enqueueLiveIndex(ctx, path, retryModTime)
-	})
-	idx.retryMu.Unlock()
-
-	logx.Warn("retrying path", "path", path, "delay", delay, "attempt", attempts, "max_attempts", maxIndexRetryAttempts)
-}
-
-func (idx *indexer) clearIndexRetry(path string) {
-	idx.retryMu.Lock()
-	defer idx.retryMu.Unlock()
-
-	if idx.retryStates == nil {
-		return
-	}
-	state, ok := idx.retryStates[path]
-	if !ok {
-		return
-	}
-	if state.timer != nil {
-		state.timer.Stop()
-	}
-	delete(idx.retryStates, path)
 }

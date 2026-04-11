@@ -19,13 +19,10 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 
 	lines := strings.Split(src, "\n")
 
-	// Build the preamble: package declaration + import block.
 	preamble := goPreamble(fset, f, lines)
 
-	// Collect top-level declaration text blocks.
 	var decls []string
 	for _, decl := range f.Decls {
-		// Skip import declarations - already in preamble.
 		if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
 			continue
 		}
@@ -44,12 +41,12 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 		return nil
 	}
 
-	// Merge adjacent small declarations up to chunkSize, prepending preamble to each chunk.
-	// Overlap is intentionally skipped for code chunks - declaration boundaries are cleaner
-	// split points than word-count overlaps.
+	charBudget := codeCharBudget(chunkSize)
+	preambleChars := runeCount(preamble)
+
 	var chunks []Chunk
 	var current []string
-	currentWords := 0
+	currentChars := 0
 
 	flush := func() {
 		if len(current) == 0 {
@@ -70,12 +67,11 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 	}
 
 	for _, decl := range decls {
-		declWords := wordCount(decl)
-		if declWords > chunkSize {
-			// Oversized single declaration: flush current, then split the decl standalone.
+		declChars := runeCount(decl)
+		if declChars > charBudget {
 			flush()
 			current = nil
-			currentWords = 0
+			currentChars = 0
 
 			subChunks := Split(decl, chunkSize, overlapFraction)
 			for _, sc := range subChunks {
@@ -92,16 +88,19 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 			continue
 		}
 
-		if currentWords > 0 && currentWords+declWords > chunkSize {
+		effectiveBudget := charBudget
+		if len(current) == 0 {
+			effectiveBudget -= preambleChars + 2 // account for preamble + "\n\n"
+		}
+
+		if currentChars > 0 && currentChars+declChars > effectiveBudget {
 			flush()
-			// Overlap: keep last few words from previous chunk (not easily extractable
-			// from declaration blocks, so we skip overlap for code chunks).
 			current = nil
-			currentWords = 0
+			currentChars = 0
 		}
 
 		current = append(current, decl)
-		currentWords += declWords
+		currentChars += declChars
 	}
 
 	flush()

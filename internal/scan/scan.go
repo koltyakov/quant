@@ -83,12 +83,10 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 // matchesAnyGitIgnore checks the path against all applicable .gitignore matchers
 // from the root down to the deepest parent directory.
 func matchesAnyGitIgnore(matchers map[string]*ignore.GitIgnore, rootDir, relPath string) bool {
-	// Check root-level gitignore.
 	if gi, ok := matchers[rootDir]; ok && gi.MatchesPath(relPath) {
 		return true
 	}
 
-	// Check nested gitignore files for each parent directory.
 	parts := strings.Split(filepath.Dir(relPath), string(filepath.Separator))
 	current := rootDir
 	for _, part := range parts {
@@ -100,7 +98,6 @@ func matchesAnyGitIgnore(matchers map[string]*ignore.GitIgnore, rootDir, relPath
 		if !ok {
 			continue
 		}
-		// Compute path relative to the gitignore's directory.
 		nestedRel, err := filepath.Rel(current, filepath.Join(rootDir, relPath))
 		if err != nil {
 			continue

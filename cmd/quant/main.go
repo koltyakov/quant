@@ -82,12 +82,13 @@ func runMCP(cfg *config.Config) error {
 	}
 
 	idx := &indexer{
-		cfg:        cfg,
-		store:      store,
-		embedder:   embedder,
-		extractor:  extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
-		liveStates: make(map[string]*livePathState),
-		pathStates: make(map[string]*pathState),
+		cfg:       cfg,
+		store:     store,
+		embedder:  embedder,
+		extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
+		paths:     newPathSyncTracker(),
+		live:      newLiveIndexQueue(liveQueueSizeForWorkers(cfg.IndexWorkers)),
+		retries:   newRetryScheduler(),
 	}
 
 	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})

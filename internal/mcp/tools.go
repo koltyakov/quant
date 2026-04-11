@@ -25,7 +25,7 @@ func (s *Server) registerTools() {
 			mcplib.Description("Maximum number of results (default: 5)"),
 		),
 		mcplib.WithNumber("threshold",
-			mcplib.Description("Minimum result score. Vector-only results use cosine-style scores; hybrid FTS+vector results use RRF ranks (default: 0)"),
+			mcplib.Description("Minimum result score (RRF scale, default: 0)"),
 		),
 		mcplib.WithString("path",
 			mcplib.Description("Filter results to documents whose path starts with this prefix"),

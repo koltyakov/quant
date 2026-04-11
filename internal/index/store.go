@@ -804,6 +804,9 @@ func rerankKeywordCandidates(candidates map[int]*searchCandidate, limit int, pat
 }
 
 // rerankByVector computes dot product scores for candidate rows and returns top results.
+// Results are scored with RRF (1/(k+vectorRank)) so they are on the same scale as
+// keyword-hybrid results from rerankKeywordCandidates, making the two lists comparable
+// when merged in Search.
 func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int, exclude map[int]*searchCandidate) ([]SearchResult, error) {
 	candidates := make(candidateHeap, 0, limit)
 	for rows.Next() {
@@ -826,7 +829,7 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int, exclude
 				ChunkContent: content,
 				ChunkIndex:   chunkIndex,
 				Score:        score,
-				ScoreKind:    "cosine",
+				ScoreKind:    "rrf",
 			},
 			score: score,
 		}
@@ -852,9 +855,11 @@ func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int, exclude
 		return candidates[i].score > candidates[j].score
 	})
 
+	const k = 60
 	results := make([]SearchResult, len(candidates))
-	for i := range candidates {
-		results[i] = candidates[i].result
+	for i, c := range candidates {
+		c.result.Score = 1.0 / float32(k+i+1)
+		results[i] = c.result
 	}
 	return results, nil
 }

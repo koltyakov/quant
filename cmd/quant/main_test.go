@@ -161,10 +161,11 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	}
 
 	idx := &indexer{
-		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:     store,
 		embedder:  testutil.StaticEmbedder{},
 		extractor: fakeExtractor{text: ""},
+		paths:     newPathSyncTracker(),
 	}
 
 	info, err := os.Stat(path)
@@ -242,6 +243,7 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 		store:     store,
 		embedder:  emb,
 		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	action, err := idx.indexFile(ctx, path, info.ModTime())
@@ -281,6 +283,7 @@ func TestIndexFile_FailsOnShortEmbedBatch(t *testing.T) {
 		store:     store,
 		embedder:  testutil.ShortBatchEmbedder{},
 		extractor: fileExtractor{},
+		paths:     newPathSyncTracker(),
 	}
 
 	info, err := os.Stat(path)
@@ -332,6 +335,7 @@ func TestIndexFile_ReindexesSameModTimeContentChange(t *testing.T) {
 		store:     store,
 		embedder:  testutil.StaticEmbedder{},
 		extractor: fileExtractor{},
+		paths:     newPathSyncTracker(),
 	}
 
 	info, err := os.Stat(path)
@@ -423,6 +427,7 @@ func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
 		store:     store,
 		embedder:  testutil.StaticEmbedder{},
 		extractor: fakeExtractor{text: "hello world"},
+		paths:     newPathSyncTracker(),
 	}
 
 	action, err := idx.indexFile(context.Background(), path, info.ModTime())
@@ -474,11 +479,11 @@ func TestIndexFile_CoalescesConcurrentRequests(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
-		store:      store,
-		embedder:   emb,
-		extractor:  ext,
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  emb,
+		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	errCh := make(chan error, 2)
@@ -537,11 +542,11 @@ func TestHandleWatchEvent_QueuesLiveIndexWork(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  ext,
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -598,11 +603,12 @@ func TestHandleWatchEvent_RetriesTransientLiveIndexFailure(t *testing.T) {
 		started:  make(chan struct{}),
 	}
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  ext,
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: ext,
+		paths:     newPathSyncTracker(),
+		retries:   newRetryScheduler(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -641,9 +647,9 @@ func TestHandleWatchEvent_RetriesTransientLiveIndexFailure(t *testing.T) {
 
 func TestEnqueueLiveIndex_CoalescesByPath(t *testing.T) {
 	idx := &indexer{
-		cfg:        &config.Config{IndexWorkers: 1},
-		liveJobs:   make(chan string, 4),
-		liveStates: make(map[string]*livePathState),
+		cfg:   &config.Config{IndexWorkers: 1},
+		live:  newLiveIndexQueue(4),
+		paths: newPathSyncTracker(),
 	}
 
 	first := time.Unix(100, 0)
@@ -654,15 +660,15 @@ func TestEnqueueLiveIndex_CoalescesByPath(t *testing.T) {
 	if !idx.enqueueLiveIndex(context.Background(), "a.txt", second) {
 		t.Fatal("expected second enqueue to be coalesced")
 	}
-	if got := len(idx.liveJobs); got != 1 {
+	if got := len(idx.live.jobs); got != 1 {
 		t.Fatalf("expected one queued path, got %d", got)
 	}
 
-	path := <-idx.liveJobs
+	path := <-idx.live.jobs
 	if path != "a.txt" {
 		t.Fatalf("expected queued path a.txt, got %s", path)
 	}
-	modTime, ok := idx.startLiveProcessing(path)
+	modTime, ok := idx.live.startProcessing(path)
 	if !ok {
 		t.Fatal("expected live processing to start")
 	}
@@ -689,11 +695,11 @@ func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
 	})
 
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  fakeExtractor{text: "hello world"},
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: fakeExtractor{text: "hello world"},
+		paths:     newPathSyncTracker(),
 	}
 
 	if err := idx.initialSync(context.Background()); err != nil {
@@ -742,11 +748,11 @@ func TestInitialSyncWithReport_TracksIndexFailures(t *testing.T) {
 	})
 
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  &flakyExtractor{text: "hello world", failures: 1},
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: &flakyExtractor{text: "hello world", failures: 1},
+		paths:     newPathSyncTracker(),
 	}
 
 	report, err := idx.initialSyncWithReport(context.Background())
@@ -786,11 +792,11 @@ func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.
 		release: make(chan struct{}),
 	}
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  ext,
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	indexErrCh := make(chan error, 1)
@@ -873,11 +879,11 @@ func TestInitialSync_ReconcilesFileRecreatedDuringScanWindow(t *testing.T) {
 		release:   make(chan struct{}),
 	}
 	idx := &indexer{
-		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:      store,
-		embedder:   testutil.StaticEmbedder{},
-		extractor:  ext,
-		pathStates: make(map[string]*pathState),
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	errCh := make(chan error, 1)
@@ -968,6 +974,7 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 		store:     store,
 		embedder:  emb,
 		extractor: ext,
+		paths:     newPathSyncTracker(),
 	}
 
 	if err := idx.initialSync(context.Background()); err != nil {
@@ -1369,6 +1376,7 @@ func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 		store:     store,
 		embedder:  testutil.StaticEmbedder{},
 		extractor: textLogExtractor{},
+		paths:     newPathSyncTracker(),
 	}
 
 	if err := idx.initialSync(context.Background()); err != nil {
