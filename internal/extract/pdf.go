@@ -16,6 +16,8 @@ import (
 	"github.com/ledongthuc/pdf"
 )
 
+var ErrOCRFailed = errors.New("pdf ocr extraction failed")
+
 const defaultPDFOCRTimeout = 2 * time.Minute
 
 type PDFExtractor struct {
@@ -58,7 +60,7 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 			return "", ctx.Err()
 		}
 		logx.Warn("pdf ocr fallback skipped", "path", path, "err", err)
-		return "", nil
+		return "", ErrOCRFailed
 	}
 
 	return strings.TrimSpace(text), nil

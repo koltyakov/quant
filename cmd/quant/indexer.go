@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"github.com/koltyakov/quant/internal/watch"
 )
 
+var errOCRFailed = extract.ErrOCRFailed
+
 type indexAction string
 
 const (
@@ -29,7 +32,8 @@ const (
 
 type indexer struct {
 	cfg       *config.Config
-	store     *index.Store
+	store     index.DocumentWriter
+	hnswStore index.HNSWBuilder
 	embedder  embed.Embedder
 	extractor extract.Extractor
 
@@ -57,10 +61,9 @@ var (
 )
 
 const (
-	defaultEmbedBatchSize = 16
-	liveQueueMultiplier   = 8
-	minLiveQueueSize      = 16
-	maxLiveQueueSize      = 512
+	liveQueueMultiplier = 8
+	minLiveQueueSize    = 16
+	maxLiveQueueSize    = 512
 )
 
 func (idx *indexer) runInitialSync(ctx context.Context) {
@@ -106,20 +109,23 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 			}
 			logx.Error("filesystem resync failed", "err", err)
 		} else if first {
-			docCount, chunkCount, err := idx.store.Stats(ctx)
+			docCount, _, err := idx.store.Stats(ctx)
 			if err != nil {
 				logx.Error("fetching index stats failed", "err", err)
 			} else {
-				logx.Info("initial scan complete", "documents", docCount, "chunks", chunkCount)
+				logx.Info("initial scan complete", "documents", docCount)
 				if report.hadIndexFailures {
 					logx.Warn("initial scan completed with indexing failures", "action", "keeping database backup until a clean rebuild succeeds")
 				} else {
-					idx.store.RemoveBackup()
+					idx.hnswStore.RemoveBackup()
 				}
 			}
-			if !idx.store.HNSWReady() {
+			if !idx.hnswStore.HNSWReady() {
+				idx.hnswStore.LoadHNSWFromState(ctx)
+			}
+			if !idx.hnswStore.HNSWReady() {
 				go func() {
-					if err := idx.store.BuildHNSW(ctx); err != nil {
+					if err := idx.hnswStore.BuildHNSW(ctx); err != nil {
 						logx.Warn("hnsw build failed", "err", err)
 					}
 				}()
@@ -640,6 +646,9 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 
 	text, err := idx.extractor.Extract(ctx, path)
 	if err != nil {
+		if errors.Is(err, errOCRFailed) {
+			return indexNoop, err
+		}
 		return indexNoop, fmt.Errorf("extracting text: %w", err)
 	}
 
@@ -705,6 +714,11 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 		return nil
 	}
 
+	batchSize := idx.cfg.EmbedBatchSize
+	if batchSize < 1 {
+		batchSize = 16
+	}
+
 	type batchResult struct {
 		batchStart int
 		batch      []chunk.Chunk
@@ -712,13 +726,13 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 		err        error
 	}
 
-	numBatches := (len(toEmbed) + defaultEmbedBatchSize - 1) / defaultEmbedBatchSize
+	numBatches := (len(toEmbed) + batchSize - 1) / batchSize
 	resultCh := make(chan batchResult, min(numBatches, 4))
 
 	go func() {
 		defer close(resultCh)
-		for batchStart := 0; batchStart < len(toEmbed); batchStart += defaultEmbedBatchSize {
-			batchEnd := batchStart + defaultEmbedBatchSize
+		for batchStart := 0; batchStart < len(toEmbed); batchStart += batchSize {
+			batchEnd := batchStart + batchSize
 			if batchEnd > len(toEmbed) {
 				batchEnd = len(toEmbed)
 			}
@@ -800,7 +814,7 @@ func normalizeModTime(t time.Time) time.Time {
 	return t.UTC().Round(0)
 }
 
-func removeDocumentIfPresent(ctx context.Context, store *index.Store, doc *index.Document, path string) (indexAction, error) {
+func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (indexAction, error) {
 	if doc == nil {
 		return indexNoop, nil
 	}

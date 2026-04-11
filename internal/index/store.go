@@ -19,9 +19,11 @@ import (
 type Store struct {
 	db                        *sql.DB
 	dbPath                    string
-	backup                    string // non-empty if a pre-existing DB was backed up due to migration failure
+	backup                    string
 	maxVectorSearchCandidates int
 	hnsw                      *hnswIndex
+	keywordWeightOverride     float32
+	vectorWeightOverride      float32
 }
 
 const defaultMaxVectorSearchCandidates = 20000
@@ -143,6 +145,11 @@ func (s *Store) SetMaxVectorSearchCandidates(max int) {
 	s.maxVectorSearchCandidates = max
 }
 
+func (s *Store) SetWeightOverrides(keyword, vector float32) {
+	s.keywordWeightOverride = keyword
+	s.vectorWeightOverride = vector
+}
+
 func (s *Store) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS documents (
@@ -164,6 +171,11 @@ func (s *Store) migrate() error {
 	CREATE TABLE IF NOT EXISTS embedding_metadata (
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS hnsw_state (
+		id         INTEGER PRIMARY KEY CHECK (id = 1),
+		built_at   DATETIME NOT NULL,
+		node_count INTEGER NOT NULL
 	);
 	CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 		content,
@@ -321,7 +333,7 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 
 func ChunkDiffKey(content string) string {
 	h := sha256.Sum256([]byte(content))
-	return fmt.Sprintf("%x", h[:8])
+	return fmt.Sprintf("%x", h[:])
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {

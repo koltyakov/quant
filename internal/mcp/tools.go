@@ -42,6 +42,17 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(mcplib.NewTool("index_status",
 		mcplib.WithDescription("Get index statistics: total docs, chunks, DB size"),
 	), s.handleIndexStatus)
+
+	s.mcp.AddTool(mcplib.NewTool("find_similar",
+		mcplib.WithDescription("Find chunks similar to a given chunk by its ID. Useful for discovering related code or content across the index."),
+		mcplib.WithNumber("chunk_id",
+			mcplib.Required(),
+			mcplib.Description("The chunk ID to find similar chunks for (from search results)"),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Maximum number of results (default: 5)"),
+		),
+	), s.handleFindSimilar)
 }
 
 // maxQueryLength is the maximum number of characters accepted in a search query.
@@ -242,6 +253,59 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 
 	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel)
 
+	return mcplib.NewToolResultText(output), nil
+}
+
+func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	args := request.GetArguments()
+
+	chunkID, ok := args["chunk_id"].(float64)
+	if !ok {
+		return nil, fmt.Errorf("chunk_id is required")
+	}
+	if math.IsNaN(chunkID) || math.IsInf(chunkID, 0) || chunkID <= 0 || chunkID != float64(int64(chunkID)) {
+		return nil, fmt.Errorf("chunk_id must be a positive integer")
+	}
+
+	limit := defaultSearchLimit
+	if v, ok := args["limit"].(float64); ok {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("limit must be a finite number between 1 and %d", maxSearchLimit)
+		}
+		limit = int(v)
+	}
+	if limit < 1 || limit > maxSearchLimit {
+		return nil, fmt.Errorf("limit must be between 1 and %d", maxSearchLimit)
+	}
+
+	startedAt := time.Now()
+
+	source, err := s.store.GetChunkByID(ctx, int64(chunkID))
+	if err != nil {
+		return nil, fmt.Errorf("chunk %d not found: %w", int64(chunkID), err)
+	}
+
+	results, err := s.store.FindSimilar(ctx, int64(chunkID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("finding similar chunks: %w", err)
+	}
+
+	logx.Info("MCP find_similar", "chunk_id", int64(chunkID), "source", source.DocumentPath, "results", len(results), "duration", time.Since(startedAt).Round(time.Millisecond))
+
+	if len(results) == 0 {
+		return mcplib.NewToolResultText("No similar chunks found."), nil
+	}
+
+	header := fmt.Sprintf("Source chunk %d from %s (chunk %d):\n%s\n\nSimilar chunks:\n",
+		int64(chunkID), source.DocumentPath, source.ChunkIndex,
+		summarizeLogText(source.ChunkContent, 200))
+
+	output := header + formatSearchResults(results)
 	return mcplib.NewToolResultText(output), nil
 }
 
@@ -475,10 +539,11 @@ func formatSearchResults(results []index.SearchResult) string {
 
 func renderSearchResultEntry(position int, result index.SearchResult, snippetLimit int) string {
 	header := fmt.Sprintf(
-		"--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n",
+		"--- Result %d (score: %.4f, kind: %s, chunk_id: %d) ---\nFile: %s (chunk %d)\n",
 		position,
 		result.Score,
 		result.ScoreKind,
+		result.ChunkID,
 		result.DocumentPath,
 		result.ChunkIndex,
 	)
@@ -498,10 +563,11 @@ func renderSearchResultEntry(position int, result index.SearchResult, snippetLim
 
 func entrySnippetBudget(result index.SearchResult, totalBudget int) int {
 	header := fmt.Sprintf(
-		"--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n",
+		"--- Result %d (score: %.4f, kind: %s, chunk_id: %d) ---\nFile: %s (chunk %d)\n",
 		1,
 		result.Score,
 		result.ScoreKind,
+		result.ChunkID,
 		result.DocumentPath,
 		result.ChunkIndex,
 	)

@@ -25,13 +25,12 @@ type querySignalWeights struct {
 // classifyQueryWeights returns signal weights based on query shape.
 // Identifier-like queries (camelCase, snake_case, short single tokens)
 // upweight keyword search; longer natural-language queries upweight vector search.
-func classifyQueryWeights(query string) querySignalWeights {
+func classifyQueryWeights(query string, keywordOverride, vectorOverride float32) querySignalWeights {
 	tokens := strings.Fields(query)
 	if len(tokens) == 0 {
-		return querySignalWeights{keyword: 1.0, vector: 1.0}
+		return applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, keywordOverride, vectorOverride)
 	}
 
-	// Single token or two tokens that look like identifiers.
 	identifierTokens := 0
 	for _, tok := range tokens {
 		if camelCasePattern.MatchString(tok) || (strings.Contains(tok, "_") && tok != "_") || strings.Contains(tok, ".") {
@@ -39,23 +38,35 @@ func classifyQueryWeights(query string) querySignalWeights {
 		}
 	}
 
+	var weights querySignalWeights
 	switch {
 	case len(tokens) <= 2 && identifierTokens == len(tokens):
-		// Pure identifier query: "parseConfig", "user_name"
-		return querySignalWeights{keyword: 1.5, vector: 0.6}
+		weights = querySignalWeights{keyword: 1.5, vector: 0.6}
 	case len(tokens) == 1:
-		// Single non-identifier token: could be either signal
-		return querySignalWeights{keyword: 1.2, vector: 0.9}
+		weights = querySignalWeights{keyword: 1.2, vector: 0.9}
 	case identifierTokens > len(tokens)/2:
-		// Mixed but identifier-heavy
-		return querySignalWeights{keyword: 1.3, vector: 0.8}
+		weights = querySignalWeights{keyword: 1.3, vector: 0.8}
 	case len(tokens) >= 4:
-		// Long natural-language query
-		return querySignalWeights{keyword: 0.7, vector: 1.4}
+		weights = querySignalWeights{keyword: 0.7, vector: 1.4}
 	default:
-		// Short natural-language query (2-3 tokens)
-		return querySignalWeights{keyword: 1.0, vector: 1.0}
+		weights = querySignalWeights{keyword: 1.0, vector: 1.0}
 	}
+
+	return applyWeightOverrides(weights, keywordOverride, vectorOverride)
+}
+
+func applyWeightOverrides(w querySignalWeights, keywordOverride, vectorOverride float32) querySignalWeights {
+	if keywordOverride > 0 {
+		ratio := keywordOverride / w.keyword
+		w.keyword = keywordOverride
+		w.vector = w.vector * ratio
+	}
+	if vectorOverride > 0 {
+		ratio := vectorOverride / w.vector
+		w.vector = vectorOverride
+		w.keyword = w.keyword * ratio
+	}
+	return w
 }
 
 // pathQueryTokens extracts lowercased path-segment tokens from the raw query for
@@ -135,6 +146,7 @@ func mergeCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCand
 			vectorRank:  i + 1,
 			modifiedAt:  c.modifiedAt,
 		}
+		out[i].result.ChunkID = int64(c.id)
 	}
 	return out
 }

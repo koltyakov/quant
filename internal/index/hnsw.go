@@ -125,7 +125,80 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	s.hnsw.ready.Store(true)
 	logx.Info("hnsw graph built", "chunks", count)
 
+	if err := s.saveHNSWState(ctx, count); err != nil {
+		logx.Warn("failed to persist hnsw state", "err", err)
+	}
+
 	return nil
+}
+
+func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO hnsw_state (id, built_at, node_count) VALUES (1, CURRENT_TIMESTAMP, ?)
+		 ON CONFLICT(id) DO UPDATE SET built_at = CURRENT_TIMESTAMP, node_count = ?`,
+		nodeCount, nodeCount,
+	)
+	return err
+}
+
+func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
+	var nodeCount int
+	err := s.db.QueryRowContext(ctx, `SELECT node_count FROM hnsw_state WHERE id = 1`).Scan(&nodeCount)
+	if err != nil {
+		return false
+	}
+	if nodeCount == 0 {
+		return false
+	}
+
+	meta, err := s.embeddingMetadata(ctx)
+	if err != nil || meta == nil || meta.Dimensions == 0 {
+		return false
+	}
+
+	var chunkCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount); err != nil {
+		return false
+	}
+	if chunkCount != nodeCount {
+		return false
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, embedding FROM chunks`)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+
+	g := hnsw.NewGraph[int]()
+	g.M = hnswM
+	g.EfSearch = hnswEfSearch
+	g.Distance = hnsw.CosineDistance
+
+	loaded := 0
+	for rows.Next() {
+		var id int
+		var embBytes []byte
+		if err := rows.Scan(&id, &embBytes); err != nil {
+			return false
+		}
+		vec := decodeEmbeddingForHNSW(embBytes, meta.Dimensions)
+		if len(vec) == 0 {
+			continue
+		}
+		g.Add(hnsw.MakeNode(id, vec))
+		loaded++
+	}
+	if err := rows.Err(); err != nil {
+		return false
+	}
+
+	s.hnsw.mu.Lock()
+	s.hnsw.graph = g
+	s.hnsw.mu.Unlock()
+	s.hnsw.ready.Store(true)
+	logx.Info("hnsw graph loaded from persisted state", "chunks", loaded)
+	return true
 }
 
 // HNSWReady reports whether the HNSW graph is built and ready for queries.

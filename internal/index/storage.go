@@ -112,6 +112,9 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
 		return fmt.Errorf("rebuilding chunks fts: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM hnsw_state`); err != nil {
+		return fmt.Errorf("clearing hnsw state: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing reset transaction: %w", err)

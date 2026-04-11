@@ -73,12 +73,16 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 			current = nil
 			currentChars = 0
 
+			signature := goDeclSignature(decl)
 			subChunks := Split(decl, chunkSize, overlapFraction)
 			for _, sc := range subChunks {
 				body := sc.Content
 				content := body
 				if preamble != "" {
 					content = preamble + "\n\n" + body
+				}
+				if signature != "" && !strings.HasPrefix(strings.TrimSpace(body), signature) {
+					content = signature + "\n\n" + content
 				}
 				chunks = append(chunks, Chunk{
 					Content: content,
@@ -108,6 +112,19 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 }
 
 // goPreamble extracts the package clause and import declarations as a reusable header.
+func goDeclSignature(decl string) string {
+	for _, line := range strings.Split(decl, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			if len(trimmed) > 120 {
+				return trimmed[:120] + "..."
+			}
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func goPreamble(fset *token.FileSet, f *ast.File, lines []string) string {
 	var parts []string
 

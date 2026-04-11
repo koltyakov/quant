@@ -32,12 +32,16 @@ type Config struct {
 	ListenAddr          string        `yaml:"listen"`
 	EmbedURL            string        `yaml:"embed_url"`
 	EmbedModel          string        `yaml:"embed_model"`
+	EmbedBatchSize      int           `yaml:"embed_batch_size"`
 	PDFOCRLang          string        `yaml:"pdf_ocr_lang"`
 	PDFOCRTimeout       time.Duration `yaml:"pdf_ocr_timeout"`
 	ChunkSize           int           `yaml:"chunk_size"`
 	ChunkOverlap        float64       `yaml:"chunk_overlap"`
 	IndexWorkers        int           `yaml:"index_workers"`
 	MaxVectorCandidates int           `yaml:"max_vector_candidates"`
+	MaxConcurrentTools  int           `yaml:"max_concurrent_tools"`
+	KeywordWeight       float64       `yaml:"keyword_weight"`
+	VectorWeight        float64       `yaml:"vector_weight"`
 	WatchEventBuffer    int           `yaml:"watch_event_buffer"`
 	ConfigFile          string        `yaml:"-"`
 }
@@ -48,12 +52,16 @@ func Default() *Config {
 		ListenAddr:          ":8080",
 		EmbedURL:            "http://localhost:11434",
 		EmbedModel:          "nomic-embed-text",
+		EmbedBatchSize:      16,
 		PDFOCRLang:          "eng",
 		PDFOCRTimeout:       2 * time.Minute,
 		ChunkSize:           512,
 		ChunkOverlap:        0.15,
 		IndexWorkers:        defaultIndexWorkers(),
 		MaxVectorCandidates: 20000,
+		MaxConcurrentTools:  4,
+		KeywordWeight:       0,
+		VectorWeight:        0,
 		WatchEventBuffer:    256,
 	}
 }
@@ -92,6 +100,18 @@ func (c *Config) Validate() error {
 	}
 	if c.WatchEventBuffer < 1 || c.WatchEventBuffer > 4096 {
 		return fmt.Errorf("watch_event_buffer must be between 1 and 4096")
+	}
+	if c.EmbedBatchSize < 1 || c.EmbedBatchSize > 128 {
+		return fmt.Errorf("embed_batch_size must be between 1 and 128")
+	}
+	if c.MaxConcurrentTools < 1 || c.MaxConcurrentTools > 32 {
+		return fmt.Errorf("max_concurrent_tools must be between 1 and 32")
+	}
+	if c.KeywordWeight < 0 || c.KeywordWeight > 10 {
+		return fmt.Errorf("keyword_weight must be between 0 and 10")
+	}
+	if c.VectorWeight < 0 || c.VectorWeight > 10 {
+		return fmt.Errorf("vector_weight must be between 0 and 10")
 	}
 	return nil
 }
@@ -179,6 +199,14 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.MaxVectorCandidates = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxVectorCandidates)
 		case "watch-event-buffer":
 			cfg.WatchEventBuffer = mustParseIntFlag(f.Name, f.Value.String(), cfg.WatchEventBuffer)
+		case "embed-batch-size":
+			cfg.EmbedBatchSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.EmbedBatchSize)
+		case "max-concurrent-tools":
+			cfg.MaxConcurrentTools = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxConcurrentTools)
+		case "keyword-weight":
+			cfg.KeywordWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.KeywordWeight)
+		case "vector-weight":
+			cfg.VectorWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.VectorWeight)
 		}
 	})
 
@@ -230,6 +258,10 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
 	flagSet.IntVar(&cfg.MaxVectorCandidates, "max-vector-candidates", cfg.MaxVectorCandidates, "Maximum chunks eligible for brute-force vector fallback (0 disables it)")
 	flagSet.IntVar(&cfg.WatchEventBuffer, "watch-event-buffer", cfg.WatchEventBuffer, "Watcher event channel buffer size")
+	flagSet.IntVar(&cfg.EmbedBatchSize, "embed-batch-size", cfg.EmbedBatchSize, "Number of chunks to embed per batch")
+	flagSet.IntVar(&cfg.MaxConcurrentTools, "max-concurrent-tools", cfg.MaxConcurrentTools, "Maximum concurrent MCP tool calls")
+	flagSet.Float64Var(&cfg.KeywordWeight, "keyword-weight", cfg.KeywordWeight, "Keyword search weight multiplier (0=auto)")
+	flagSet.Float64Var(&cfg.VectorWeight, "vector-weight", cfg.VectorWeight, "Vector search weight multiplier (0=auto)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg
@@ -254,12 +286,16 @@ func loadYAML(cfg *Config, path string) error {
 		ListenAddr          string    `yaml:"listen"`
 		EmbedURL            string    `yaml:"embed_url"`
 		EmbedModel          string    `yaml:"embed_model"`
+		EmbedBatchSize      *int      `yaml:"embed_batch_size"`
 		PDFOCRLang          string    `yaml:"pdf_ocr_lang"`
 		PDFOCRTimeout       *string   `yaml:"pdf_ocr_timeout"`
 		ChunkSize           *int      `yaml:"chunk_size"`
 		ChunkOverlap        *float64  `yaml:"chunk_overlap"`
 		IndexWorkers        *int      `yaml:"index_workers"`
 		MaxVectorCandidates *int      `yaml:"max_vector_candidates"`
+		MaxConcurrentTools  *int      `yaml:"max_concurrent_tools"`
+		KeywordWeight       *float64  `yaml:"keyword_weight"`
+		VectorWeight        *float64  `yaml:"vector_weight"`
 		WatchEventBuffer    *int      `yaml:"watch_event_buffer"`
 	}
 
@@ -312,6 +348,18 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.WatchEventBuffer != nil {
 		cfg.WatchEventBuffer = *parsed.WatchEventBuffer
 	}
+	if parsed.EmbedBatchSize != nil {
+		cfg.EmbedBatchSize = *parsed.EmbedBatchSize
+	}
+	if parsed.MaxConcurrentTools != nil {
+		cfg.MaxConcurrentTools = *parsed.MaxConcurrentTools
+	}
+	if parsed.KeywordWeight != nil {
+		cfg.KeywordWeight = *parsed.KeywordWeight
+	}
+	if parsed.VectorWeight != nil {
+		cfg.VectorWeight = *parsed.VectorWeight
+	}
 
 	return nil
 }
@@ -362,6 +410,18 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_WATCH_EVENT_BUFFER"); v != "" {
 		cfg.WatchEventBuffer = mustParseIntEnv("QUANT_WATCH_EVENT_BUFFER", v, cfg.WatchEventBuffer)
+	}
+	if v := os.Getenv("QUANT_EMBED_BATCH_SIZE"); v != "" {
+		cfg.EmbedBatchSize = mustParseIntEnv("QUANT_EMBED_BATCH_SIZE", v, cfg.EmbedBatchSize)
+	}
+	if v := os.Getenv("QUANT_MAX_CONCURRENT_TOOLS"); v != "" {
+		cfg.MaxConcurrentTools = mustParseIntEnv("QUANT_MAX_CONCURRENT_TOOLS", v, cfg.MaxConcurrentTools)
+	}
+	if v := os.Getenv("QUANT_KEYWORD_WEIGHT"); v != "" {
+		cfg.KeywordWeight = mustParseFloatEnv("QUANT_KEYWORD_WEIGHT", v, cfg.KeywordWeight)
+	}
+	if v := os.Getenv("QUANT_VECTOR_WEIGHT"); v != "" {
+		cfg.VectorWeight = mustParseFloatEnv("QUANT_VECTOR_WEIGHT", v, cfg.VectorWeight)
 	}
 }
 

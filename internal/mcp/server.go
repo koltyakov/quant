@@ -30,6 +30,7 @@ type Server struct {
 
 	toolLimiterOnce sync.Once
 	toolLimiter     chan struct{}
+	maxToolSlots    int
 }
 
 const (
@@ -50,13 +51,19 @@ func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder
 		version = "dev"
 	}
 
+	maxTools := cfg.MaxConcurrentTools
+	if maxTools < 1 {
+		maxTools = maxConcurrentToolCalls
+	}
+
 	s := &Server{
-		cfg:        cfg,
-		store:      store,
-		embedder:   embedder,
-		version:    version,
-		embCache:   newEmbeddingLRU(embCacheMaxSize),
-		embFlights: make(map[string]*embeddingFlight),
+		cfg:          cfg,
+		store:        store,
+		embedder:     embedder,
+		version:      version,
+		embCache:     newEmbeddingLRU(embCacheMaxSize),
+		embFlights:   make(map[string]*embeddingFlight),
+		maxToolSlots: maxTools,
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", version)
@@ -228,7 +235,11 @@ func (s *Server) serveWithShutdown(ctx context.Context, srv shutdownable, addr s
 
 func (s *Server) acquireToolSlot(ctx context.Context) error {
 	s.toolLimiterOnce.Do(func() {
-		s.toolLimiter = make(chan struct{}, maxConcurrentToolCalls)
+		max := s.maxToolSlots
+		if max < 1 {
+			max = maxConcurrentToolCalls
+		}
+		s.toolLimiter = make(chan struct{}, max)
 	})
 
 	select {

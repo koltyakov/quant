@@ -63,6 +63,9 @@ func runMCP(cfg *config.Config) error {
 
 	logx.Info("database opened", "path", cfg.DBPath)
 	store.SetMaxVectorSearchCandidates(cfg.MaxVectorCandidates)
+	if cfg.KeywordWeight > 0 || cfg.VectorWeight > 0 {
+		store.SetWeightOverrides(float32(cfg.KeywordWeight), float32(cfg.VectorWeight))
+	}
 
 	rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
 		Model:      cfg.EmbedModel,
@@ -84,6 +87,7 @@ func runMCP(cfg *config.Config) error {
 	idx := &indexer{
 		cfg:       cfg,
 		store:     store,
+		hnswStore: store,
 		embedder:  embedder,
 		extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
 		paths:     newPathSyncTracker(),

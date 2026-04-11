@@ -66,9 +66,14 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 			current = nil
 			currentChars = 0
 			subChunks := Split(block, chunkSize, overlapFraction)
+			signature := codeSignature(block)
 			for _, sc := range subChunks {
+				content := sc.Content
+				if signature != "" && !strings.HasPrefix(strings.TrimSpace(content), signature) {
+					content = signature + "\n\n" + content
+				}
 				chunks = append(chunks, Chunk{
-					Content: sc.Content,
+					Content: content,
 					Index:   len(chunks),
 				})
 			}
@@ -87,6 +92,19 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 
 	flush()
 	return chunks
+}
+
+func codeSignature(block string) string {
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			if len(trimmed) > 120 {
+				return trimmed[:120] + "..."
+			}
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // codeBlockBoundaries returns the line indices (0-based) where top-level blocks start.

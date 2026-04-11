@@ -153,12 +153,12 @@ func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), path)
-	if err != nil {
-		t.Fatalf("unexpected extract error: %v", err)
+	_, err := ext.Extract(context.Background(), path)
+	if err == nil {
+		t.Fatalf("expected OCR failure to return an error")
 	}
-	if text != "" {
-		t.Fatalf("expected empty text after OCR failure, got %q", text)
+	if !errors.Is(err, ErrOCRFailed) {
+		t.Fatalf("expected ErrOCRFailed, got %v", err)
 	}
 }
 
