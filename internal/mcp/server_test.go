@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -702,6 +704,87 @@ func TestServeWithShutdown_UsesTimeoutContext(t *testing.T) {
 	}
 
 	close(recorder.startBlock)
+}
+
+func TestNewStreamableHTTPServer_ExposesHealthAndReadiness(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+	_, httpServer := s.newStreamableHTTPServer(":0")
+
+	for _, tc := range []struct {
+		path string
+		body string
+	}{
+		{path: healthPath, body: "ok\n"},
+		{path: readinessPath, body: "ready\n"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		httpServer.Handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned status %d, want %d", tc.path, rec.Code, http.StatusOK)
+		}
+		if rec.Body.String() != tc.body {
+			t.Fatalf("%s returned body %q, want %q", tc.path, rec.Body.String(), tc.body)
+		}
+	}
+}
+
+func TestNewSSEServer_ExposesHealthAndReadiness(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := newTestServer(dir, dbPath, store)
+	_, httpServer := s.newSSEServer(":0")
+
+	for _, tc := range []struct {
+		path string
+		body string
+	}{
+		{path: healthPath, body: "ok\n"},
+		{path: readinessPath, body: "ready\n"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		rec := httptest.NewRecorder()
+		httpServer.Handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned status %d, want %d", tc.path, rec.Code, http.StatusOK)
+		}
+		if rec.Body.String() != tc.body {
+			t.Fatalf("%s returned body %q, want %q", tc.path, rec.Body.String(), tc.body)
+		}
+	}
+}
+
+func TestHandleReadiness_ReturnsServiceUnavailableWhenDependenciesAreMissing(t *testing.T) {
+	s := &Server{}
+
+	req := httptest.NewRequest(http.MethodGet, readinessPath, nil)
+	rec := httptest.NewRecorder()
+	s.handleReadiness(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, rec.Code)
+	}
+	if rec.Body.String() != "not ready\n" {
+		t.Fatalf("expected not-ready body, got %q", rec.Body.String())
+	}
 }
 
 func TestHandleListSources(t *testing.T) {

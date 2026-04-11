@@ -3,7 +3,9 @@ package mcp
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -30,6 +32,11 @@ type Server struct {
 const (
 	embCacheMaxSize = 128
 	shutdownTimeout = 5 * time.Second
+	healthPath      = "/healthz"
+	readinessPath   = "/readyz"
+	httpMCPPath     = "/mcp"
+	ssePath         = "/sse"
+	sseMessagePath  = "/message"
 )
 
 func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder, version string) *Server {
@@ -126,12 +133,78 @@ func (s *Server) Serve(ctx context.Context, cfg *config.Config) error {
 		stdioServer := mcpserver.NewStdioServer(s.mcp)
 		return stdioServer.Listen(ctx, os.Stdin, os.Stdout)
 	case config.TransportSSE:
-		return s.serveWithShutdown(ctx, mcpserver.NewSSEServer(s.mcp), cfg.ListenAddr)
+		sseServer, _ := s.newSSEServer(cfg.ListenAddr)
+		return s.serveWithShutdown(ctx, sseServer, cfg.ListenAddr)
 	case config.TransportHTTP:
-		return s.serveWithShutdown(ctx, mcpserver.NewStreamableHTTPServer(s.mcp), cfg.ListenAddr)
+		httpServer, _ := s.newStreamableHTTPServer(cfg.ListenAddr)
+		return s.serveWithShutdown(ctx, httpServer, cfg.ListenAddr)
 	default:
 		return fmt.Errorf("unsupported transport: %s", cfg.Transport)
 	}
+}
+
+func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTPServer, *http.Server) {
+	mux := http.NewServeMux()
+	httpServer := &http.Server{Addr: addr, Handler: mux}
+	streamServer := mcpserver.NewStreamableHTTPServer(s.mcp, mcpserver.WithStreamableHTTPServer(httpServer))
+	mux.Handle(httpMCPPath, streamServer)
+	s.registerHealthRoutes(mux)
+	return streamServer, httpServer
+}
+
+func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) {
+	mux := http.NewServeMux()
+	httpServer := &http.Server{Addr: addr, Handler: mux}
+	sseServer := mcpserver.NewSSEServer(s.mcp, mcpserver.WithHTTPServer(httpServer))
+	mux.Handle(ssePath, sseServer.SSEHandler())
+	mux.Handle(sseMessagePath, sseServer.MessageHandler())
+	s.registerHealthRoutes(mux)
+	return sseServer, httpServer
+}
+
+func (s *Server) registerHealthRoutes(mux *http.ServeMux) {
+	mux.HandleFunc(healthPath, s.handleHealth)
+	mux.HandleFunc(readinessPath, s.handleReadiness)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	s.writeProbeResponse(w, r, http.StatusOK, "ok\n")
+}
+
+func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
+	if err := s.readinessError(r.Context()); err != nil {
+		s.writeProbeResponse(w, r, http.StatusServiceUnavailable, "not ready\n")
+		return
+	}
+	s.writeProbeResponse(w, r, http.StatusOK, "ready\n")
+}
+
+func (s *Server) writeProbeResponse(w http.ResponseWriter, r *http.Request, status int, body string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write([]byte(body))
+}
+
+func (s *Server) readinessError(ctx context.Context) error {
+	if s.store == nil {
+		return errors.New("index store is unavailable")
+	}
+	if err := s.store.PingContext(ctx); err != nil {
+		return fmt.Errorf("index store is unavailable: %w", err)
+	}
+	if s.embedder == nil {
+		return errors.New("embedder is unavailable")
+	}
+	return nil
 }
 
 func (s *Server) serveWithShutdown(ctx context.Context, srv shutdownable, addr string) error {
