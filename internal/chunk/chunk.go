@@ -1,13 +1,36 @@
 package chunk
 
 import (
+	"path/filepath"
 	"strings"
 	"unicode"
 )
 
+// SplitWithPath splits text into chunks using a code-aware strategy when the
+// file path indicates a source-code file, falling back to the generic paragraph
+// splitter for all other content.
+func SplitWithPath(text string, path string, chunkSize int, overlapFraction float64) []Chunk {
+	if path != "" {
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".go":
+			if chunks := splitGo(text, chunkSize, overlapFraction); chunks != nil {
+				return chunks
+			}
+		case ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".java", ".c", ".cpp", ".cc", ".h", ".hpp",
+			".rb", ".php", ".swift", ".kt", ".cs", ".scala", ".lua", ".ex", ".exs":
+			if chunks := splitCode(text, chunkSize, overlapFraction); chunks != nil {
+				return chunks
+			}
+		}
+	}
+	return Split(text, chunkSize, overlapFraction)
+}
+
 type Chunk struct {
 	Content string
 	Index   int
+	Heading string // most-recent heading active when this chunk was created (may be empty)
 }
 
 func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
@@ -38,13 +61,15 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 		if strings.TrimSpace(content) == "" {
 			return
 		}
+		heading := activeHeading
 		// Prepend heading context if the chunk doesn't already start with one.
-		if activeHeading != "" && !startsWithHeading(content) {
-			content = activeHeading + "\n\n" + content
+		if heading != "" && !startsWithHeading(content) {
+			content = heading + "\n\n" + content
 		}
 		chunks = append(chunks, Chunk{
 			Content: content,
 			Index:   len(chunks),
+			Heading: heading,
 		})
 	}
 

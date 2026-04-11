@@ -91,6 +91,7 @@ func (idx *indexer) runInitialSync(ctx context.Context) {
 	if !idx.beginResync() {
 		return
 	}
+	idx.store.LoadHNSW()
 	idx.runResyncLoop(ctx, true)
 }
 
@@ -140,6 +141,14 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 				} else {
 					idx.store.RemoveBackup()
 				}
+			}
+			// Build HNSW graph in background after initial sync (if not loaded from disk).
+			if !idx.store.HNSWReady() {
+				go func() {
+					if err := idx.store.BuildHNSW(ctx); err != nil {
+						logx.Warn("hnsw build failed", "err", err)
+					}
+				}()
 			}
 		}
 
@@ -784,7 +793,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
-	chunks := chunk.Split(text, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
+	chunks := chunk.SplitWithPath(text, path, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
@@ -799,41 +808,94 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		ModifiedAt: modTime,
 	}
 
+	// Load existing chunk embeddings keyed by content for incremental diffing.
+	// Unchanged chunks reuse their stored embedding, skipping the Ollama round-trip.
+	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
+
 	chunkRecords := make([]index.ChunkRecord, 0, len(chunks))
 
-	for batchStart := 0; batchStart < len(chunks); batchStart += defaultEmbedBatchSize {
-		batchEnd := batchStart + defaultEmbedBatchSize
-		if batchEnd > len(chunks) {
-			batchEnd = len(chunks)
-		}
+	// Collect chunks that need new embeddings (changed or new content).
+	type pendingEmbed struct {
+		chunkIdx int // index into chunks slice
+		batchPos int // position in the to-embed batch
+	}
+	var toEmbed []chunk.Chunk
+	var embedPositions []pendingEmbed
 
-		batch := chunks[batchStart:batchEnd]
-		texts := make([]string, len(batch))
-		for i, c := range batch {
-			texts[i] = c.Content
-		}
-
-		embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
-		if err != nil {
-			return indexNoop, fmt.Errorf("embedding chunks %d-%d: %w", batchStart, batchEnd-1, err)
-		}
-		if len(embeddings) != len(batch) {
-			return indexNoop, fmt.Errorf(
-				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
-				batchStart,
-				batchEnd-1,
-				len(embeddings),
-				len(batch),
-			)
-		}
-
-		for i, c := range batch {
+	for i, c := range chunks {
+		if existing, ok := existingByContent[c.Content]; ok {
+			// Unchanged chunk: reuse stored embedding.
 			chunkRecords = append(chunkRecords, index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
-				Embedding:  index.EncodeFloat32(index.NormalizeFloat32(embeddings[i])),
+				Embedding:  existing.Embedding,
 			})
+			_ = i
+		} else {
+			embedPositions = append(embedPositions, pendingEmbed{chunkIdx: i, batchPos: len(toEmbed)})
+			toEmbed = append(toEmbed, c)
+			chunkRecords = append(chunkRecords, index.ChunkRecord{}) // placeholder
 		}
+	}
+
+	// Pipelined embedding: a producer goroutine sends batches to Ollama; the main
+	// goroutine accumulates results. Batch N+1 is in-flight while batch N is processed,
+	// hiding network latency for documents with multiple embedding batches.
+	type batchResult struct {
+		batchStart int
+		embeddings [][]float32
+		err        error
+	}
+	resultCh := make(chan batchResult, 2) // buffer 2 to keep producer ahead
+
+	go func() {
+		defer close(resultCh)
+		for batchStart := 0; batchStart < len(toEmbed); batchStart += defaultEmbedBatchSize {
+			batchEnd := batchStart + defaultEmbedBatchSize
+			if batchEnd > len(toEmbed) {
+				batchEnd = len(toEmbed)
+			}
+			batch := toEmbed[batchStart:batchEnd]
+			texts := make([]string, len(batch))
+			for i, c := range batch {
+				texts[i] = buildEmbedInput(key, c.Heading, c.Content)
+			}
+			embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
+			select {
+			case <-ctx.Done():
+				return
+			case resultCh <- batchResult{batchStart: batchStart, embeddings: embeddings, err: err}:
+			}
+		}
+	}()
+
+	for result := range resultCh {
+		if result.err != nil {
+			return indexNoop, fmt.Errorf("embedding chunks from %d: %w", result.batchStart, result.err)
+		}
+		batchStart := result.batchStart
+		batchEnd := batchStart + defaultEmbedBatchSize
+		if batchEnd > len(toEmbed) {
+			batchEnd = len(toEmbed)
+		}
+		batch := toEmbed[batchStart:batchEnd]
+		if len(result.embeddings) != len(batch) {
+			return indexNoop, fmt.Errorf(
+				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
+				batchStart, batchEnd-1, len(result.embeddings), len(batch),
+			)
+		}
+		for i, c := range batch {
+			globalIdx := embedPositions[batchStart+i].chunkIdx
+			chunkRecords[globalIdx] = index.ChunkRecord{
+				Content:    c.Content,
+				ChunkIndex: c.Index,
+				Embedding:  index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i])),
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return indexNoop, ctx.Err()
 	}
 
 	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
@@ -848,6 +910,20 @@ func (idx *indexer) shouldIgnorePath(path string) bool {
 		return false
 	}
 	return isCompanionLogPathForDB(idx.cfg.DBPath, path)
+}
+
+// buildEmbedInput prepends a structured metadata prefix to the chunk content
+// so the embedding model has context about which file/section a chunk belongs to.
+// Format:  "File: <key> | Section: <heading>\n\n<content>"  (section omitted when empty)
+func buildEmbedInput(key, heading, content string) string {
+	if key == "" {
+		return content
+	}
+	prefix := "File: " + key
+	if heading != "" {
+		prefix += " | Section: " + heading
+	}
+	return prefix + "\n\n" + content
 }
 
 func documentKey(root, path string) (string, error) {

@@ -846,35 +846,88 @@ func TestStore_EnsureEmbeddingMetadata_ResetOnChange(t *testing.T) {
 
 func TestBuildFTSQueries_Basic(t *testing.T) {
 	tests := []struct {
-		input   string
-		wantAND string
-		wantOR  string
+		input    string
+		wantAND  string
+		wantOR   string
+		wantNEAR string
 	}{
-		{"hello world", "hello AND world", "hello OR world"},
-		{"", "", ""},
-		{"a b c", "a AND b AND c", "a OR b OR c"},
-		{"hello hello", "hello", "hello"}, // single token, AND == OR
-		{"single", "single", "single"},
+		// Two tokens: prefix on last, NEAR query built.
+		{"hello world", `hello AND world AND world*`, `hello OR world OR world*`, "NEAR(hello world, 10)"},
+		{"", "", "", ""},
+		// Three tokens: prefix on last, NEAR query built.
+		{"a b c", `a AND b AND c AND c*`, `a OR b OR c OR c*`, "NEAR(a b c, 10)"},
+		// Single deduped token: prefix appended.
+		{"hello hello", `hello AND hello*`, `hello OR hello*`, ""},
+		{"single", `single AND single*`, `single OR single*`, ""},
 	}
 
 	for _, tt := range tests {
-		gotAND, gotOR := buildFTSQueries(tt.input)
+		gotAND, gotOR, gotNEAR := buildFTSQueries(tt.input)
 		if gotAND != tt.wantAND {
 			t.Errorf("buildFTSQueries(%q) AND = %q, want %q", tt.input, gotAND, tt.wantAND)
 		}
 		if gotOR != tt.wantOR {
 			t.Errorf("buildFTSQueries(%q) OR = %q, want %q", tt.input, gotOR, tt.wantOR)
 		}
+		if gotNEAR != tt.wantNEAR {
+			t.Errorf("buildFTSQueries(%q) NEAR = %q, want %q", tt.input, gotNEAR, tt.wantNEAR)
+		}
 	}
 }
 
 func TestBuildFTSQueries_Phrases(t *testing.T) {
-	gotAND, gotOR := buildFTSQueries(`"exact match" other`)
-	if gotAND != `"exact match" AND other` {
-		t.Errorf("unexpected AND query with phrase: %q", gotAND)
+	// "exact match" is a quoted phrase; "other" is a bare token.
+	// Bare tokens: ["other"] -> only 1 bare token, no NEAR query.
+	// Prefix: other* appended. Sorted: ["exact match", other, other*].
+	gotAND, gotOR, gotNEAR := buildFTSQueries(`"exact match" other`)
+	wantAND := `"exact match" AND other AND other*`
+	wantOR := `"exact match" OR other OR other*`
+	if gotAND != wantAND {
+		t.Errorf("unexpected AND query with phrase: %q, want %q", gotAND, wantAND)
 	}
-	if gotOR != `"exact match" OR other` {
-		t.Errorf("unexpected OR query with phrase: %q", gotOR)
+	if gotOR != wantOR {
+		t.Errorf("unexpected OR query with phrase: %q, want %q", gotOR, wantOR)
+	}
+	if gotNEAR != "" {
+		t.Errorf("unexpected NEAR query with single bare token: %q", gotNEAR)
+	}
+}
+
+func TestBuildFTSQueries_IdentifierExpansion(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantAND  string
+		wantOR   string
+		wantNEAR string
+	}{
+		// camelCase: "getUserName" → bare token + prefix + exact phrase + component words
+		// Sorted: "getusername", get, getusername, getusername*, name, user
+		{
+			"getUserName",
+			`"getusername" AND get AND getusername AND getusername* AND name AND user`,
+			`"getusername" OR get OR getusername OR getusername* OR name OR user`,
+			"",
+		},
+		// snake_case: "parse_config" → bare token + prefix + exact phrase + component words
+		// Sorted: "parse_config", config, parse, parse_config, parse_config*
+		{
+			"parse_config",
+			`"parse_config" AND config AND parse AND parse_config AND parse_config*`,
+			`"parse_config" OR config OR parse OR parse_config OR parse_config*`,
+			"",
+		},
+	}
+	for _, tt := range tests {
+		gotAND, gotOR, gotNEAR := buildFTSQueries(tt.input)
+		if gotAND != tt.wantAND {
+			t.Errorf("buildFTSQueries(%q) AND = %q, want %q", tt.input, gotAND, tt.wantAND)
+		}
+		if gotOR != tt.wantOR {
+			t.Errorf("buildFTSQueries(%q) OR = %q, want %q", tt.input, gotOR, tt.wantOR)
+		}
+		if gotNEAR != tt.wantNEAR {
+			t.Errorf("buildFTSQueries(%q) NEAR = %q, want %q", tt.input, gotNEAR, tt.wantNEAR)
+		}
 	}
 }
 
