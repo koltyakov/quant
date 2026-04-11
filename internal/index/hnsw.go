@@ -28,6 +28,7 @@ type hnswIndex struct {
 	graph *hnsw.Graph[int]
 	path  string
 	ready atomic.Bool
+	dirty atomic.Bool
 }
 
 func newHNSWIndex(dbPath string) *hnswIndex {
@@ -45,9 +46,9 @@ func (h *hnswIndex) Add(id int, vec []float32) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.graph.Add(hnsw.MakeNode(id, vec))
+	h.dirty.Store(true)
 }
 
-// Delete removes a chunk from the graph.
 func (h *hnswIndex) Delete(id int) {
 	if !h.ready.Load() {
 		return
@@ -55,6 +56,7 @@ func (h *hnswIndex) Delete(id int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.graph.Delete(id)
+	h.dirty.Store(true)
 }
 
 // Search performs an approximate k-nearest-neighbor query.
@@ -139,7 +141,16 @@ func (h *hnswIndex) persist() error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("persisting hnsw graph: %w", err)
 	}
+	h.dirty.Store(false)
 	return nil
+}
+
+// flush persists the graph to disk if it has been modified since the last persist.
+func (h *hnswIndex) flush() error {
+	if !h.dirty.Load() {
+		return nil
+	}
+	return h.persist()
 }
 
 // BuildHNSW loads all embeddings from the database and builds the in-memory HNSW graph.
@@ -209,6 +220,16 @@ func (s *Store) HNSWReady() bool {
 	return s.hnsw != nil && s.hnsw.ready.Load()
 }
 
+// FlushHNSW persists the HNSW graph to disk if it has been modified since the last persist.
+func (s *Store) FlushHNSW() {
+	if s.hnsw == nil {
+		return
+	}
+	if err := s.hnsw.flush(); err != nil {
+		logx.Warn("failed to flush hnsw graph", "err", err)
+	}
+}
+
 // LoadHNSW attempts to restore a previously persisted HNSW graph.
 // No-op if the sidecar file does not exist.
 func (s *Store) LoadHNSW() {
@@ -254,6 +275,38 @@ func (s *Store) searchVectorHNSW(ctx context.Context, queryEmbedding []float32, 
 	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
 	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	return rerankByVector(rows, queryEmbedding, limit, exclude)
+}
+
+// searchVectorHNSWWithPrefix uses HNSW to over-fetch candidates, then filters
+// by path prefix in SQL. Falls back to brute-force if HNSW returns too few
+// prefix-matching results.
+func (s *Store) searchVectorHNSWWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, exclude map[int]*searchCandidate) ([]SearchResult, error) {
+	fetchK := (limit+len(exclude)+10)*3 + 50
+	ids := s.hnsw.Search(queryEmbedding, fetchK)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	pathPattern := sqlLikePrefixPattern(pathPrefix)
+	args = append(args, pathPattern)
+
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+	          FROM chunks c JOIN documents d ON c.document_id = d.id
+	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -226,7 +226,30 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 func (w *Watcher) handleGitIgnoreEvent(path string) {
 	dir := filepath.Dir(path)
 	w.matcher.Reload(dir)
-	w.signalResync()
+	w.signalResyncDebounced()
+}
+
+func (w *Watcher) signalResyncDebounced() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	if w.resyncTimer != nil {
+		w.resyncTimer.Stop()
+	}
+	w.resyncPending = true
+	w.resyncTimer = time.AfterFunc(defaultDebounceDelay, func() {
+		w.mu.Lock()
+		pending := w.resyncPending
+		closed := w.closed
+		w.resyncTimer = nil
+		w.mu.Unlock()
+		if pending && !closed {
+			w.trySendResync()
+		}
+	})
+	w.mu.Unlock()
 }
 
 func (w *Watcher) isWatchedDir(path string) bool {

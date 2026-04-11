@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/hnsw"
 	"github.com/koltyakov/quant/internal/logx"
 	_ "modernc.org/sqlite"
 )
@@ -280,11 +281,13 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		}
 	}
 
+	s.FlushHNSW()
+
 	return nil
 }
 
 // GetDocumentChunksByPath returns all existing chunks for the document at path,
-// keyed by a hash of their content. Used for incremental reindex diffing.
+// keyed by a compound of content and chunk index. Used for incremental reindex diffing.
 func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[string]ChunkRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT c.id, c.chunk_index, c.content, c.embedding
@@ -304,9 +307,14 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding); err != nil {
 			return nil, err
 		}
-		result[cr.Content] = cr
+		key := ChunkDiffKey(cr.Content, cr.ChunkIndex)
+		result[key] = cr
 	}
 	return result, rows.Err()
+}
+
+func ChunkDiffKey(content string, chunkIndex int) string {
+	return strconv.Itoa(chunkIndex) + ":" + content
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
@@ -315,15 +323,53 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, path string) error {
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		doc, err := s.GetDocumentByPath(ctx, path)
+		if err == nil && doc != nil {
+			s.hnswDeleteChunks(ctx, doc.ID)
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
-	return err
+	if err != nil {
+		return err
+	}
+	s.FlushHNSW()
+	return nil
 }
 
 func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) error {
 	prefix = filepath.Clean(prefix)
 	if prefix == "." || prefix == "" {
+		if s.hnsw != nil && s.hnsw.ready.Load() {
+			s.hnsw.mu.Lock()
+			s.hnsw.graph = hnsw.NewGraph[int]()
+			s.hnsw.graph.M = hnswM
+			s.hnsw.graph.EfSearch = hnswEfSearch
+			s.hnsw.dirty.Store(true)
+			s.hnsw.mu.Unlock()
+		}
 		_, err := s.db.ExecContext(ctx, `DELETE FROM documents`)
-		return err
+		if err != nil {
+			return err
+		}
+		s.FlushHNSW()
+		return nil
+	}
+
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT DISTINCT c.document_id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path = ? OR d.path LIKE ? ESCAPE '\'`,
+			prefix, sqlLikePrefixPattern(prefix),
+		)
+		if err == nil {
+			for rows.Next() {
+				var docID int64
+				if rows.Scan(&docID) == nil {
+					s.hnswDeleteChunks(ctx, docID)
+				}
+			}
+			_ = rows.Close()
+		}
 	}
 
 	likePrefix := prefix + string(filepath.Separator) + "%"
@@ -331,7 +377,11 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		`DELETE FROM documents WHERE path = ? OR path LIKE ?`,
 		prefix, likePrefix,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	s.FlushHNSW()
+	return nil
 }
 
 func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string) error {
@@ -391,7 +441,7 @@ func (s *Store) GetDocumentByPath(ctx context.Context, path string) (*Document, 
 }
 
 func (s *Store) ListDocuments(ctx context.Context) ([]Document, error) {
-	return s.listDocuments(ctx, 0)
+	return s.ListDocumentsLimit(ctx, 0)
 }
 
 func (s *Store) ListDocumentsLimit(ctx context.Context, limit int) ([]Document, error) {
@@ -412,7 +462,7 @@ func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error
 	}
 	defer func() { _ = rows.Close() }()
 
-	var docs []Document
+	docs := make([]Document, 0, min(limit, 256))
 	for rows.Next() {
 		var doc Document
 		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt); err != nil {
@@ -577,10 +627,12 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 		return nil, nil
 	}
 
-	// Prefer HNSW when ready and no path filter is active (path filter requires
-	// post-filtering which needs the full row data anyway).
-	if pathPrefix == "" && s.hnsw != nil && s.hnsw.ready.Load() {
-		return s.searchVectorHNSW(ctx, queryEmbedding, limit, exclude)
+	// Prefer HNSW when ready.
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		if pathPrefix == "" {
+			return s.searchVectorHNSW(ctx, queryEmbedding, limit, exclude)
+		}
+		return s.searchVectorHNSWWithPrefix(ctx, queryEmbedding, limit, pathPrefix, exclude)
 	}
 
 	if ok, err := s.canRunVectorFallback(ctx, pathPrefix); err != nil {

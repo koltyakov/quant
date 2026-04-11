@@ -784,6 +784,10 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return indexNoop, nil
 	}
 
+	if !idx.isCurrentPathGeneration(key, version) {
+		return indexNoop, nil
+	}
+
 	text, err := idx.extractor.Extract(ctx, path)
 	if err != nil {
 		return indexNoop, fmt.Errorf("extracting text: %w", err)
@@ -798,17 +802,13 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
-	if !idx.isCurrentPathGeneration(key, version) {
-		return indexNoop, nil
-	}
-
 	indexedDoc := &index.Document{
 		Path:       key,
 		Hash:       hash,
 		ModifiedAt: modTime,
 	}
 
-	// Load existing chunk embeddings keyed by content for incremental diffing.
+	// Load existing chunk embeddings keyed by content+index for incremental diffing.
 	// Unchanged chunks reuse their stored embedding, skipping the Ollama round-trip.
 	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
 
@@ -823,7 +823,8 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 	var embedPositions []pendingEmbed
 
 	for i, c := range chunks {
-		if existing, ok := existingByContent[c.Content]; ok {
+		key := index.ChunkDiffKey(c.Content, c.Index)
+		if existing, ok := existingByContent[key]; ok {
 			// Unchanged chunk: reuse stored embedding.
 			chunkRecords = append(chunkRecords, index.ChunkRecord{
 				Content:    c.Content,

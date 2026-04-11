@@ -67,6 +67,8 @@ func (o *Ollama) Embed(ctx context.Context, text string) ([]float32, error) {
 	return vecs[0], nil
 }
 
+const maxEmbedRetries = 4
+
 func (o *Ollama) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -74,9 +76,9 @@ func (o *Ollama) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	return o.embedBatch(ctx, texts, 0)
 }
 
-func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][]float32, error) {
-	if depth > 8 {
-		return nil, fmt.Errorf("ollama: input too long after repeated truncation")
+func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([][]float32, error) {
+	if retries > maxEmbedRetries {
+		return nil, fmt.Errorf("ollama: max retry budget (%d) exceeded", maxEmbedRetries)
 	}
 
 	const maxChars = 4000
@@ -117,8 +119,8 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][
 		if resp.StatusCode == 400 {
 			if len(truncated) > 1 {
 				mid := len(truncated) / 2
-				left, errL := o.embedBatch(ctx, truncated[:mid], depth)
-				right, errR := o.embedBatch(ctx, truncated[mid:], depth)
+				left, errL := o.embedBatch(ctx, truncated[:mid], retries+1)
+				right, errR := o.embedBatch(ctx, truncated[mid:], retries+1)
 				if errL != nil || errR != nil {
 					return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
 				}
@@ -127,18 +129,18 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][
 			rCount := utf8.RuneCountInString(truncated[0])
 			if rCount > 64 {
 				truncated[0] = truncateForEmbedding(truncated[0], rCount/2)
-				return o.embedBatch(ctx, truncated, depth+1)
+				return o.embedBatch(ctx, truncated, retries+1)
 			}
 		}
 		// Retry transient server errors with exponential backoff.
-		if resp.StatusCode >= 500 && depth < 4 {
-			backoff := time.Duration(1<<depth) * 500 * time.Millisecond
+		if resp.StatusCode >= 500 && retries < 4 {
+			backoff := time.Duration(1<<retries) * 500 * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(backoff):
 			}
-			return o.embedBatch(ctx, texts, depth+1)
+			return o.embedBatch(ctx, texts, retries+1)
 		}
 		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
 	}
