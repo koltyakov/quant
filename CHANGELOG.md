@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.0 (2026-04-11)
+
+### Features
+
+- **Embedding metadata management** - Index now tracks embedding model, dimensions, and normalization state, automatically triggering a rebuild when metadata changes.
+- **Path synchronization and retry mechanisms** - Document path renames are handled correctly during indexing, and transient failures are retried automatically.
+- **Debounced HNSW graph flush** - HNSW graph writes to SQLite are debounced to reduce disk I/O during rapid indexing while preserving crash recovery via a dirty flag.
+
+### Improvements
+
+- **Enhanced test coverage** - Comprehensive new tests for chunk splitting (Go, code-aware), ingest pipeline, encoding, ranking, semver, RTF extraction, and MCP tool formatting. Coverage improved from 56.7% to 64.1%.
+- **Improved chunk breadcrumb context** - Heading context propagation during chunking is more robust for deeply nested markdown structures.
+- **Better search fallback handling** - Vector search fallback is more resilient when HNSW is unavailable or partially built.
+
 ## v0.5.0 (2026-04-11)
 
 ### Features
