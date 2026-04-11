@@ -106,3 +106,10 @@ func TestNewOllama_RespectsCanceledContext(t *testing.T) {
 		t.Fatalf("expected canceled context error, got %v", err)
 	}
 }
+
+func TestNewOllama_RejectsInvalidBaseURL(t *testing.T) {
+	_, err := newOllama(context.Background(), "not-a-url", "test-model", &http.Client{})
+	if err == nil || !strings.Contains(err.Error(), "embed URL") {
+		t.Fatalf("expected embed URL validation error, got %v", err)
+	}
+}

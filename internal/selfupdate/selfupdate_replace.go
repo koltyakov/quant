@@ -32,6 +32,7 @@ func replaceBinary(newBinary []byte) error {
 }
 
 func replaceBinaryAt(exe string, newBinary []byte) error {
+	exe = filepath.Clean(exe)
 	caps := getFileCaps(exe)
 
 	dir := filepath.Dir(exe)
@@ -65,6 +66,7 @@ func replaceBinaryAt(exe string, newBinary []byte) error {
 		return err
 	}
 
+	//nolint:gosec // Destination is the resolved current executable path on the local filesystem.
 	if err := os.Rename(tmpPath, exe); err != nil {
 		if shouldFallbackToCopy(err) {
 			return replaceBinaryCopy(exe, newBinary, caps)

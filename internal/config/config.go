@@ -122,6 +122,7 @@ func checkDirWritable(dir string) error {
 	}
 	name := f.Name()
 	_ = f.Close()
+	//nolint:gosec // Temp file is created in the checked directory only to verify local writability.
 	_ = os.Remove(name)
 	return nil
 }

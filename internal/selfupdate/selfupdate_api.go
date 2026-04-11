@@ -6,8 +6,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +25,7 @@ const (
 
 var releaseHTTPClient = &http.Client{Timeout: 20 * time.Second}
 var downloadHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+var gitHubRepoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 // Release holds the subset of GitHub release metadata we care about.
 type Release struct {
@@ -51,8 +54,37 @@ func gitHubRepo() string {
 	return defaultGitHubRepo
 }
 
-func releasesURL() string {
-	return "https://api.github.com/repos/" + gitHubRepo() + "/releases/latest"
+func validatedGitHubRepo() (string, error) {
+	repo := gitHubRepo()
+	if !gitHubRepoPattern.MatchString(repo) {
+		return "", fmt.Errorf("invalid update repo %q", repo)
+	}
+	return repo, nil
+}
+
+func releasesURL() (string, error) {
+	repo, err := validatedGitHubRepo()
+	if err != nil {
+		return "", err
+	}
+	return "https://api.github.com/repos/" + repo + "/releases/latest", nil
+}
+
+func validateDownloadURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid download URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("download URL must use https")
+	}
+	if parsed.Host != "github.com" {
+		return "", fmt.Errorf("download URL host must be github.com")
+	}
+	if !strings.Contains(parsed.Path, "/releases/download/") {
+		return "", fmt.Errorf("download URL must point to a GitHub release asset")
+	}
+	return parsed.String(), nil
 }
 
 // Check queries GitHub for the latest release and returns nil when the current
@@ -90,6 +122,10 @@ func Apply(ctx context.Context, rel *Release) (*Result, error) {
 	}
 	if dlURL == "" {
 		return nil, fmt.Errorf("no release asset %q found for current platform", assetName)
+	}
+	dlURL, err = validateDownloadURL(dlURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid release asset URL for %s: %w", assetName, err)
 	}
 
 	data, err := download(ctx, dlURL)

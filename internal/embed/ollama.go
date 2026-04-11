@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ import (
 
 type Ollama struct {
 	baseURL    string
+	embedURL   string
 	model      string
 	dims       int
 	httpClient *http.Client
@@ -34,8 +36,13 @@ func NewOllama(ctx context.Context, baseURL, model string) (*Ollama, error) {
 }
 
 func newOllama(ctx context.Context, baseURL, model string, httpClient *http.Client) (*Ollama, error) {
+	embedURL, err := ollamaEmbedURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 	o := &Ollama{
 		baseURL:    baseURL,
+		embedURL:   embedURL,
 		model:      model,
 		httpClient: httpClient,
 	}
@@ -88,12 +95,17 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, depth int) ([][
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/embed", bytes.NewReader(jsonBody))
+	embedURL, err := o.requestURL()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, embedURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	//nolint:gosec // Ollama endpoint is validated to an absolute http(s) URL before use.
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("sending request to ollama: %w", err)
@@ -168,6 +180,35 @@ func (o *Ollama) probeDimensions(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("empty embedding returned from probe")
 	}
 	return len(vecs[0]), nil
+}
+
+func (o *Ollama) requestURL() (string, error) {
+	if o.embedURL != "" {
+		return o.embedURL, nil
+	}
+	return ollamaEmbedURL(o.baseURL)
+}
+
+func ollamaEmbedURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("embed URL must be a valid URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return "", fmt.Errorf("embed URL must be an absolute URL with scheme and host")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("embed URL scheme must be http or https")
+	}
+
+	path := strings.TrimRight(parsed.Path, "/")
+	embedURL := *parsed
+	embedURL.Path = path + "/api/embed"
+	embedURL.RawPath = ""
+	embedURL.Fragment = ""
+	return embedURL.String(), nil
 }
 
 // truncateForEmbedding cuts text to at most maxChars runes, preferring to break

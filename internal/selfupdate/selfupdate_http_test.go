@@ -78,6 +78,14 @@ func TestFetchLatestRelease(t *testing.T) {
 	}
 }
 
+func TestFetchLatestRelease_RejectsInvalidRepoOverride(t *testing.T) {
+	t.Setenv("QUANT_UPDATE_REPO", "owner/repo/../../etc")
+
+	if _, err := fetchLatestRelease(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid update repo") {
+		t.Fatalf("fetchLatestRelease() error = %v, want invalid repo error", err)
+	}
+}
+
 func TestDownload(t *testing.T) {
 	useDownloadTransport(t, func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
@@ -103,6 +111,23 @@ func TestDownload(t *testing.T) {
 	}
 	if _, err := download(context.Background(), "https://downloads.example/large"); err == nil || !strings.Contains(err.Error(), "download too large") {
 		t.Fatalf("download(large) error = %v, want size error", err)
+	}
+}
+
+func TestApply_RejectsInvalidAssetURL(t *testing.T) {
+	assetName, err := assetNameForPlatform()
+	if err != nil {
+		t.Fatalf("assetNameForPlatform() error = %v", err)
+	}
+
+	rel := &Release{
+		TagName: "v9.9.9",
+		Assets: []Asset{
+			{Name: assetName, BrowserDownloadURL: "https://downloads.example/asset"},
+		},
+	}
+	if _, err := Apply(context.Background(), rel); err == nil || !strings.Contains(err.Error(), "invalid release asset URL") {
+		t.Fatalf("Apply() error = %v, want invalid release asset URL error", err)
 	}
 }
 
@@ -151,7 +176,7 @@ func TestApplyAndCheckAndApplyErrorPaths(t *testing.T) {
 		t.Fatalf("assetNameForPlatform() error = %v", err)
 	}
 
-	downloadURL := "https://downloads.example/asset"
+	downloadURL := "https://github.com/owner/repo/releases/download/v9.9.9/asset"
 	useDownloadTransport(t, func(req *http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusOK, "not an archive"), nil
 	})

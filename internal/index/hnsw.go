@@ -31,6 +31,7 @@ type hnswIndex struct {
 }
 
 func newHNSWIndex(dbPath string) *hnswIndex {
+	dbPath = filepath.Clean(dbPath)
 	return &hnswIndex{
 		path: dbPath + ".hnsw",
 	}
@@ -128,10 +129,13 @@ func (h *hnswIndex) persist() error {
 
 	_ = f.Close()
 	if writeErr != nil {
+		//nolint:gosec // Temp file was created in the target sidecar directory for this specific index file.
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("exporting hnsw graph: %w", writeErr)
 	}
+	//nolint:gosec // The sidecar path is derived from the configured DB path and kept on the local filesystem.
 	if err := os.Rename(tmpPath, h.path); err != nil {
+		//nolint:gosec // Temp file was created in the target sidecar directory for this specific index file.
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("persisting hnsw graph: %w", err)
 	}

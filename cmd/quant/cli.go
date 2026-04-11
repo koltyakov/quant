@@ -39,7 +39,8 @@ func run(args []string) int {
 		printUpdateUsage()
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
+		fmt.Fprintln(os.Stderr, "error: unknown command")
+		fmt.Fprintln(os.Stderr)
 		printUsage()
 		return 1
 	}

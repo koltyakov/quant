@@ -23,7 +23,7 @@ func runUpdateCommand(ctx context.Context, args []string) int {
 			printUpdateUsage()
 			return 0
 		}
-		fmt.Fprintf(os.Stderr, "error: unexpected arguments for update: %s\n", strings.Join(args, " "))
+		fmt.Fprintln(os.Stderr, "error: unexpected arguments for update")
 		printUpdateUsage()
 		return 1
 	}

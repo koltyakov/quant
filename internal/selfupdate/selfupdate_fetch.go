@@ -11,13 +11,18 @@ import (
 )
 
 func fetchLatestRelease(ctx context.Context) (*Release, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releasesURL(), nil)
+	releaseURL, err := releasesURL()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "quant-selfupdate")
 
+	//nolint:gosec // Request target is a validated GitHub API URL built from a constrained owner/repo slug.
 	resp, err := releaseHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
@@ -50,6 +55,7 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	}
 	req.Header.Set("User-Agent", "quant-selfupdate")
 
+	//nolint:gosec // Release asset URL is validated to an https GitHub release download URL before reaching this call.
 	resp, err := downloadHTTPClient.Do(req)
 	if err != nil {
 		return nil, err

@@ -2,6 +2,8 @@ module github.com/koltyakov/quant
 
 go 1.26.1
 
+replace github.com/google/renameio => ./internal/shim/renameio
+
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
