@@ -2,6 +2,7 @@ package extract
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 )
 
@@ -56,22 +57,9 @@ func (r *Router) Supports(path string) bool {
 }
 
 func ext(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '.' {
-			return path[i:]
-		}
-		if path[i] == '/' || path[i] == '\\' {
-			break
-		}
-	}
-	return ""
+	return filepath.Ext(path)
 }
 
 func basename(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			return path[i+1:]
-		}
-	}
-	return path
+	return filepath.Base(path)
 }

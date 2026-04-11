@@ -35,6 +35,7 @@ type Server struct {
 const (
 	embCacheMaxSize        = 128
 	shutdownTimeout        = 5 * time.Second
+	readHeaderTimeout      = 5 * time.Second
 	healthPath             = "/healthz"
 	readinessPath          = "/readyz"
 	httpMCPPath            = "/mcp"
@@ -149,7 +150,7 @@ func (s *Server) Serve(ctx context.Context, cfg *config.Config) error {
 
 func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTPServer, *http.Server) {
 	mux := http.NewServeMux()
-	httpServer := &http.Server{Addr: addr, Handler: mux}
+	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	streamServer := mcpserver.NewStreamableHTTPServer(s.mcp, mcpserver.WithStreamableHTTPServer(httpServer))
 	mux.Handle(httpMCPPath, streamServer)
 	s.registerHealthRoutes(mux)
@@ -158,7 +159,7 @@ func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTP
 
 func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) {
 	mux := http.NewServeMux()
-	httpServer := &http.Server{Addr: addr, Handler: mux}
+	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	sseServer := mcpserver.NewSSEServer(s.mcp, mcpserver.WithHTTPServer(httpServer))
 	mux.Handle(ssePath, sseServer.SSEHandler())
 	mux.Handle(sseMessagePath, sseServer.MessageHandler())

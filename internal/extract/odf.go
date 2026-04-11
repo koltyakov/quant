@@ -412,10 +412,3 @@ func atoiDefault(value string, fallback int) int {
 	}
 	return parsed
 }
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

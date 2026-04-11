@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
 	"os"
 	"strings"
+
+	"github.com/koltyakov/quant/internal/logx"
 )
 
 const (
@@ -120,6 +121,7 @@ var textBasenames = map[string]bool{
 type TextExtractor struct{}
 
 func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) {
+	//nolint:gosec // Text extraction intentionally reads user-selected local files for indexing.
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -143,7 +145,7 @@ func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) 
 		return "", nil
 	}
 	if truncated {
-		log.Printf("Text extractor truncated %s at %d bytes", path, maxTextReadBytes)
+		logx.Warn("text extractor truncated file", "path", path, "max_bytes", maxTextReadBytes)
 	}
 
 	return string(data), nil

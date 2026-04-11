@@ -162,12 +162,14 @@ func replaceBinaryCopyStaged(stagedPath, exe string, mode os.FileMode, caps stri
 }
 
 func copyFilePath(srcPath, dstPath string, mode os.FileMode) error {
+	//nolint:gosec // Self-update intentionally copies between explicit local filesystem paths.
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("open temp file: %w", err)
 	}
 	defer func() { _ = src.Close() }()
 
+	//nolint:gosec // Destination path is computed by the updater for the target binary location.
 	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
@@ -190,6 +192,7 @@ func syncDir(path string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
+	//nolint:gosec // Syncing a directory requires opening the explicit target directory path.
 	dir, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -205,6 +208,7 @@ func getFileCaps(path string) string {
 	if runtime.GOOS != "linux" {
 		return ""
 	}
+	//nolint:gosec // getcap is invoked with a controlled binary name and explicit file path.
 	out, err := exec.Command("getcap", path).Output()
 	if err != nil {
 		return ""
@@ -220,6 +224,7 @@ func setFileCaps(path, caps string) {
 	if caps == "" || runtime.GOOS != "linux" {
 		return
 	}
+	//nolint:gosec // setcap is invoked intentionally to preserve existing Linux file capabilities.
 	_ = exec.Command("setcap", caps, path).Run()
 }
 

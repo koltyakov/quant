@@ -31,6 +31,9 @@ func TestDefault(t *testing.T) {
 	if cfg.MaxVectorCandidates != 20000 {
 		t.Errorf("expected max vector candidates 20000, got %d", cfg.MaxVectorCandidates)
 	}
+	if cfg.WatchEventBuffer != 256 {
+		t.Errorf("expected watch event buffer 256, got %d", cfg.WatchEventBuffer)
+	}
 }
 
 func TestValidate_NoDir(t *testing.T) {
@@ -60,6 +63,17 @@ func TestValidate_ValidDir(t *testing.T) {
 	}
 }
 
+func TestValidate_InvalidEmbedURL(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.EmbedURL = "not-a-url"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected invalid embed_url to be rejected")
+	}
+}
+
 func TestApplyEnv(t *testing.T) {
 	cfg := Default()
 
@@ -68,6 +82,7 @@ func TestApplyEnv(t *testing.T) {
 	t.Setenv("QUANT_CHUNK_SIZE", "256")
 	t.Setenv("QUANT_INDEX_WORKERS", "6")
 	t.Setenv("QUANT_MAX_VECTOR_CANDIDATES", "321")
+	t.Setenv("QUANT_WATCH_EVENT_BUFFER", "123")
 
 	applyEnv(cfg)
 
@@ -86,12 +101,15 @@ func TestApplyEnv(t *testing.T) {
 	if cfg.MaxVectorCandidates != 321 {
 		t.Errorf("expected max vector candidates 321, got %d", cfg.MaxVectorCandidates)
 	}
+	if cfg.WatchEventBuffer != 123 {
+		t.Errorf("expected watch event buffer 123, got %d", cfg.WatchEventBuffer)
+	}
 }
 
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
-	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\npdf_ocr_lang: rus+eng\nchunk_size: 1024\nindex_workers: 5\nmax_vector_candidates: 123\n"), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\npdf_ocr_lang: rus+eng\nchunk_size: 1024\nindex_workers: 5\nmax_vector_candidates: 123\nwatch_event_buffer: 321\n"), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
 
@@ -114,6 +132,9 @@ func TestLoadYAML(t *testing.T) {
 	}
 	if cfg.MaxVectorCandidates != 123 {
 		t.Errorf("expected max vector candidates 123, got %d", cfg.MaxVectorCandidates)
+	}
+	if cfg.WatchEventBuffer != 321 {
+		t.Errorf("expected watch event buffer 321, got %d", cfg.WatchEventBuffer)
 	}
 }
 
@@ -211,5 +232,16 @@ func TestParseArgs_AcceptsMaxVectorCandidatesFlag(t *testing.T) {
 	}
 	if cfg.MaxVectorCandidates != 77 {
 		t.Fatalf("expected max vector candidates 77, got %d", cfg.MaxVectorCandidates)
+	}
+}
+
+func TestParseArgs_AcceptsWatchEventBufferFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := ParseArgs([]string{"--dir", dir, "--watch-event-buffer", "512"})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if cfg.WatchEventBuffer != 512 {
+		t.Fatalf("expected watch event buffer 512, got %d", cfg.WatchEventBuffer)
 	}
 }

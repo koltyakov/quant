@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/koltyakov/quant/internal/logx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,6 +22,7 @@ const (
 	TransportStdio Transport = "stdio"
 	TransportSSE   Transport = "sse"
 	TransportHTTP  Transport = "http"
+	stateDirMode             = 0750
 )
 
 type Config struct {
@@ -36,6 +38,7 @@ type Config struct {
 	ChunkOverlap        float64       `yaml:"chunk_overlap"`
 	IndexWorkers        int           `yaml:"index_workers"`
 	MaxVectorCandidates int           `yaml:"max_vector_candidates"`
+	WatchEventBuffer    int           `yaml:"watch_event_buffer"`
 	ConfigFile          string        `yaml:"-"`
 }
 
@@ -51,6 +54,7 @@ func Default() *Config {
 		ChunkOverlap:        0.15,
 		IndexWorkers:        defaultIndexWorkers(),
 		MaxVectorCandidates: 20000,
+		WatchEventBuffer:    256,
 	}
 }
 
@@ -71,6 +75,9 @@ func (c *Config) Validate() error {
 	if c.Transport != TransportStdio && c.Transport != TransportSSE && c.Transport != TransportHTTP {
 		return fmt.Errorf("invalid transport %q; must be stdio, sse, or http", c.Transport)
 	}
+	if err := validateEmbedURL(c.EmbedURL); err != nil {
+		return err
+	}
 	if c.ChunkSize < 64 || c.ChunkSize > 8192 {
 		return fmt.Errorf("chunk_size must be between 64 and 8192")
 	}
@@ -83,11 +90,30 @@ func (c *Config) Validate() error {
 	if c.MaxVectorCandidates < 0 {
 		return fmt.Errorf("max_vector_candidates must be >= 0")
 	}
+	if c.WatchEventBuffer < 1 || c.WatchEventBuffer > 4096 {
+		return fmt.Errorf("watch_event_buffer must be between 1 and 4096")
+	}
 	return nil
 }
 
+func validateEmbedURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("embed_url must be a valid URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return fmt.Errorf("embed_url must be an absolute URL with scheme and host")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("embed_url scheme must be http or https")
+	}
+}
+
 func checkDirWritable(dir string) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, stateDirMode); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".quant-writability-check-*")
@@ -150,6 +176,8 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.IndexWorkers = mustParseIntFlag(f.Name, f.Value.String(), cfg.IndexWorkers)
 		case "max-vector-candidates":
 			cfg.MaxVectorCandidates = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxVectorCandidates)
+		case "watch-event-buffer":
+			cfg.WatchEventBuffer = mustParseIntFlag(f.Name, f.Value.String(), cfg.WatchEventBuffer)
 		}
 	})
 
@@ -200,6 +228,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
 	flagSet.IntVar(&cfg.MaxVectorCandidates, "max-vector-candidates", cfg.MaxVectorCandidates, "Maximum chunks eligible for brute-force vector fallback (0 disables it)")
+	flagSet.IntVar(&cfg.WatchEventBuffer, "watch-event-buffer", cfg.WatchEventBuffer, "Watcher event channel buffer size")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg
@@ -210,6 +239,7 @@ func defaultDBPath(watchDir string) string {
 }
 
 func loadYAML(cfg *Config, path string) error {
+	//nolint:gosec // Configuration file path is explicitly provided by the user.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -229,6 +259,7 @@ func loadYAML(cfg *Config, path string) error {
 		ChunkOverlap        *float64  `yaml:"chunk_overlap"`
 		IndexWorkers        *int      `yaml:"index_workers"`
 		MaxVectorCandidates *int      `yaml:"max_vector_candidates"`
+		WatchEventBuffer    *int      `yaml:"watch_event_buffer"`
 	}
 
 	var parsed fileConfig
@@ -260,7 +291,7 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.PDFOCRTimeout != nil {
 		d, err := time.ParseDuration(*parsed.PDFOCRTimeout)
 		if err != nil {
-			log.Printf("Ignoring invalid pdf_ocr_timeout value %q: %v", *parsed.PDFOCRTimeout, err)
+			logx.Warn("ignoring invalid pdf_ocr_timeout value", "value", *parsed.PDFOCRTimeout, "err", err)
 		} else {
 			cfg.PDFOCRTimeout = d
 		}
@@ -276,6 +307,9 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if parsed.MaxVectorCandidates != nil {
 		cfg.MaxVectorCandidates = *parsed.MaxVectorCandidates
+	}
+	if parsed.WatchEventBuffer != nil {
+		cfg.WatchEventBuffer = *parsed.WatchEventBuffer
 	}
 
 	return nil
@@ -325,6 +359,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QUANT_MAX_VECTOR_CANDIDATES"); v != "" {
 		cfg.MaxVectorCandidates = mustParseIntEnv("QUANT_MAX_VECTOR_CANDIDATES", v, cfg.MaxVectorCandidates)
 	}
+	if v := os.Getenv("QUANT_WATCH_EVENT_BUFFER"); v != "" {
+		cfg.WatchEventBuffer = mustParseIntEnv("QUANT_WATCH_EVENT_BUFFER", v, cfg.WatchEventBuffer)
+	}
 }
 
 func defaultIndexWorkers() int {
@@ -341,7 +378,7 @@ func defaultIndexWorkers() int {
 func mustParseIntFlag(name, value string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid flag value", "flag", "--"+name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed
@@ -350,7 +387,7 @@ func mustParseIntFlag(name, value string, fallback int) int {
 func mustParseFloatFlag(name, value string, fallback float64) float64 {
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
-		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid flag value", "flag", "--"+name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed
@@ -359,7 +396,7 @@ func mustParseFloatFlag(name, value string, fallback float64) float64 {
 func mustParseDurationFlag(name, value string, fallback time.Duration) time.Duration {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		log.Printf("Ignoring invalid --%s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid flag value", "flag", "--"+name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed
@@ -368,7 +405,7 @@ func mustParseDurationFlag(name, value string, fallback time.Duration) time.Dura
 func mustParseIntEnv(name, value string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid env value", "name", name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed
@@ -377,7 +414,7 @@ func mustParseIntEnv(name, value string, fallback int) int {
 func mustParseFloatEnv(name, value string, fallback float64) float64 {
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
-		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid env value", "name", name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed
@@ -386,7 +423,7 @@ func mustParseFloatEnv(name, value string, fallback float64) float64 {
 func mustParseDurationEnv(name, value string, fallback time.Duration) time.Duration {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		log.Printf("Ignoring invalid %s value %q: %v", name, value, err)
+		logx.Warn("ignoring invalid env value", "name", name, "value", value, "err", err)
 		return fallback
 	}
 	return parsed

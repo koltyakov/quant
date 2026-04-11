@@ -57,6 +57,23 @@ func TestWatcher_RespectsNestedGitIgnore(t *testing.T) {
 	ensureNoEventForPath(t, watcher.Events(), skipPath, 1200*time.Millisecond)
 }
 
+func TestWatcher_NewUsesConfiguredEventBuffer(t *testing.T) {
+	dir := t.TempDir()
+	watcher, err := New(dir, nil, Options{EventBuffer: 3})
+	if err != nil {
+		t.Fatalf("unexpected watcher error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	if cap(watcher.events) != 3 {
+		t.Fatalf("expected event buffer capacity 3, got %d", cap(watcher.events))
+	}
+}
+
 func TestWatcher_AddsNewDirectoriesRecursively(t *testing.T) {
 	dir := t.TempDir()
 	watcher, err := New(dir, nil)

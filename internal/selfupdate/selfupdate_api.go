@@ -140,5 +140,6 @@ func Restart() error {
 	if err != nil {
 		return fmt.Errorf("resolve symlinks: %w", err)
 	}
+	//nolint:gosec // Restart intentionally re-execs the current binary with the current process arguments.
 	return syscall.Exec(exe, os.Args, os.Environ())
 }

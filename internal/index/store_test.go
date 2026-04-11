@@ -625,6 +625,37 @@ func TestStore_ListDocuments(t *testing.T) {
 	}
 }
 
+func TestStore_ListDocumentsLimit(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	for _, path := range []string{"a.txt", "b.txt", "c.txt"} {
+		if _, err := store.UpsertDocument(ctx, &Document{
+			Path:       path,
+			Hash:       "hash-" + path,
+			ModifiedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("unexpected upsert error for %s: %v", path, err)
+		}
+	}
+
+	docs, err := store.ListDocumentsLimit(ctx, 2)
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 documents, got %d", len(docs))
+	}
+	if docs[0].Path != "a.txt" || docs[1].Path != "b.txt" {
+		t.Fatalf("expected ordered limited results, got %+v", docs)
+	}
+}
+
 func TestEncodeDecodeFloat32(t *testing.T) {
 	original := []float32{1.0, -2.5, 0.0, 3.14, -100.0}
 	encoded := EncodeFloat32(original)

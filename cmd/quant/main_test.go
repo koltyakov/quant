@@ -16,64 +16,9 @@ import (
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/index"
 	"github.com/koltyakov/quant/internal/scan"
+	"github.com/koltyakov/quant/internal/testutil"
 	"github.com/koltyakov/quant/internal/watch"
 )
-
-type fakeEmbedder struct{}
-
-func (f fakeEmbedder) Embed(context.Context, string) ([]float32, error) {
-	return []float32{1}, nil
-}
-
-func (f fakeEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i := range texts {
-		out[i] = []float32{1}
-	}
-	return out, nil
-}
-
-func (f fakeEmbedder) Dimensions() int { return 1 }
-
-func (f fakeEmbedder) Close() error { return nil }
-
-type countingEmbedder struct {
-	batchCalls atomic.Int32
-}
-
-func (f *countingEmbedder) Embed(context.Context, string) ([]float32, error) {
-	return []float32{1}, nil
-}
-
-func (f *countingEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
-	f.batchCalls.Add(1)
-	out := make([][]float32, len(texts))
-	for i := range texts {
-		out[i] = []float32{1}
-	}
-	return out, nil
-}
-
-func (f *countingEmbedder) Dimensions() int { return 1 }
-
-func (f *countingEmbedder) Close() error { return nil }
-
-type shortBatchEmbedder struct{}
-
-func (shortBatchEmbedder) Embed(context.Context, string) ([]float32, error) {
-	return []float32{1}, nil
-}
-
-func (shortBatchEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
-	if len(texts) == 0 {
-		return nil, nil
-	}
-	return [][]float32{{1}}, nil
-}
-
-func (shortBatchEmbedder) Dimensions() int { return 1 }
-
-func (shortBatchEmbedder) Close() error { return nil }
 
 type fakeExtractor struct {
 	text string
@@ -218,7 +163,7 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:     store,
-		embedder:  fakeEmbedder{},
+		embedder:  testutil.StaticEmbedder{},
 		extractor: fakeExtractor{text: ""},
 	}
 
@@ -290,7 +235,7 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 		t.Fatalf("unexpected error seeding document: %v", err)
 	}
 
-	emb := &countingEmbedder{}
+	emb := &testutil.BatchCountingEmbedder{}
 	ext := &countingExtractor{text: "replacement chunk"}
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
@@ -309,8 +254,8 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	if ext.calls.Load() != 0 {
 		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
 	}
-	if emb.batchCalls.Load() != 0 {
-		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	if emb.BatchCalls.Load() != 0 {
+		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.BatchCalls.Load())
 	}
 }
 
@@ -334,7 +279,7 @@ func TestIndexFile_FailsOnShortEmbedBatch(t *testing.T) {
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 2, ChunkOverlap: 0},
 		store:     store,
-		embedder:  shortBatchEmbedder{},
+		embedder:  testutil.ShortBatchEmbedder{},
 		extractor: fileExtractor{},
 	}
 
@@ -385,7 +330,7 @@ func TestIndexFile_ReindexesSameModTimeContentChange(t *testing.T) {
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:     store,
-		embedder:  fakeEmbedder{},
+		embedder:  testutil.StaticEmbedder{},
 		extractor: fileExtractor{},
 	}
 
@@ -476,7 +421,7 @@ func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:     store,
-		embedder:  fakeEmbedder{},
+		embedder:  testutil.StaticEmbedder{},
 		extractor: fakeExtractor{text: "hello world"},
 	}
 
@@ -522,7 +467,7 @@ func TestIndexFile_CoalescesConcurrentRequests(t *testing.T) {
 		t.Fatalf("unexpected error stating file: %v", err)
 	}
 
-	emb := &countingEmbedder{}
+	emb := &testutil.BatchCountingEmbedder{}
 	ext := &blockingExtractor{
 		text:    "hello world",
 		started: make(chan struct{}),
@@ -564,8 +509,8 @@ func TestIndexFile_CoalescesConcurrentRequests(t *testing.T) {
 	if ext.calls.Load() != 1 {
 		t.Fatalf("expected one extraction, got %d", ext.calls.Load())
 	}
-	if emb.batchCalls.Load() != 1 {
-		t.Fatalf("expected one embedding batch call, got %d", emb.batchCalls.Load())
+	if emb.BatchCalls.Load() != 1 {
+		t.Fatalf("expected one embedding batch call, got %d", emb.BatchCalls.Load())
 	}
 }
 
@@ -594,7 +539,7 @@ func TestHandleWatchEvent_QueuesLiveIndexWork(t *testing.T) {
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  ext,
 		pathStates: make(map[string]*pathState),
 	}
@@ -655,7 +600,7 @@ func TestHandleWatchEvent_RetriesTransientLiveIndexFailure(t *testing.T) {
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  ext,
 		pathStates: make(map[string]*pathState),
 	}
@@ -746,7 +691,7 @@ func TestInitialSync_ReloadsRootGitIgnore(t *testing.T) {
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  fakeExtractor{text: "hello world"},
 		pathStates: make(map[string]*pathState),
 	}
@@ -799,7 +744,7 @@ func TestInitialSyncWithReport_TracksIndexFailures(t *testing.T) {
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  &flakyExtractor{text: "hello world", failures: 1},
 		pathStates: make(map[string]*pathState),
 	}
@@ -843,7 +788,7 @@ func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  ext,
 		pathStates: make(map[string]*pathState),
 	}
@@ -930,7 +875,7 @@ func TestInitialSync_ReconcilesFileRecreatedDuringScanWindow(t *testing.T) {
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   fakeEmbedder{},
+		embedder:   testutil.StaticEmbedder{},
 		extractor:  ext,
 		pathStates: make(map[string]*pathState),
 	}
@@ -1016,7 +961,7 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 		t.Fatalf("unexpected error seeding document: %v", err)
 	}
 
-	emb := &countingEmbedder{}
+	emb := &testutil.BatchCountingEmbedder{}
 	ext := &countingExtractor{text: "replacement chunk"}
 	idx := &indexer{
 		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 2},
@@ -1031,8 +976,8 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 	if ext.calls.Load() != 0 {
 		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
 	}
-	if emb.batchCalls.Load() != 0 {
-		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.batchCalls.Load())
+	if emb.BatchCalls.Load() != 0 {
+		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.BatchCalls.Load())
 	}
 
 	docs, err := store.ListDocuments(context.Background())
@@ -1422,7 +1367,7 @@ func TestInitialSync_IgnoresCompanionLogFile(t *testing.T) {
 			IndexWorkers: 1,
 		},
 		store:     store,
-		embedder:  fakeEmbedder{},
+		embedder:  testutil.StaticEmbedder{},
 		extractor: textLogExtractor{},
 	}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/ledongthuc/pdf"
 )
 
@@ -57,7 +57,7 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		log.Printf("PDF OCR fallback skipped for %s: %v", path, err)
+		logx.Warn("pdf ocr fallback skipped", "path", path, "err", err)
 		return "", nil
 	}
 
@@ -95,7 +95,7 @@ func extractPDFText(ctx context.Context, path string) (string, error) {
 		}
 		content, err := page.GetPlainText(nil)
 		if err != nil {
-			log.Printf("PDF text extraction skipped page %d in %s: %v", i, path, err)
+			logx.Warn("pdf text extraction skipped page", "page", i, "path", path, "err", err)
 			continue
 		}
 		content = strings.TrimSpace(content)
@@ -160,6 +160,7 @@ func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string, timeou
 	ocrCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	//nolint:gosec // OCR binary path is discovered from PATH or injected by tests; arguments are fixed.
 	cmd := exec.CommandContext(ocrCtx, binaryPath,
 		"--skip-text",
 		"--rotate-pages",
@@ -188,6 +189,7 @@ func runOCRmyPDF(ctx context.Context, binaryPath, path, languages string, timeou
 		return "", fmt.Errorf("ocrmypdf failed: %w", err)
 	}
 
+	//nolint:gosec // Sidecar path is created in a temp directory controlled by this function.
 	data, err := os.ReadFile(sidecarPath)
 	if err != nil {
 		return "", fmt.Errorf("reading OCR sidecar: %w", err)

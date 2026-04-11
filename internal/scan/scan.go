@@ -4,12 +4,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/koltyakov/quant/internal/logx"
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
@@ -42,7 +42,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			log.Printf("warning: skipping unreadable path %s: %v", path, err)
+			logx.Warn("skipping unreadable path", "path", path, "err", err)
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -69,7 +69,7 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 
 		info, err := d.Info()
 		if err != nil {
-			log.Printf("warning: skipping path with unreadable metadata %s: %v", path, err)
+			logx.Warn("skipping path with unreadable metadata", "path", path, "err", err)
 			return nil
 		}
 
@@ -123,6 +123,7 @@ func LoadGitIgnore(dir string) (*ignore.GitIgnore, error) {
 }
 
 func FileHash(path string) (string, error) {
+	//nolint:gosec // Hashing intentionally reads local files that the indexer selected for processing.
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err

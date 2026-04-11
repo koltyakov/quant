@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
@@ -45,11 +45,11 @@ func runMCP(cfg *config.Config) error {
 	}
 	defer func() {
 		if err := embedder.Close(); err != nil {
-			log.Printf("Error closing embedder: %v", err)
+			logx.Error("closing embedder failed", "err", err)
 		}
 	}()
 
-	log.Printf("Connected to embedding backend via Ollama (model: %s, dimensions: %d)", cfg.EmbedModel, embedder.Dimensions())
+	logx.Info("connected to embedding backend", "provider", "ollama", "model", cfg.EmbedModel, "dimensions", embedder.Dimensions())
 
 	store, err := index.NewStore(cfg.DBPath)
 	if err != nil {
@@ -57,11 +57,11 @@ func runMCP(cfg *config.Config) error {
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
-			log.Printf("Error closing store: %v", err)
+			logx.Error("closing store failed", "err", err)
 		}
 	}()
 
-	log.Printf("Database opened: %s", cfg.DBPath)
+	logx.Info("database opened", "path", cfg.DBPath)
 	store.SetMaxVectorSearchCandidates(cfg.MaxVectorCandidates)
 
 	rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
@@ -73,7 +73,7 @@ func runMCP(cfg *config.Config) error {
 		return fmt.Errorf("error configuring embedding metadata: %w", err)
 	}
 	if rebuild {
-		log.Printf("Embedding metadata changed; rebuilding index from filesystem projection")
+		logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
 	}
 
 	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
@@ -90,13 +90,13 @@ func runMCP(cfg *config.Config) error {
 		pathStates: make(map[string]*pathState),
 	}
 
-	watcher, err := watch.New(cfg.WatchDir, gi)
+	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})
 	if err != nil {
 		return fmt.Errorf("error starting watcher: %w", err)
 	}
 	defer func() {
 		if err := watcher.Close(); err != nil {
-			log.Printf("Error closing watcher: %v", err)
+			logx.Error("closing watcher failed", "err", err)
 		}
 	}()
 
@@ -127,7 +127,7 @@ func runMCP(cfg *config.Config) error {
 	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder, Version)
-	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
+	logx.Info("starting MCP server", "transport", cfg.Transport)
 
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
 		serverCancel()

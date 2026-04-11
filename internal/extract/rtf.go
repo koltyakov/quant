@@ -115,8 +115,10 @@ func extractRTFText(ctx context.Context, rtf string) (string, error) {
 				if param != 0 {
 					var r rune
 					if param < 0 {
+						//nolint:gosec // RTF unicode escapes are 16-bit signed values; adding 65536 normalizes them.
 						r = rune(param + 65536)
 					} else {
+						//nolint:gosec // Bounds are validated by utf8.ValidRune immediately after conversion.
 						r = rune(param)
 					}
 					if utf8.ValidRune(r) {

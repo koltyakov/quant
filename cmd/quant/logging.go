@@ -13,6 +13,8 @@ import (
 const (
 	logRotateMaxSize    int64 = 10 * 1024 * 1024
 	logRotateMaxBackups       = 5
+	logDirMode                = 0750
+	logFileMode               = 0600
 )
 
 type rotatingLogWriter struct {
@@ -82,11 +84,11 @@ func (w *rotatingLogWriter) Close() error {
 }
 
 func (w *rotatingLogWriter) open() error {
-	if err := os.MkdirAll(filepath.Dir(w.path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(w.path), logDirMode); err != nil {
 		return err
 	}
 
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, logFileMode)
 	if err != nil {
 		return err
 	}

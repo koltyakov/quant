@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -80,6 +80,13 @@ var (
 	maxIndexRetryAttempts = 3
 )
 
+const (
+	defaultEmbedBatchSize = 16
+	liveQueueMultiplier   = 8
+	minLiveQueueSize      = 16
+	maxLiveQueueSize      = 512
+)
+
 func (idx *indexer) runInitialSync(ctx context.Context) {
 	if !idx.beginResync() {
 		return
@@ -110,9 +117,9 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 	first := startup
 	for {
 		if first {
-			log.Printf("Starting initial scan of %s", idx.cfg.WatchDir)
+			logx.Info("starting initial scan", "watch_dir", idx.cfg.WatchDir)
 		} else {
-			log.Printf("Starting filesystem resync of %s", idx.cfg.WatchDir)
+			logx.Info("starting filesystem resync", "watch_dir", idx.cfg.WatchDir)
 		}
 
 		report, err := idx.initialSyncWithReport(ctx)
@@ -121,15 +128,15 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 				idx.finishResync(false)
 				return
 			}
-			log.Printf("Error during resync: %v", err)
+			logx.Error("filesystem resync failed", "err", err)
 		} else if first {
 			docCount, chunkCount, err := idx.store.Stats(ctx)
 			if err != nil {
-				log.Printf("Error fetching index stats: %v", err)
+				logx.Error("fetching index stats failed", "err", err)
 			} else {
-				log.Printf("Initial scan complete: %d documents, %d chunks", docCount, chunkCount)
+				logx.Info("initial scan complete", "documents", docCount, "chunks", chunkCount)
 				if report.hadIndexFailures {
-					log.Printf("Initial scan completed with indexing failures; keeping database backup until a clean rebuild succeeds")
+					logx.Warn("initial scan completed with indexing failures", "action", "keeping database backup until a clean rebuild succeeds")
 				} else {
 					idx.store.RemoveBackup()
 				}
@@ -253,16 +260,16 @@ func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, erro
 	for result := range indexResults {
 		if result.err != nil {
 			report.hadIndexFailures = true
-			log.Printf("Error indexing %s: %v", result.path, result.err)
+			logx.Error("indexing failed", "path", result.path, "err", result.err)
 			idx.scheduleIndexRetry(ctx, result.path, result.modTime)
 			continue
 		}
 		idx.clearIndexRetry(result.path)
 		switch result.action {
 		case indexUpdated:
-			log.Printf("Indexed: %s", result.path)
+			logx.Info("indexed document", "path", result.path)
 		case indexRemoved:
-			log.Printf("Removed from index: %s", result.path)
+			logx.Info("removed document from index", "path", result.path)
 		}
 	}
 	if walkErr := <-walkDone; walkErr != nil {
@@ -284,28 +291,28 @@ func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, erro
 		if !scannedPaths[doc.Path] {
 			absPath := filepath.Join(idx.cfg.WatchDir, doc.Path)
 			if shouldIndex, err := idx.shouldIndexExistingPath(reconcileMatcher, absPath); err != nil {
-				log.Printf("Error reconciling stale document %s: %v", doc.Path, err)
+				logx.Error("reconciling stale document failed", "path", doc.Path, "err", err)
 				continue
 			} else if shouldIndex {
 				action, err := idx.syncDocument(ctx, doc.Path, absPath, nil, &doc)
 				if err != nil {
 					report.hadIndexFailures = true
-					log.Printf("Error reconciling existing document %s: %v", doc.Path, err)
+					logx.Error("reconciling existing document failed", "path", doc.Path, "err", err)
 					continue
 				}
 				switch action {
 				case indexUpdated:
-					log.Printf("Indexed: %s", absPath)
+					logx.Info("indexed document", "path", absPath)
 				case indexRemoved:
-					log.Printf("Removed from index: %s", absPath)
+					logx.Info("removed document from index", "path", absPath)
 				}
 				continue
 			}
 			if err := idx.store.DeleteDocument(ctx, doc.Path); err != nil {
-				log.Printf("Error removing stale document %s: %v", doc.Path, err)
+				logx.Error("removing stale document failed", "path", doc.Path, "err", err)
 				continue
 			}
-			log.Printf("Removed from index: %s", doc.Path)
+			logx.Info("removed document from index", "path", doc.Path)
 		}
 	}
 
@@ -324,12 +331,12 @@ func (idx *indexer) workerCount(maxPending int) int {
 }
 
 func (idx *indexer) liveQueueSize() int {
-	size := idx.workerCount(0) * 8
-	if size < 16 {
-		size = 16
+	size := idx.workerCount(0) * liveQueueMultiplier
+	if size < minLiveQueueSize {
+		size = minLiveQueueSize
 	}
-	if size > 512 {
-		size = 512
+	if size > maxLiveQueueSize {
+		size = maxLiveQueueSize
 	}
 	return size
 }
@@ -371,7 +378,7 @@ func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime t
 		return true
 	default:
 		idx.cancelLiveQueue(path)
-		log.Printf("warning: live index queue full for %s; scheduling resync", path)
+		logx.Warn("live index queue full; scheduling resync", "path", path)
 		idx.requestResync(ctx)
 		return false
 	}
@@ -455,15 +462,15 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 
 	action, err := idx.indexFile(ctx, path, modTime)
 	if err != nil {
-		log.Printf("Error indexing %s: %v", path, err)
+		logx.Error("indexing failed", "path", path, "err", err)
 		idx.scheduleIndexRetry(ctx, path, modTime)
 	} else {
 		idx.clearIndexRetry(path)
 		switch action {
 		case indexUpdated:
-			log.Printf("Indexed: %s", path)
+			logx.Info("indexed document", "path", path)
 		case indexRemoved:
-			log.Printf("Removed from index: %s", path)
+			logx.Info("removed document from index", "path", path)
 		}
 	}
 
@@ -472,7 +479,7 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 		case idx.liveJobs <- path:
 		default:
 			idx.cancelLiveQueue(path)
-			log.Printf("warning: live index queue full for %s; scheduling resync", path)
+			logx.Warn("live index queue full; scheduling resync", "path", path)
 			idx.requestResync(ctx)
 		}
 	}
@@ -706,7 +713,7 @@ func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
 			if os.IsNotExist(err) {
 				return
 			}
-			log.Printf("Error stating %s: %v", event.Path, err)
+			logx.Error("stating watched path failed", "path", event.Path, "err", err)
 			return
 		}
 		if info.IsDir() {
@@ -717,26 +724,26 @@ func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
 	case watch.Remove:
 		key, err := documentKey(idx.cfg.WatchDir, event.Path)
 		if err != nil {
-			log.Printf("Error removing %s: %v", event.Path, err)
+			logx.Error("removing document failed", "path", event.Path, "err", err)
 			return
 		}
 		if event.IsDir {
 			idx.invalidatePrefix(key)
 			if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
-				log.Printf("Error removing directory %s: %v", event.Path, err)
+				logx.Error("removing directory from index failed", "path", event.Path, "err", err)
 				return
 			}
 		} else {
 			action, err := idx.syncDocument(ctx, key, event.Path, nil, nil)
 			if err != nil {
-				log.Printf("Error removing %s: %v", event.Path, err)
+				logx.Error("removing document failed", "path", event.Path, "err", err)
 				return
 			}
 			if action == indexNoop {
 				return
 			}
 		}
-		log.Printf("Removed from index: %s", event.Path)
+		logx.Info("removed document from index", "path", event.Path)
 	}
 }
 
@@ -792,11 +799,10 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		ModifiedAt: modTime,
 	}
 
-	const embedBatchSize = 16
 	chunkRecords := make([]index.ChunkRecord, 0, len(chunks))
 
-	for batchStart := 0; batchStart < len(chunks); batchStart += embedBatchSize {
-		batchEnd := batchStart + embedBatchSize
+	for batchStart := 0; batchStart < len(chunks); batchStart += defaultEmbedBatchSize {
+		batchEnd := batchStart + defaultEmbedBatchSize
 		if batchEnd > len(chunks) {
 			batchEnd = len(chunks)
 		}
@@ -907,7 +913,7 @@ func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 		attempts := state.attempts
 		delete(idx.retryStates, path)
 		idx.retryMu.Unlock()
-		log.Printf("warning: giving up retrying %s after %d attempts", path, attempts)
+		logx.Warn("giving up retrying path", "path", path, "attempts", attempts)
 		return
 	}
 
@@ -939,7 +945,7 @@ func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 	})
 	idx.retryMu.Unlock()
 
-	log.Printf("Retrying %s in %s (attempt %d/%d)", path, delay, attempts, maxIndexRetryAttempts)
+	logx.Warn("retrying path", "path", path, "delay", delay, "attempt", attempts, "max_attempts", maxIndexRetryAttempts)
 }
 
 func (idx *indexer) clearIndexRetry(path string) {

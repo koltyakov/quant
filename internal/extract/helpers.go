@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -37,6 +38,7 @@ func readFileLimited(ctx context.Context, path string, limit int64) ([]byte, err
 		return nil, err
 	}
 
+	//nolint:gosec // Extractors intentionally open user-selected local files for indexing.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -52,7 +54,11 @@ func readZipFile(ctx context.Context, files []*zip.File, name string) ([]byte, e
 			continue
 		}
 		if f.UncompressedSize64 > uint64(maxExtractorFileSize) {
-			return nil, fmt.Errorf("zip entry exceeds extraction size limit: %s (%s > %s)", name, formatExtractBytes(int64(f.UncompressedSize64)), formatExtractBytes(maxExtractorFileSize))
+			entrySize := int64(maxExtractorFileSize)
+			if f.UncompressedSize64 <= math.MaxInt64 {
+				entrySize = int64(f.UncompressedSize64)
+			}
+			return nil, fmt.Errorf("zip entry exceeds extraction size limit: %s (%s > %s)", name, formatExtractBytes(entrySize), formatExtractBytes(maxExtractorFileSize))
 		}
 
 		rc, err := f.Open()

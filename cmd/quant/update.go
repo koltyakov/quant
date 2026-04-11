@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/selfupdate"
 )
 
@@ -77,18 +77,18 @@ func autoUpdateOnStart(ctx context.Context, currentVersion string) bool {
 		return false
 	}
 
-	log.Printf("Auto-update: checking for updates (current version: %s)", currentVersion)
+	logx.Info("auto-update check starting", "current_version", currentVersion)
 	result, err := selfupdate.CheckAndApply(ctx, currentVersion)
 	if err != nil {
-		log.Printf("Auto-update check failed: %v", err)
+		logx.Warn("auto-update check failed", "err", err)
 		return false
 	}
 	if !result.Updated {
-		log.Printf("Auto-update: already up to date (%s)", currentVersion)
+		logx.Info("auto-update already up to date", "current_version", currentVersion)
 		return false
 	}
 
-	log.Printf("Auto-update: binary replaced from %s to %s (%s)", result.CurrentVersion, ensureVPrefix(result.LatestVersion), result.AssetName)
+	logx.Info("auto-update applied", "from", result.CurrentVersion, "to", ensureVPrefix(result.LatestVersion), "asset", result.AssetName)
 	return true
 }
 
@@ -97,7 +97,7 @@ func startAutoUpdateLoop(ctx context.Context, currentVersion string, onUpdate fu
 		return
 	}
 
-	log.Printf("Auto-update: periodic checks enabled (interval: %s)", autoUpdateCheckInterval)
+	logx.Info("auto-update periodic checks enabled", "interval", autoUpdateCheckInterval)
 	ticker := time.NewTicker(autoUpdateCheckInterval)
 	defer ticker.Stop()
 
@@ -108,21 +108,21 @@ func startAutoUpdateLoop(ctx context.Context, currentVersion string, onUpdate fu
 		case <-ticker.C:
 			result, err := selfupdate.CheckAndApply(ctx, currentVersion)
 			if err != nil {
-				log.Printf("Auto-update periodic check failed: %v", err)
+				logx.Warn("auto-update periodic check failed", "err", err)
 				continue
 			}
 			if result.Updated {
-				log.Printf("Auto-update: update applied from %s to %s", result.CurrentVersion, ensureVPrefix(result.LatestVersion))
+				logx.Info("auto-update periodic check applied update", "from", result.CurrentVersion, "to", ensureVPrefix(result.LatestVersion))
 				onUpdate()
 				return
 			}
-			log.Printf("Auto-update: periodic check passed, up to date")
+			logx.Info("auto-update periodic check passed", "status", "up to date")
 		}
 	}
 }
 
 func restartProcess() int {
-	log.Printf("Auto-update: restarting process")
+	logx.Info("auto-update restarting process")
 	if err := selfupdate.Restart(); err != nil {
 		fmt.Fprintln(os.Stderr, "auto-update: restart failed:", err)
 		return 1

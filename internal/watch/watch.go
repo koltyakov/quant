@@ -1,7 +1,6 @@
 package watch
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/scan"
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -28,6 +28,10 @@ type Event struct {
 	IsDir bool
 }
 
+type Options struct {
+	EventBuffer int
+}
+
 type Watcher struct {
 	fsw     *fsnotify.Watcher
 	matcher *scan.GitIgnoreMatcher
@@ -43,17 +47,28 @@ type Watcher struct {
 	closed        bool
 }
 
-func New(dir string, gi *ignore.GitIgnore) (*Watcher, error) {
+const (
+	defaultEventBufferSize  = 256
+	defaultDebounceDelay    = 500 * time.Millisecond
+	defaultResyncRetryDelay = 500 * time.Millisecond
+)
+
+func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
+	}
+
+	cfg := Options{EventBuffer: defaultEventBufferSize}
+	if len(opts) > 0 && opts[0].EventBuffer > 0 {
+		cfg.EventBuffer = opts[0].EventBuffer
 	}
 
 	w := &Watcher{
 		fsw:     fsw,
 		matcher: scan.NewGitIgnoreMatcher(dir, gi),
 		rootDir: dir,
-		events:  make(chan Event, 256),
+		events:  make(chan Event, cfg.EventBuffer),
 		done:    make(chan struct{}),
 		timers:  make(map[string]*time.Timer),
 		watchedDirs: map[string]struct{}{
@@ -98,7 +113,7 @@ func (w *Watcher) Close() error {
 func (w *Watcher) addRecursive(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			log.Printf("warning: watcher could not descend into %s: %v", path, err)
+			logx.Warn("watcher could not descend into path", "path", path, "err", err)
 			return nil
 		}
 		if !d.IsDir() {
@@ -144,7 +159,7 @@ func (w *Watcher) loop() {
 
 func (w *Watcher) handleBackendError(err error) {
 	if err != nil {
-		log.Printf("warning: watcher backend error: %v", err)
+		logx.Warn("watcher backend error", "err", err)
 	}
 	w.signalResync()
 }
@@ -173,7 +188,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 			w.matcher.Load(path)
 			if err := w.addRecursive(path); err != nil {
-				log.Printf("warning: watcher failed to add recursive directory %s: %v", path, err)
+				logx.Warn("watcher failed to add recursive directory", "path", path, "err", err)
 				w.signalResync()
 				return
 			}
@@ -241,7 +256,7 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 		t.Stop()
 	}
 
-	w.timers[path] = time.AfterFunc(500*time.Millisecond, func() {
+	w.timers[path] = time.AfterFunc(defaultDebounceDelay, func() {
 		w.mu.Lock()
 		delete(w.timers, path)
 		closed := w.closed
@@ -255,7 +270,7 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 			return
 		case w.events <- Event{Path: path, Op: op, IsDir: isDir}:
 		default:
-			log.Printf("warning: watcher event dropped for %s (channel full)", path)
+			logx.Warn("watcher event dropped", "path", path, "reason", "channel full")
 			w.signalResync()
 		}
 	})
@@ -295,7 +310,7 @@ func (w *Watcher) trySendResync() {
 		if w.resyncTimer != nil {
 			w.resyncTimer.Stop()
 		}
-		w.resyncTimer = time.AfterFunc(500*time.Millisecond, func() {
+		w.resyncTimer = time.AfterFunc(defaultResyncRetryDelay, func() {
 			w.mu.Lock()
 			pending := w.resyncPending
 			closed := w.closed

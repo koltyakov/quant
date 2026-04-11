@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/koltyakov/quant/internal/logx"
 	_ "modernc.org/sqlite"
 )
 
@@ -51,7 +51,7 @@ func NewStore(dbPath string) (*Store, error) {
 
 	// Back up the broken DB and start fresh.
 	backupPath := dbPath + ".bak"
-	log.Printf("Migration failed (%v); backing up existing database to %s", err, backupPath)
+	logx.Warn("migration failed; backing up existing database", "backup_path", backupPath, "err", err)
 
 	// Remove stale backup if present, then rename current DB + WAL/SHM files.
 	for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -75,12 +75,12 @@ func (s *Store) RemoveBackup() {
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		_ = os.Remove(s.backup + suffix)
 	}
-	log.Printf("Removed database backup %s", s.backup)
+	logx.Info("removed database backup", "path", s.backup)
 	s.backup = ""
 }
 
 func openStore(dbPath string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
 
@@ -333,9 +333,22 @@ func (s *Store) GetDocumentByPath(ctx context.Context, path string) (*Document, 
 }
 
 func (s *Store) ListDocuments(ctx context.Context) ([]Document, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path, hash, modified_at, indexed_at FROM documents ORDER BY path`,
-	)
+	return s.listDocuments(ctx, 0)
+}
+
+func (s *Store) ListDocumentsLimit(ctx context.Context, limit int) ([]Document, error) {
+	return s.listDocuments(ctx, limit)
+}
+
+func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error) {
+	query := `SELECT id, path, hash, modified_at, indexed_at FROM documents ORDER BY path`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +541,7 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 
 func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bool, error) {
 	if s.maxVectorSearchCandidates == 0 {
-		log.Printf("Skipping brute-force vector fallback: max_vector_candidates=0")
+		logx.Info("skipping brute-force vector fallback", "reason", "max_vector_candidates=0")
 		return false, nil
 	}
 	if s.maxVectorSearchCandidates < 0 {
@@ -573,11 +586,7 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bo
 		return false, err
 	}
 	if count > s.maxVectorSearchCandidates {
-		log.Printf(
-			"Skipping brute-force vector fallback: candidate_count>%d path_prefix=%q",
-			s.maxVectorSearchCandidates,
-			pathPrefix,
-		)
+		logx.Info("skipping brute-force vector fallback", "candidate_count_over", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return false, nil
 	}
 	return true, nil

@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/logx"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -106,17 +106,17 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	}
 
 	startedAt := time.Now()
-	log.Printf("MCP search request: query=%q limit=%d threshold=%.4f path=%q", summarizeLogText(query, 120), limit, threshold, pathPrefix)
+	logx.Info("MCP search request", "query", summarizeLogText(query, 120), "limit", limit, "threshold", threshold, "path", pathPrefix)
 
 	queryEmbedding, err := s.cachedEmbed(ctx, query)
 	if err != nil {
-		log.Printf("MCP search error: query=%q stage=embed path=%q err=%v duration=%s", summarizeLogText(query, 120), pathPrefix, err, time.Since(startedAt).Round(time.Millisecond))
+		logx.Error("MCP search error", "query", summarizeLogText(query, 120), "stage", "embed", "path", pathPrefix, "err", err, "duration", time.Since(startedAt).Round(time.Millisecond))
 		return nil, fmt.Errorf("embedding query: %w", err)
 	}
 
 	results, err := s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
 	if err != nil {
-		log.Printf("MCP search error: query=%q stage=search path=%q err=%v duration=%s", summarizeLogText(query, 120), pathPrefix, err, time.Since(startedAt).Round(time.Millisecond))
+		logx.Error("MCP search error", "query", summarizeLogText(query, 120), "stage", "search", "path", pathPrefix, "err", err, "duration", time.Since(startedAt).Round(time.Millisecond))
 		return nil, fmt.Errorf("searching: %w", err)
 	}
 
@@ -127,15 +127,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		}
 	}
 
-	log.Printf(
-		"MCP search result: query=%q path=%q raw_hits=%d returned=%d duration=%s spotlight=%s",
-		summarizeLogText(query, 120),
-		pathPrefix,
-		len(results),
-		len(filtered),
-		time.Since(startedAt).Round(time.Millisecond),
-		formatSearchSpotlights(filtered, 3),
-	)
+	logx.Info("MCP search result", "query", summarizeLogText(query, 120), "path", pathPrefix, "raw_hits", len(results), "returned", len(filtered), "duration", time.Since(startedAt).Round(time.Millisecond), "spotlight", formatSearchSpotlights(filtered, 3))
 
 	if len(filtered) == 0 {
 		return mcplib.NewToolResultText("No results found."), nil
@@ -191,22 +183,25 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 		return nil, fmt.Errorf("limit must be between 1 and %d", maxSourcesLimit)
 	}
 
-	docs, err := s.store.ListDocuments(ctx)
+	docCount, _, err := s.store.Stats(ctx)
 	if err != nil {
-		log.Printf("MCP list_sources error: %v", err)
+		logx.Error("MCP list_sources error", "err", err)
 		return nil, fmt.Errorf("listing documents: %w", err)
 	}
 
-	log.Printf("MCP list_sources: count=%d spotlight=%s", len(docs), formatDocumentSpotlights(docs, 5))
+	docs, err := s.store.ListDocumentsLimit(ctx, limit)
+	if err != nil {
+		logx.Error("MCP list_sources error", "err", err)
+		return nil, fmt.Errorf("listing documents: %w", err)
+	}
 
-	if len(docs) == 0 {
+	logx.Info("MCP list_sources", "count", docCount, "returned", len(docs), "spotlight", formatDocumentSpotlights(docs, 5))
+
+	if docCount == 0 {
 		return mcplib.NewToolResultText("No documents indexed."), nil
 	}
 
-	total := len(docs)
-	if len(docs) > limit {
-		docs = docs[:limit]
-	}
+	total := docCount
 
 	output := fmt.Sprintf("Indexed documents (%d total", total)
 	if len(docs) != total {
@@ -231,7 +226,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 
 	docCount, chunkCount, err := s.store.Stats(ctx)
 	if err != nil {
-		log.Printf("MCP index_status error: %v", err)
+		logx.Error("MCP index_status error", "err", err)
 		return nil, fmt.Errorf("getting stats: %w", err)
 	}
 
@@ -242,14 +237,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel,
 	)
 
-	log.Printf(
-		"MCP index_status: documents=%d chunks=%d db_size=%s watch_dir=%q model=%q",
-		docCount,
-		chunkCount,
-		formatBytes(dbSize),
-		s.cfg.WatchDir,
-		s.cfg.EmbedModel,
-	)
+	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel)
 
 	return mcplib.NewToolResultText(output), nil
 }
@@ -277,6 +265,7 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 		s.embCacheMu.Unlock()
 		return s.waitForEmbeddingFlight(ctx, cacheKey, flight)
 	}
+	//nolint:gosec // The cancel func is stored on the flight and released when the last waiter drops.
 	flightCtx, cancel := context.WithCancel(context.Background())
 	flight := &embeddingFlight{
 		done:    make(chan struct{}),
