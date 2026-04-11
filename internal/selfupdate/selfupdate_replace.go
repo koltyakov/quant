@@ -62,6 +62,7 @@ func replaceBinaryAt(exe string, newBinary []byte) error {
 	if err != nil {
 		return err
 	}
+	//nolint:gosec // tmpPath is a temp file adjacent to the resolved current executable.
 	if err := os.Chmod(tmpPath, info.Mode()); err != nil {
 		return err
 	}
