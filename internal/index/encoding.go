@@ -105,11 +105,12 @@ func dotProductEncoded(query []float32, encoded []byte) float32 {
 		return dot
 	case 8 + len(query):
 		// int8 quantized format: 4-byte min + 4-byte scale + uint8 per dim.
-		minVal := math.Float32frombits(binary.LittleEndian.Uint32(encoded[0:]))
-		scale := math.Float32frombits(binary.LittleEndian.Uint32(encoded[4:]))
+		data := encoded[8:]                                                      //nolint:gosec // G602: bounds guaranteed by switch case
+		minVal := math.Float32frombits(binary.LittleEndian.Uint32(encoded[0:4])) //nolint:gosec // G602
+		scale := math.Float32frombits(binary.LittleEndian.Uint32(encoded[4:8]))  //nolint:gosec // G602
 		var dot float32
 		for i, q := range query {
-			v := float32(encoded[8+i])*scale + minVal
+			v := float32(data[i])*scale + minVal
 			dot += q * v
 		}
 		return dot
