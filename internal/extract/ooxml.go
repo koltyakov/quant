@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
@@ -24,14 +23,21 @@ type pptxSlide struct {
 	NotesTarget string
 }
 
-func (o *OOXMLExtractor) Extract(_ context.Context, path string) (string, error) {
+func (o *OOXMLExtractor) Extract(ctx context.Context, path string) (string, error) {
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
+		return "", err
+	}
+
 	switch ooxmlKind(path) {
 	case "word":
-		return extractDOCX(path)
+		return extractDOCX(ctx, path)
 	case "presentation":
-		return extractPPTX(path)
+		return extractPPTX(ctx, path)
 	case "spreadsheet":
-		return extractXLSX(path)
+		return extractXLSX(ctx, path)
 	default:
 		return "", fmt.Errorf("unsupported ooxml format: %s", filepath.Ext(path))
 	}
@@ -54,7 +60,7 @@ func ooxmlKind(path string) string {
 	}
 }
 
-func extractDOCX(path string) (string, error) {
+func extractDOCX(ctx context.Context, path string) (string, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return "", err
@@ -71,11 +77,19 @@ func extractDOCX(path string) (string, error) {
 
 	var parts []string
 	for _, name := range sectionNames {
-		data, err := readZipFile(zr.File, name)
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
+		data, err := readZipFile(ctx, zr.File, name)
 		if err != nil {
 			return "", err
 		}
-		text := strings.TrimSpace(extractWordMLText(data))
+		text, err := extractWordMLText(ctx, data)
+		if err != nil {
+			return "", err
+		}
+		text = strings.TrimSpace(text)
 		if text == "" {
 			continue
 		}
@@ -93,29 +107,41 @@ func extractDOCX(path string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
-func extractPPTX(path string) (string, error) {
+func extractPPTX(ctx context.Context, path string) (string, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = zr.Close() }()
 
-	slides, err := parsePPTXSlides(zr.File)
+	slides, err := parsePPTXSlides(ctx, zr.File)
 	if err != nil {
 		return "", err
 	}
 
 	var parts []string
 	for _, slide := range slides {
-		data, err := readZipFile(zr.File, slide.Target)
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
+		data, err := readZipFile(ctx, zr.File, slide.Target)
 		if err != nil {
 			return "", err
 		}
-		text := strings.TrimSpace(extractDrawingMLText(data))
+		text, err := extractDrawingMLText(ctx, data)
+		if err != nil {
+			return "", err
+		}
+		text = strings.TrimSpace(text)
 		notes := ""
 		if slide.NotesTarget != "" {
-			if notesData, err := readZipFile(zr.File, slide.NotesTarget); err == nil {
-				notes = strings.TrimSpace(extractNotesText(notesData))
+			if notesData, err := readZipFile(ctx, zr.File, slide.NotesTarget); err == nil {
+				notes, err = extractNotesText(ctx, notesData)
+				if err != nil {
+					return "", err
+				}
+				notes = strings.TrimSpace(notes)
 			}
 		}
 
@@ -137,7 +163,7 @@ func extractPPTX(path string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
-func extractXLSX(path string) (string, error) {
+func extractXLSX(ctx context.Context, path string) (string, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return "", err
@@ -145,31 +171,44 @@ func extractXLSX(path string) (string, error) {
 	defer func() { _ = zr.Close() }()
 
 	sharedStrings := []string{}
-	if data, err := readZipFile(zr.File, "xl/sharedStrings.xml"); err == nil {
-		sharedStrings = parseSharedStrings(data)
+	if data, err := readZipFile(ctx, zr.File, "xl/sharedStrings.xml"); err == nil {
+		sharedStrings, err = parseSharedStrings(ctx, data)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	workbookData, err := readZipFile(zr.File, "xl/workbook.xml")
+	workbookData, err := readZipFile(ctx, zr.File, "xl/workbook.xml")
 	if err != nil {
 		return "", err
 	}
-	relsData, err := readZipFile(zr.File, "xl/_rels/workbook.xml.rels")
+	relsData, err := readZipFile(ctx, zr.File, "xl/_rels/workbook.xml.rels")
 	if err != nil {
 		return "", err
 	}
 
-	sheets := parseWorkbookSheets(workbookData, relsData)
+	sheets, err := parseWorkbookSheets(ctx, workbookData, relsData)
+	if err != nil {
+		return "", err
+	}
 	if len(sheets) == 0 {
 		return "", nil
 	}
 
 	var parts []string
 	for _, sheet := range sheets {
-		data, err := readZipFile(zr.File, sheet.Target)
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
+		data, err := readZipFile(ctx, zr.File, sheet.Target)
 		if err != nil {
 			continue
 		}
-		rows := parseSheetCells(data, sharedStrings)
+		rows, err := parseSheetCells(ctx, data, sharedStrings)
+		if err != nil {
+			return "", err
+		}
 		if len(rows) == 0 {
 			continue
 		}
@@ -189,29 +228,32 @@ func isPPTXSlide(name string) bool {
 		strings.Count(name, "/") == 2
 }
 
-func parsePPTXSlides(files []*zip.File) ([]pptxSlide, error) {
-	if slides, err := parsePPTXSlidesFromPresentation(files); err == nil && len(slides) > 0 {
+func parsePPTXSlides(ctx context.Context, files []*zip.File) ([]pptxSlide, error) {
+	if slides, err := parsePPTXSlidesFromPresentation(ctx, files); err == nil && len(slides) > 0 {
 		return slides, nil
 	}
-	return fallbackPPTXSlides(files), nil
+	return fallbackPPTXSlides(ctx, files)
 }
 
-func parsePPTXSlidesFromPresentation(files []*zip.File) ([]pptxSlide, error) {
-	presentationData, err := readZipFile(files, "ppt/presentation.xml")
+func parsePPTXSlidesFromPresentation(ctx context.Context, files []*zip.File) ([]pptxSlide, error) {
+	presentationData, err := readZipFile(ctx, files, "ppt/presentation.xml")
 	if err != nil {
 		return nil, err
 	}
-	relsData, err := readZipFile(files, "ppt/_rels/presentation.xml.rels")
+	relsData, err := readZipFile(ctx, files, "ppt/_rels/presentation.xml.rels")
 	if err != nil {
 		return nil, err
 	}
 
-	rels := parseRelationships(relsData, "ppt")
+	rels, err := parseRelationships(ctx, relsData, "ppt")
+	if err != nil {
+		return nil, err
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(presentationData))
 	var slides []pptxSlide
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -235,16 +277,22 @@ func parsePPTXSlidesFromPresentation(files []*zip.File) ([]pptxSlide, error) {
 		slides = append(slides, pptxSlide{
 			Number:      slideNum,
 			Target:      target,
-			NotesTarget: parsePPTXNotesTarget(files, target),
+			NotesTarget: parsePPTXNotesTarget(ctx, files, target),
 		})
 	}
 
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
 	return slides, nil
 }
 
-func fallbackPPTXSlides(files []*zip.File) []pptxSlide {
+func fallbackPPTXSlides(ctx context.Context, files []*zip.File) ([]pptxSlide, error) {
 	var slides []pptxSlide
 	for _, f := range files {
+		if err := checkContext(ctx); err != nil {
+			return nil, err
+		}
 		if !isPPTXSlide(f.Name) {
 			continue
 		}
@@ -255,13 +303,13 @@ func fallbackPPTXSlides(files []*zip.File) []pptxSlide {
 		slides = append(slides, pptxSlide{
 			Number:      slideNum,
 			Target:      f.Name,
-			NotesTarget: parsePPTXNotesTarget(files, f.Name),
+			NotesTarget: parsePPTXNotesTarget(ctx, files, f.Name),
 		})
 	}
 	sort.Slice(slides, func(i, j int) bool {
 		return slides[i].Number < slides[j].Number
 	})
-	return slides
+	return slides, nil
 }
 
 func parsePPTXSlideNumber(name string) (int, bool) {
@@ -277,14 +325,17 @@ func parsePPTXSlideNumber(name string) (int, bool) {
 	return n, true
 }
 
-func parsePPTXNotesTarget(files []*zip.File, slideTarget string) string {
+func parsePPTXNotesTarget(ctx context.Context, files []*zip.File, slideTarget string) string {
 	relsPath := pathpkg.Join(pathpkg.Dir(slideTarget), "_rels", pathpkg.Base(slideTarget)+".rels")
-	relsData, err := readZipFile(files, relsPath)
+	relsData, err := readZipFile(ctx, files, relsPath)
 	if err == nil {
 		slideDir := pathpkg.Dir(slideTarget)
-		for _, rel := range parseRelationshipEntries(relsData, slideDir) {
-			if strings.HasSuffix(rel.Type, "/notesSlide") {
-				return rel.Target
+		rels, parseErr := parseRelationshipEntries(ctx, relsData, slideDir)
+		if parseErr == nil {
+			for _, rel := range rels {
+				if strings.HasSuffix(rel.Type, "/notesSlide") {
+					return rel.Target
+				}
 			}
 		}
 	}
@@ -295,6 +346,9 @@ func parsePPTXNotesTarget(files []*zip.File, slideTarget string) string {
 			return fallback
 		}
 	}
+	if err := checkContext(ctx); err != nil {
+		return ""
+	}
 	return ""
 }
 
@@ -304,13 +358,16 @@ type relationshipEntry struct {
 	Type   string
 }
 
-func parseRelationships(data []byte, baseDir string) map[string]string {
-	entries := parseRelationshipEntries(data, baseDir)
+func parseRelationships(ctx context.Context, data []byte, baseDir string) (map[string]string, error) {
+	entries, err := parseRelationshipEntries(ctx, data, baseDir)
+	if err != nil {
+		return nil, err
+	}
 	rels := make(map[string]string, len(entries))
 	for _, rel := range entries {
 		rels[rel.ID] = rel.Target
 	}
-	return rels
+	return rels, nil
 }
 
 func hasZipEntry(files []*zip.File, name string) bool {
@@ -322,12 +379,12 @@ func hasZipEntry(files []*zip.File, name string) bool {
 	return false
 }
 
-func parseRelationshipEntries(data []byte, baseDir string) []relationshipEntry {
+func parseRelationshipEntries(ctx context.Context, data []byte, baseDir string) ([]relationshipEntry, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var rels []relationshipEntry
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -352,7 +409,10 @@ func parseRelationshipEntries(data []byte, baseDir string) []relationshipEntry {
 		}
 	}
 
-	return rels
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return rels, nil
 }
 
 func sectionOrdinal(name string) string {
@@ -364,27 +424,12 @@ func sectionOrdinal(name string) string {
 	return digits
 }
 
-func readZipFile(files []*zip.File, name string) ([]byte, error) {
-	for _, f := range files {
-		if f.Name != name {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = rc.Close() }()
-		return io.ReadAll(rc)
-	}
-	return nil, fmt.Errorf("zip entry not found: %s", name)
-}
-
-func extractWordMLText(data []byte) string {
+func extractWordMLText(ctx context.Context, data []byte) (string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var buf strings.Builder
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -409,15 +454,18 @@ func extractWordMLText(data []byte) string {
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
-func extractDrawingMLText(data []byte) string {
+func extractDrawingMLText(ctx context.Context, data []byte) (string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var buf strings.Builder
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -440,20 +488,23 @@ func extractDrawingMLText(data []byte) string {
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
 // extractNotesText extracts speaker notes from a PPTX notesSlide XML.
 // Notes use DrawingML but we filter out the slide number placeholder text
 // (which typically just contains the slide number digit).
-func extractNotesText(data []byte) string {
+func extractNotesText(ctx context.Context, data []byte) (string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var buf strings.Builder
 	inPlaceholder := false
 	placeholderType := ""
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -498,15 +549,18 @@ func extractNotesText(data []byte) string {
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
-func parseSharedStrings(data []byte) []string {
+func parseSharedStrings(ctx context.Context, data []byte) ([]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var stringsOut []string
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -517,7 +571,7 @@ func parseSharedStrings(data []byte) []string {
 		var buf strings.Builder
 		depth := 1
 		for depth > 0 {
-			token, err := decoder.Token()
+			token, err := nextXMLToken(ctx, decoder)
 			if err != nil {
 				break
 			}
@@ -538,7 +592,10 @@ func parseSharedStrings(data []byte) []string {
 		stringsOut = append(stringsOut, cleanSpacing(buf.String()))
 	}
 
-	return stringsOut
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return stringsOut, nil
 }
 
 type xlsxSheet struct {
@@ -546,13 +603,16 @@ type xlsxSheet struct {
 	Target string
 }
 
-func parseWorkbookSheets(workbookData, relsData []byte) []xlsxSheet {
-	rels := parseWorkbookRelationships(relsData)
+func parseWorkbookSheets(ctx context.Context, workbookData, relsData []byte) ([]xlsxSheet, error) {
+	rels, err := parseWorkbookRelationships(ctx, relsData)
+	if err != nil {
+		return nil, err
+	}
 	decoder := xml.NewDecoder(bytes.NewReader(workbookData))
 	var sheets []xlsxSheet
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -578,15 +638,18 @@ func parseWorkbookSheets(workbookData, relsData []byte) []xlsxSheet {
 		sheets = append(sheets, xlsxSheet{Name: name, Target: target})
 	}
 
-	return sheets
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return sheets, nil
 }
 
-func parseWorkbookRelationships(data []byte) map[string]string {
+func parseWorkbookRelationships(ctx context.Context, data []byte) (map[string]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	rels := make(map[string]string)
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -611,15 +674,18 @@ func parseWorkbookRelationships(data []byte) map[string]string {
 		rels[id] = pathpkg.Clean(pathpkg.Join("xl", target))
 	}
 
-	return rels
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return rels, nil
 }
 
-func parseSheetCells(data []byte, sharedStrings []string) []string {
+func parseSheetCells(ctx context.Context, data []byte, sharedStrings []string) ([]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var rows []string
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -639,7 +705,10 @@ func parseSheetCells(data []byte, sharedStrings []string) []string {
 			}
 		}
 
-		value, formula := parseSheetCell(decoder, cellType, sharedStrings)
+		value, formula, err := parseSheetCell(ctx, decoder, cellType, sharedStrings)
+		if err != nil {
+			return nil, err
+		}
 		value = strings.TrimSpace(value)
 		formula = strings.TrimSpace(formula)
 		if ref == "" || (value == "" && formula == "") {
@@ -656,16 +725,19 @@ func parseSheetCells(data []byte, sharedStrings []string) []string {
 		}
 	}
 
-	return rows
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
-func parseSheetCell(decoder *xml.Decoder, cellType string, sharedStrings []string) (string, string) {
+func parseSheetCell(ctx context.Context, decoder *xml.Decoder, cellType string, sharedStrings []string) (string, string, error) {
 	var value string
 	var formula string
 	depth := 1
 
 	for depth > 0 {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -687,7 +759,10 @@ func parseSheetCell(decoder *xml.Decoder, cellType string, sharedStrings []strin
 				}
 				depth--
 			case "is":
-				value = parseInlineString(decoder)
+				value, err = parseInlineString(ctx, decoder)
+				if err != nil {
+					return "", "", err
+				}
 				depth--
 			}
 		case xml.EndElement:
@@ -695,15 +770,18 @@ func parseSheetCell(decoder *xml.Decoder, cellType string, sharedStrings []strin
 		}
 	}
 
-	return cleanSpacing(value), cleanSpacing(formula)
+	if err := checkContext(ctx); err != nil {
+		return "", "", err
+	}
+	return cleanSpacing(value), cleanSpacing(formula), nil
 }
 
-func parseInlineString(decoder *xml.Decoder) string {
+func parseInlineString(ctx context.Context, decoder *xml.Decoder) (string, error) {
 	var buf strings.Builder
 	depth := 1
 
 	for depth > 0 {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -723,7 +801,10 @@ func parseInlineString(decoder *xml.Decoder) string {
 		}
 	}
 
-	return buf.String()
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func resolveCellValue(cellType, content string, sharedStrings []string) string {

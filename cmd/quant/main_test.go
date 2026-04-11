@@ -1197,6 +1197,25 @@ func TestPrintVersion(t *testing.T) {
 	}
 }
 
+func TestNormalizedVersion(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: "dev"},
+		{input: "dev", want: "dev"},
+		{input: "1.2.3", want: "v1.2.3"},
+		{input: "v1.2.3", want: "v1.2.3"},
+		{input: "v1.2.3-dev", want: "v1.2.3-dev"},
+	}
+
+	for _, tt := range tests {
+		if got := normalizedVersion(tt.input); got != tt.want {
+			t.Fatalf("normalizedVersion(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestPrintMCPDefaults_UsesDoubleDash(t *testing.T) {
 	var out bytes.Buffer
 

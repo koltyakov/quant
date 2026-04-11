@@ -13,14 +13,21 @@ import (
 
 type ODFExtractor struct{}
 
-func (o *ODFExtractor) Extract(_ context.Context, path string) (string, error) {
+func (o *ODFExtractor) Extract(ctx context.Context, path string) (string, error) {
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
+		return "", err
+	}
+
 	switch strings.ToLower(ext(path)) {
 	case ".odt":
-		return extractODT(path)
+		return extractODT(ctx, path)
 	case ".ods":
-		return extractODS(path)
+		return extractODS(ctx, path)
 	case ".odp":
-		return extractODP(path)
+		return extractODP(ctx, path)
 	default:
 		return "", fmt.Errorf("unsupported OpenDocument format: %s", filepath.Ext(path))
 	}
@@ -34,43 +41,55 @@ func (o *ODFExtractor) Supports(path string) bool {
 	return false
 }
 
-func extractODT(path string) (string, error) {
-	data, err := readODFContent(path)
+func extractODT(ctx context.Context, path string) (string, error) {
+	data, err := readODFContent(ctx, path)
 	if err != nil {
 		return "", err
 	}
 
-	text := strings.TrimSpace(extractODFText(data, odfDocumentMode))
+	text, err := extractODFText(ctx, data, odfDocumentMode)
+	if err != nil {
+		return "", err
+	}
+	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", nil
 	}
 	return "[Document]\n" + text, nil
 }
 
-func extractODS(path string) (string, error) {
-	data, err := readODFContent(path)
+func extractODS(ctx context.Context, path string) (string, error) {
+	data, err := readODFContent(ctx, path)
 	if err != nil {
 		return "", err
 	}
-	return strings.Join(extractODFSheets(data), "\n\n"), nil
-}
-
-func extractODP(path string) (string, error) {
-	data, err := readODFContent(path)
+	sheets, err := extractODFSheets(ctx, data)
 	if err != nil {
 		return "", err
 	}
-	return strings.Join(extractODFSlides(data), "\n\n"), nil
+	return strings.Join(sheets, "\n\n"), nil
 }
 
-func readODFContent(path string) ([]byte, error) {
+func extractODP(ctx context.Context, path string) (string, error) {
+	data, err := readODFContent(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	slides, err := extractODFSlides(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(slides, "\n\n"), nil
+}
+
+func readODFContent(ctx context.Context, path string) ([]byte, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = zr.Close() }()
 
-	return readZipFile(zr.File, "content.xml")
+	return readZipFile(ctx, zr.File, "content.xml")
 }
 
 type odfMode int
@@ -81,12 +100,12 @@ const (
 	odfPresentationMode
 )
 
-func extractODFText(data []byte, mode odfMode) string {
+func extractODFText(ctx context.Context, data []byte, mode odfMode) (string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var buf strings.Builder
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -95,7 +114,9 @@ func extractODFText(data []byte, mode odfMode) string {
 		case xml.StartElement:
 			switch se.Name.Local {
 			case "p", "h":
-				writeODFParagraph(decoder, &buf, se)
+				if err := writeODFParagraph(ctx, decoder, &buf, se); err != nil {
+					return "", err
+				}
 			case "tab":
 				buf.WriteByte('\t')
 			case "line-break":
@@ -112,7 +133,11 @@ func extractODFText(data []byte, mode odfMode) string {
 			case "table-cell":
 				if mode == odfSpreadsheetMode {
 					repeat := odfRepeatedCount(se)
-					value := strings.TrimSpace(extractODFTableCell(decoder, se))
+					value, err := extractODFTableCell(ctx, decoder, se)
+					if err != nil {
+						return "", err
+					}
+					value = strings.TrimSpace(value)
 					for i := 0; i < repeat; i++ {
 						if value == "" {
 							continue
@@ -139,15 +164,18 @@ func extractODFText(data []byte, mode odfMode) string {
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
-func extractODFSheets(data []byte) []string {
+func extractODFSheets(ctx context.Context, data []byte) ([]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var sections []string
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -161,23 +189,30 @@ func extractODFSheets(data []byte) []string {
 			name = "Sheet"
 		}
 
-		content := strings.TrimSpace(extractODFElementText(decoder, se, odfSpreadsheetMode))
+		content, err := extractODFElementText(ctx, decoder, se, odfSpreadsheetMode)
+		if err != nil {
+			return nil, err
+		}
+		content = strings.TrimSpace(content)
 		if content == "" {
 			continue
 		}
 		sections = append(sections, fmt.Sprintf("[Sheet %s]\n%s", name, content))
 	}
 
-	return sections
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return sections, nil
 }
 
-func extractODFSlides(data []byte) []string {
+func extractODFSlides(ctx context.Context, data []byte) ([]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var slides []string
 	index := 0
 
 	for {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -188,7 +223,11 @@ func extractODFSlides(data []byte) []string {
 
 		index++
 		title := attrValue(se, "name")
-		content := strings.TrimSpace(extractODFElementText(decoder, se, odfPresentationMode))
+		content, err := extractODFElementText(ctx, decoder, se, odfPresentationMode)
+		if err != nil {
+			return nil, err
+		}
+		content = strings.TrimSpace(content)
 		if content == "" {
 			continue
 		}
@@ -200,15 +239,18 @@ func extractODFSlides(data []byte) []string {
 		slides = append(slides, label+"\n"+content)
 	}
 
-	return slides
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	return slides, nil
 }
 
-func extractODFElementText(decoder *xml.Decoder, root xml.StartElement, mode odfMode) string {
+func extractODFElementText(ctx context.Context, decoder *xml.Decoder, root xml.StartElement, mode odfMode) (string, error) {
 	var buf strings.Builder
 	depth := 1
 
 	for depth > 0 {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -218,7 +260,9 @@ func extractODFElementText(decoder *xml.Decoder, root xml.StartElement, mode odf
 			depth++
 			switch se.Name.Local {
 			case "p", "h":
-				writeODFParagraph(decoder, &buf, se)
+				if err := writeODFParagraph(ctx, decoder, &buf, se); err != nil {
+					return "", err
+				}
 				depth--
 			case "tab":
 				buf.WriteByte('\t')
@@ -229,7 +273,11 @@ func extractODFElementText(decoder *xml.Decoder, root xml.StartElement, mode odf
 			case "table-cell":
 				if mode == odfSpreadsheetMode {
 					repeat := odfRepeatedCount(se)
-					value := strings.TrimSpace(extractODFTableCell(decoder, se))
+					value, err := extractODFTableCell(ctx, decoder, se)
+					if err != nil {
+						return "", err
+					}
+					value = strings.TrimSpace(value)
 					depth--
 					for i := 0; i < repeat; i++ {
 						if value == "" {
@@ -255,26 +303,34 @@ func extractODFElementText(decoder *xml.Decoder, root xml.StartElement, mode odf
 					writeParagraphBreak(&buf)
 				}
 			case root.Name.Local:
-				return strings.TrimSpace(cleanSpacing(buf.String()))
+				return strings.TrimSpace(cleanSpacing(buf.String())), nil
 			}
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
-func writeODFParagraph(decoder *xml.Decoder, buf *strings.Builder, start xml.StartElement) {
-	content := strings.TrimSpace(extractODFElementText(decoder, start, odfDocumentMode))
+func writeODFParagraph(ctx context.Context, decoder *xml.Decoder, buf *strings.Builder, start xml.StartElement) error {
+	content, err := extractODFElementText(ctx, decoder, start, odfDocumentMode)
+	if err != nil {
+		return err
+	}
+	content = strings.TrimSpace(content)
 	if content == "" {
-		return
+		return nil
 	}
 	if buf.Len() > 0 {
 		writeParagraphBreak(buf)
 	}
 	buf.WriteString(content)
+	return nil
 }
 
-func extractODFTableCell(decoder *xml.Decoder, root xml.StartElement) string {
+func extractODFTableCell(ctx context.Context, decoder *xml.Decoder, root xml.StartElement) (string, error) {
 	depth := 1
 	var buf strings.Builder
 
@@ -289,7 +345,7 @@ func extractODFTableCell(decoder *xml.Decoder, root xml.StartElement) string {
 	}
 
 	for depth > 0 {
-		token, err := decoder.Token()
+		token, err := nextXMLToken(ctx, decoder)
 		if err != nil {
 			break
 		}
@@ -299,7 +355,11 @@ func extractODFTableCell(decoder *xml.Decoder, root xml.StartElement) string {
 			depth++
 			switch se.Name.Local {
 			case "p", "h":
-				content := strings.TrimSpace(extractODFElementText(decoder, se, odfDocumentMode))
+				content, err := extractODFElementText(ctx, decoder, se, odfDocumentMode)
+				if err != nil {
+					return "", err
+				}
+				content = strings.TrimSpace(content)
 				depth--
 				if content != "" {
 					if buf.Len() > 0 {
@@ -318,12 +378,15 @@ func extractODFTableCell(decoder *xml.Decoder, root xml.StartElement) string {
 		case xml.EndElement:
 			depth--
 			if se.Name.Local == root.Name.Local {
-				return strings.TrimSpace(cleanSpacing(buf.String()))
+				return strings.TrimSpace(cleanSpacing(buf.String())), nil
 			}
 		}
 	}
 
-	return strings.TrimSpace(cleanSpacing(buf.String()))
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
 func odfRepeatedCount(se xml.StartElement) int {

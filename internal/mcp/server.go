@@ -27,16 +27,20 @@ type Server struct {
 	embCacheMu sync.Mutex
 	embCache   *embeddingLRU
 	embFlights map[string]*embeddingFlight
+
+	toolLimiterOnce sync.Once
+	toolLimiter     chan struct{}
 }
 
 const (
-	embCacheMaxSize = 128
-	shutdownTimeout = 5 * time.Second
-	healthPath      = "/healthz"
-	readinessPath   = "/readyz"
-	httpMCPPath     = "/mcp"
-	ssePath         = "/sse"
-	sseMessagePath  = "/message"
+	embCacheMaxSize        = 128
+	shutdownTimeout        = 5 * time.Second
+	healthPath             = "/healthz"
+	readinessPath          = "/readyz"
+	httpMCPPath            = "/mcp"
+	ssePath                = "/sse"
+	sseMessagePath         = "/message"
+	maxConcurrentToolCalls = 4
 )
 
 func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder, version string) *Server {
@@ -218,5 +222,29 @@ func (s *Server) serveWithShutdown(ctx context.Context, srv shutdownable, addr s
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+func (s *Server) acquireToolSlot(ctx context.Context) error {
+	s.toolLimiterOnce.Do(func() {
+		s.toolLimiter = make(chan struct{}, maxConcurrentToolCalls)
+	})
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.toolLimiter <- struct{}{}:
+		return nil
+	}
+}
+
+func (s *Server) releaseToolSlot() {
+	if s == nil || s.toolLimiter == nil {
+		return
+	}
+
+	select {
+	case <-s.toolLimiter:
+	default:
 	}
 }

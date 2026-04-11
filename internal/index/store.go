@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -27,6 +29,11 @@ type Store struct {
 }
 
 const defaultMaxVectorSearchCandidates = 20000
+
+const (
+	defaultSQLiteConnMaxLifetime = time.Hour
+	defaultSQLiteConnMaxIdleTime = 15 * time.Minute
+)
 
 // NewStore opens (or creates) a SQLite database at dbPath.
 // If the database exists but migration fails, the old file is backed up and a
@@ -90,6 +97,8 @@ func openStore(dbPath string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(conns)
 	db.SetMaxIdleConns(conns / 2)
+	db.SetConnMaxLifetime(defaultSQLiteConnMaxLifetime)
+	db.SetConnMaxIdleTime(defaultSQLiteConnMaxIdleTime)
 
 	s := &Store{
 		db:                        db,
@@ -119,7 +128,14 @@ func openStore(dbPath string) (*Store, error) {
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	var err error
+	if s != nil && s.db != nil {
+		if _, checkpointErr := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); checkpointErr != nil {
+			err = errors.Join(err, fmt.Errorf("checkpointing sqlite wal: %w", checkpointErr))
+		}
+		err = errors.Join(err, s.db.Close())
+	}
+	return err
 }
 
 func (s *Store) PingContext(ctx context.Context) error {

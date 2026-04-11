@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -25,8 +24,8 @@ type notebookOutput struct {
 	Data map[string]json.RawMessage `json:"data"`
 }
 
-func (n *NotebookExtractor) Extract(_ context.Context, path string) (string, error) {
-	data, err := os.ReadFile(path)
+func (n *NotebookExtractor) Extract(ctx context.Context, path string) (string, error) {
+	data, err := readFileLimited(ctx, path, maxExtractorFileSize)
 	if err != nil {
 		return "", err
 	}
@@ -38,7 +37,15 @@ func (n *NotebookExtractor) Extract(_ context.Context, path string) (string, err
 
 	var sections []string
 	for i, cell := range notebook.Cells {
-		content := strings.TrimSpace(renderNotebookCell(cell))
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
+		content, err := renderNotebookCell(ctx, cell)
+		if err != nil {
+			return "", err
+		}
+		content = strings.TrimSpace(content)
 		if content == "" {
 			continue
 		}
@@ -62,26 +69,34 @@ func (n *NotebookExtractor) Supports(path string) bool {
 	return strings.EqualFold(ext(path), ".ipynb")
 }
 
-func renderNotebookCell(cell notebookCell) string {
+func renderNotebookCell(ctx context.Context, cell notebookCell) (string, error) {
 	source := strings.TrimSpace(notebookText(cell.Source))
-	outputs := strings.TrimSpace(renderNotebookOutputs(cell.Outputs))
+	outputs, err := renderNotebookOutputs(ctx, cell.Outputs)
+	if err != nil {
+		return "", err
+	}
+	outputs = strings.TrimSpace(outputs)
 
 	switch {
 	case source != "" && outputs != "":
-		return source + "\n\n[Output]\n" + outputs
+		return source + "\n\n[Output]\n" + outputs, nil
 	case source != "":
-		return source
+		return source, nil
 	case outputs != "":
-		return "[Output]\n" + outputs
+		return "[Output]\n" + outputs, nil
 	default:
-		return ""
+		return "", nil
 	}
 }
 
-func renderNotebookOutputs(outputs []notebookOutput) string {
+func renderNotebookOutputs(ctx context.Context, outputs []notebookOutput) (string, error) {
 	var parts []string
 	seen := make(map[string]struct{})
 	for _, output := range outputs {
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
 		text := strings.TrimSpace(notebookText(output.Text))
 		if text != "" {
 			parts = appendNotebookOutput(parts, seen, text)
@@ -94,7 +109,7 @@ func renderNotebookOutputs(outputs []notebookOutput) string {
 			}
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n"), nil
 }
 
 func appendNotebookOutput(parts []string, seen map[string]struct{}, text string) []string {

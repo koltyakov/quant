@@ -58,6 +58,11 @@ const (
 )
 
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
 	args := request.GetArguments()
 
 	query, ok := args["query"].(string)
@@ -169,6 +174,11 @@ func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {
 }
 
 func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
 	args := request.GetArguments()
 	limit := defaultSourcesLimit
 	if v, ok := args["limit"].(float64); ok {
@@ -214,16 +224,18 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 }
 
 func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
 	docCount, chunkCount, err := s.store.Stats(ctx)
 	if err != nil {
 		log.Printf("MCP index_status error: %v", err)
 		return nil, fmt.Errorf("getting stats: %w", err)
 	}
 
-	var dbSize int64
-	if info, err := os.Stat(s.cfg.DBPath); err == nil {
-		dbSize = info.Size()
-	}
+	dbSize := sqliteDiskUsage(s.cfg.DBPath)
 
 	output := fmt.Sprintf(
 		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s",
@@ -243,6 +255,8 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 }
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
+	cacheKey := normalizeEmbeddingCacheKey(text)
+
 	s.embCacheMu.Lock()
 	if s.embCache == nil {
 		s.embCache = newEmbeddingLRU(embCacheMaxSize)
@@ -250,18 +264,18 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 	if s.embFlights == nil {
 		s.embFlights = make(map[string]*embeddingFlight)
 	}
-	if vec, ok := s.embCache.Get(text); ok {
+	if vec, ok := s.embCache.Get(cacheKey); ok {
 		s.embCacheMu.Unlock()
 		return vec, nil
 	}
-	if flight, ok := s.embFlights[text]; ok {
+	if flight, ok := s.embFlights[cacheKey]; ok {
 		if flight.timer != nil {
 			flight.timer.Stop()
 			flight.timer = nil
 		}
 		flight.waiters++
 		s.embCacheMu.Unlock()
-		return s.waitForEmbeddingFlight(ctx, text, flight)
+		return s.waitForEmbeddingFlight(ctx, cacheKey, flight)
 	}
 	flightCtx, cancel := context.WithCancel(context.Background())
 	flight := &embeddingFlight{
@@ -269,12 +283,12 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 		waiters: 1,
 		cancel:  cancel,
 	}
-	s.embFlights[text] = flight
+	s.embFlights[cacheKey] = flight
 	s.embCacheMu.Unlock()
 
-	go s.runEmbeddingFlight(flightCtx, text, flight)
+	go s.runEmbeddingFlight(flightCtx, cacheKey, text, flight)
 
-	return s.waitForEmbeddingFlight(ctx, text, flight)
+	return s.waitForEmbeddingFlight(ctx, cacheKey, flight)
 }
 
 func (s *Server) waitForEmbeddingFlight(ctx context.Context, text string, flight *embeddingFlight) ([]float32, error) {
@@ -288,7 +302,7 @@ func (s *Server) waitForEmbeddingFlight(ctx context.Context, text string, flight
 	}
 }
 
-func (s *Server) runEmbeddingFlight(ctx context.Context, text string, flight *embeddingFlight) {
+func (s *Server) runEmbeddingFlight(ctx context.Context, cacheKey, text string, flight *embeddingFlight) {
 	vec, err := s.embedder.Embed(ctx, text)
 	if err == nil {
 		vec = index.NormalizeFloat32(vec)
@@ -305,9 +319,9 @@ func (s *Server) runEmbeddingFlight(ctx context.Context, text string, flight *em
 		if s.embCache == nil {
 			s.embCache = newEmbeddingLRU(embCacheMaxSize)
 		}
-		s.embCache.Put(text, vec)
+		s.embCache.Put(cacheKey, vec)
 	}
-	delete(s.embFlights, text)
+	delete(s.embFlights, cacheKey)
 	flight.vec = vec
 	flight.err = err
 	close(flight.done)
@@ -352,6 +366,25 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func sqliteDiskUsage(dbPath string) int64 {
+	var total int64
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(path)
+		if err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
+func normalizeEmbeddingCacheKey(text string) string {
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if normalized == "" {
+		return text
+	}
+	return normalized
 }
 
 func summarizeLogText(text string, limit int) string {

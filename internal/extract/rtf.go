@@ -2,19 +2,18 @@ package extract
 
 import (
 	"context"
-	"os"
 	"strings"
 	"unicode/utf8"
 )
 
 type RTFExtractor struct{}
 
-func (r *RTFExtractor) Extract(_ context.Context, path string) (string, error) {
-	data, err := os.ReadFile(path)
+func (r *RTFExtractor) Extract(ctx context.Context, path string) (string, error) {
+	data, err := readFileLimited(ctx, path, maxExtractorFileSize)
 	if err != nil {
 		return "", err
 	}
-	return extractRTFText(string(data)), nil
+	return extractRTFText(ctx, string(data))
 }
 
 func (r *RTFExtractor) Supports(path string) bool {
@@ -24,7 +23,7 @@ func (r *RTFExtractor) Supports(path string) bool {
 // extractRTFText extracts plain text from RTF content by parsing control words
 // and stripping formatting. Handles unicode escapes, paragraph breaks, and
 // common control words.
-func extractRTFText(rtf string) string {
+func extractRTFText(ctx context.Context, rtf string) (string, error) {
 	var buf strings.Builder
 	depth := 0
 	skipGroup := 0
@@ -40,6 +39,10 @@ func extractRTFText(rtf string) string {
 	}
 
 	for i < len(rtf) {
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
 		ch := rtf[i]
 
 		switch ch {
@@ -147,7 +150,7 @@ func extractRTFText(rtf string) string {
 		}
 	}
 
-	return cleanSpacing(buf.String())
+	return cleanSpacing(buf.String()), nil
 }
 
 // parseRTFControlWord extracts a control word and optional numeric parameter

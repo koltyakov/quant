@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -10,18 +9,7 @@ import (
 var Version = "dev"
 
 func init() {
-	if Version == "dev" {
-		if desc, err := exec.Command("git", "describe", "--tags", "--always").Output(); err == nil {
-			if v := strings.TrimSpace(string(desc)); v != "" {
-				Version = v + "-dev"
-			}
-		}
-	}
-
-	// GoReleaser passes bare semver without the leading v.
-	if Version != "dev" && !strings.HasPrefix(Version, "v") {
-		Version = "v" + Version
-	}
+	Version = normalizedVersion(Version)
 }
 
 func isVersionRequest(args []string) bool {
@@ -52,6 +40,17 @@ func isHelpRequest(args []string) bool {
 
 func printVersion() {
 	fmt.Println("quant", Version)
+}
+
+func normalizedVersion(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "dev"
+	}
+	if s == "dev" || strings.HasSuffix(s, "-dev") {
+		return s
+	}
+	return ensureVPrefix(s)
 }
 
 func ensureVPrefix(s string) string {

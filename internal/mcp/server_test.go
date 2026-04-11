@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -190,6 +191,31 @@ func TestCachedEmbed_DeduplicatesConcurrentRequests(t *testing.T) {
 	defer embedder.mu.Unlock()
 	if embedder.calls["same-query"] != 1 {
 		t.Fatalf("expected one embed call, got %d", embedder.calls["same-query"])
+	}
+}
+
+func TestCachedEmbed_NormalizesWhitespaceInCacheKey(t *testing.T) {
+	embedder := &countingEmbedder{}
+	s := &Server{
+		embedder:   embedder,
+		embCache:   newEmbeddingLRU(2),
+		embFlights: make(map[string]*embeddingFlight),
+	}
+
+	if _, err := s.cachedEmbed(context.Background(), "alpha   beta"); err != nil {
+		t.Fatalf("unexpected embed error: %v", err)
+	}
+	if _, err := s.cachedEmbed(context.Background(), " alpha beta "); err != nil {
+		t.Fatalf("unexpected embed error: %v", err)
+	}
+
+	embedder.mu.Lock()
+	defer embedder.mu.Unlock()
+	if embedder.calls["alpha   beta"] != 1 {
+		t.Fatalf("expected the first normalized query to embed once, got %d", embedder.calls["alpha   beta"])
+	}
+	if embedder.calls[" alpha beta "] != 0 {
+		t.Fatalf("expected normalized cache hit for whitespace-only variant, got %d embeds", embedder.calls[" alpha beta "])
 	}
 }
 
@@ -933,6 +959,47 @@ func TestHandleIndexStatus(t *testing.T) {
 	}
 	if !strings.Contains(text, "test-model") {
 		t.Fatalf("expected model name in status, got %q", text)
+	}
+}
+
+func TestHandleIndexStatus_IncludesSQLiteSidecars(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path:       "sidecars.txt",
+		Hash:       "sidecars-hash",
+		ModifiedAt: testTime(),
+	}, []index.ChunkRecord{{
+		Content:    "forces sqlite wal sidecars to exist",
+		ChunkIndex: 0,
+		Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+	}}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	result, err := s.handleIndexStatus(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Name: "index_status"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected index_status error: %v", err)
+	}
+
+	text := extractToolText(t, result)
+	if _, err := os.Stat(dbPath + "-wal"); err != nil {
+		t.Fatalf("expected sqlite wal sidecar to exist, got %v", err)
+	}
+	if !strings.Contains(text, formatBytes(sqliteDiskUsage(dbPath))) {
+		t.Fatalf("expected combined sqlite sidecar size in status, got %q", text)
 	}
 }
 

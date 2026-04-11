@@ -905,6 +905,7 @@ func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 	}
 	if state.attempts >= maxIndexRetryAttempts {
 		attempts := state.attempts
+		delete(idx.retryStates, path)
 		idx.retryMu.Unlock()
 		log.Printf("warning: giving up retrying %s after %d attempts", path, attempts)
 		return
@@ -929,6 +930,7 @@ func (idx *indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 
 		select {
 		case <-ctx.Done():
+			idx.clearIndexRetry(path)
 			return
 		default:
 		}

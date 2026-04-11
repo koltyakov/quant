@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+func writeTempFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+	return path
+}
+
 func TestRouter_SupportsTextFiles(t *testing.T) {
 	r := NewRouter()
 
@@ -38,9 +49,11 @@ func TestRouter_SupportsPDF(t *testing.T) {
 }
 
 func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
+	path := writeTempFile(t, "file.pdf", []byte("%PDF-1.4"))
+
 	ext := &PDFExtractor{
-		extractNative: func(path string) (string, error) {
-			if path != "file.pdf" {
+		extractNative: func(ctx context.Context, path string) (string, error) {
+			if filepath.Base(path) != "file.pdf" {
 				t.Fatalf("unexpected path: %s", path)
 			}
 			return "[Page 1]\nhello world", nil
@@ -55,7 +68,7 @@ func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), "file.pdf")
+	text, err := ext.Extract(context.Background(), path)
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
@@ -65,9 +78,11 @@ func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
 }
 
 func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) {
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
+
 	ext := &PDFExtractor{
-		extractNative: func(path string) (string, error) {
-			if path != "scan.pdf" {
+		extractNative: func(ctx context.Context, path string) (string, error) {
+			if filepath.Base(path) != "scan.pdf" {
 				t.Fatalf("unexpected path: %s", path)
 			}
 			return "", nil
@@ -79,7 +94,7 @@ func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) 
 			if binaryPath != "/usr/bin/ocrmypdf" {
 				t.Fatalf("unexpected ocrmypdf path: %s", binaryPath)
 			}
-			if path != "scan.pdf" {
+			if filepath.Base(path) != "scan.pdf" {
 				t.Fatalf("unexpected pdf path: %s", path)
 			}
 			if languages != "eng" {
@@ -89,7 +104,7 @@ func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) 
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), "scan.pdf")
+	text, err := ext.Extract(context.Background(), path)
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
@@ -99,8 +114,10 @@ func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) 
 }
 
 func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
+
 	ext := &PDFExtractor{
-		extractNative: func(path string) (string, error) {
+		extractNative: func(ctx context.Context, path string) (string, error) {
 			return "", nil
 		},
 		findOCRBinary: func() (string, bool) {
@@ -112,7 +129,7 @@ func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), "scan.pdf")
+	text, err := ext.Extract(context.Background(), path)
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
@@ -122,8 +139,10 @@ func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
 }
 
 func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
+
 	ext := &PDFExtractor{
-		extractNative: func(path string) (string, error) {
+		extractNative: func(ctx context.Context, path string) (string, error) {
 			return "", nil
 		},
 		findOCRBinary: func() (string, bool) {
@@ -134,7 +153,7 @@ func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), "scan.pdf")
+	text, err := ext.Extract(context.Background(), path)
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
@@ -146,9 +165,10 @@ func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
 func TestPDFExtractor_ExtractPropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(path string) (string, error) {
+		extractNative: func(ctx context.Context, path string) (string, error) {
 			return "", nil
 		},
 		findOCRBinary: func() (string, bool) {
@@ -159,16 +179,18 @@ func TestPDFExtractor_ExtractPropagatesCancellation(t *testing.T) {
 		},
 	}
 
-	_, err := ext.Extract(ctx, "scan.pdf")
+	_, err := ext.Extract(ctx, path)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
 	}
 }
 
 func TestPDFExtractor_ExtractUsesConfiguredLanguages(t *testing.T) {
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
+
 	ext := &PDFExtractor{
 		ocrLanguages: "rus+eng",
-		extractNative: func(path string) (string, error) {
+		extractNative: func(ctx context.Context, path string) (string, error) {
 			return "", nil
 		},
 		findOCRBinary: func() (string, bool) {
@@ -182,12 +204,40 @@ func TestPDFExtractor_ExtractUsesConfiguredLanguages(t *testing.T) {
 		},
 	}
 
-	text, err := ext.Extract(context.Background(), "scan.pdf")
+	text, err := ext.Extract(context.Background(), path)
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
 	if text != "text" {
 		t.Fatalf("unexpected OCR text: %q", text)
+	}
+}
+
+func TestPDFExtractor_RejectsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.pdf")
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	if err := f.Truncate(maxExtractorFileSize + 1); err != nil {
+		_ = f.Close()
+		t.Fatalf("unexpected truncate error: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	ext := &PDFExtractor{
+		extractNative: func(ctx context.Context, path string) (string, error) {
+			t.Fatal("native extractor should not run for oversized files")
+			return "", nil
+		},
+	}
+
+	if _, err := ext.Extract(context.Background(), path); err == nil {
+		t.Fatal("expected oversized PDF to be rejected")
 	}
 }
 
@@ -349,7 +399,10 @@ func TestExtractWordMLText_PreservesParagraphs(t *testing.T) {
 		</w:document>
 	`)
 
-	text := extractWordMLText(xmlData)
+	text, err := extractWordMLText(context.Background(), xmlData)
+	if err != nil {
+		t.Fatalf("unexpected WordML extraction error: %v", err)
+	}
 	if text != "First paragraph.\n\nSecond paragraph." {
 		t.Fatalf("unexpected WordML extraction: %q", text)
 	}
@@ -368,7 +421,10 @@ func TestParseSheetCells_IncludesRefsAndFormulas(t *testing.T) {
 		</worksheet>
 	`)
 
-	rows := parseSheetCells(xmlData, []string{"Policy Number"})
+	rows, err := parseSheetCells(context.Background(), xmlData, []string{"Policy Number"})
+	if err != nil {
+		t.Fatalf("unexpected sheet parse error: %v", err)
+	}
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
@@ -418,6 +474,23 @@ func TestRTFExtractor_Unicode(t *testing.T) {
 	}
 }
 
+func TestNotebookExtractor_RespectsCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.ipynb")
+	content := `{"cells":[{"cell_type":"markdown","source":"hello"}]}`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ext := &NotebookExtractor{}
+	if _, err := ext.Extract(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
 func TestExtractNotesText(t *testing.T) {
 	// Minimal notesSlide XML with speaker notes content.
 	xmlData := []byte(`
@@ -436,7 +509,10 @@ func TestExtractNotesText(t *testing.T) {
 		</p:notes>
 	`)
 
-	text := extractNotesText(xmlData)
+	text, err := extractNotesText(context.Background(), xmlData)
+	if err != nil {
+		t.Fatalf("unexpected notes extraction error: %v", err)
+	}
 	if text != "Speaker notes text here." {
 		t.Fatalf("unexpected notes extraction: %q", text)
 	}

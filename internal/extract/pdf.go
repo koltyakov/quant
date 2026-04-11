@@ -20,7 +20,7 @@ const defaultPDFOCRTimeout = 2 * time.Minute
 
 type PDFExtractor struct {
 	findOCRBinary func() (string, bool)
-	extractNative func(path string) (string, error)
+	extractNative func(ctx context.Context, path string) (string, error)
 	runOCR        func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error)
 	ocrLanguages  string
 	ocrTimeout    time.Duration
@@ -31,7 +31,15 @@ type PDFExtractor struct {
 }
 
 func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error) {
-	text, err := p.nativeExtractor()(path)
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+
+	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
+		return "", err
+	}
+
+	text, err := p.nativeExtractor()(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -63,7 +71,11 @@ func (p *PDFExtractor) timeout() time.Duration {
 	return defaultPDFOCRTimeout
 }
 
-func extractPDFText(path string) (string, error) {
+func extractPDFText(ctx context.Context, path string) (string, error) {
+	if err := checkContext(ctx); err != nil {
+		return "", err
+	}
+
 	f, r, err := pdf.Open(path)
 	if err != nil {
 		return "", err
@@ -73,12 +85,17 @@ func extractPDFText(path string) (string, error) {
 	var parts []string
 	pageCount := r.NumPage()
 	for i := 1; i <= pageCount; i++ {
+		if err := checkContext(ctx); err != nil {
+			return "", err
+		}
+
 		page := r.Page(i)
 		if page.V.IsNull() {
 			continue
 		}
 		content, err := page.GetPlainText(nil)
 		if err != nil {
+			log.Printf("PDF text extraction skipped page %d in %s: %v", i, path, err)
 			continue
 		}
 		content = strings.TrimSpace(content)
@@ -94,7 +111,7 @@ func extractPDFText(path string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
-func (p *PDFExtractor) nativeExtractor() func(path string) (string, error) {
+func (p *PDFExtractor) nativeExtractor() func(ctx context.Context, path string) (string, error) {
 	if p.extractNative != nil {
 		return p.extractNative
 	}
