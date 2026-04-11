@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type Server struct {
 	cfg      *config.Config
 	store    *index.Store
 	embedder embed.Embedder
+	version  string
 	mcp      *mcpserver.MCPServer
 
 	embCacheMu sync.Mutex
@@ -30,16 +32,22 @@ const (
 	shutdownTimeout = 5 * time.Second
 )
 
-func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder) *Server {
+func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder, version string) *Server {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "dev"
+	}
+
 	s := &Server{
 		cfg:        cfg,
 		store:      store,
 		embedder:   embedder,
+		version:    version,
 		embCache:   newEmbeddingLRU(embCacheMaxSize),
 		embFlights: make(map[string]*embeddingFlight),
 	}
 
-	s.mcp = mcpserver.NewMCPServer("quant", "1.0.0")
+	s.mcp = mcpserver.NewMCPServer("quant", version)
 	s.registerTools()
 
 	return s

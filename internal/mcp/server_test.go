@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"path/filepath"
@@ -411,6 +412,57 @@ func TestHandleSearch_ReturnsMatchingResults(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_TruncatesLargeResultsToOutputBudget(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	longChunk := strings.Repeat("alpha ", maxSearchOutputRunes)
+	for i := 0; i < 16; i++ {
+		path := fmt.Sprintf("notes/%d.txt", i)
+		if err := store.ReindexDocument(context.Background(), &index.Document{
+			Path:       path,
+			Hash:       path + "-hash",
+			ModifiedAt: testTime(),
+		}, []index.ChunkRecord{{
+			Content:    longChunk,
+			ChunkIndex: 0,
+			Embedding:  index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),
+		}}); err != nil {
+			t.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+
+	result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{
+			Name:      "search",
+			Arguments: map[string]any{"query": "alpha", "limit": float64(16)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected search error: %v", err)
+	}
+
+	text := extractToolText(t, result)
+	if !strings.Contains(text, "[chunk content truncated]") {
+		t.Fatalf("expected chunk truncation marker, got %q", text)
+	}
+	if !strings.Contains(text, "[omitted") {
+		t.Fatalf("expected output budget marker, got %q", text)
+	}
+	if len([]rune(text)) > maxSearchOutputRunes+128 {
+		t.Fatalf("expected bounded output, got %d runes", len([]rune(text)))
+	}
+}
+
 func TestHandleSearch_PathFilter(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
@@ -801,6 +853,13 @@ func TestHandleIndexStatus(t *testing.T) {
 	}
 }
 
+func TestNewServer_UsesRuntimeVersion(t *testing.T) {
+	s := NewServer(&config.Config{}, nil, &countingEmbedder{}, "v9.9.9")
+	if s.version != "v9.9.9" {
+		t.Fatalf("expected server version to match runtime version, got %q", s.version)
+	}
+}
+
 func newTestServer(dir, dbPath string, store *index.Store) *Server {
 	return &Server{
 		cfg: &config.Config{
@@ -810,6 +869,7 @@ func newTestServer(dir, dbPath string, store *index.Store) *Server {
 		},
 		store:      store,
 		embedder:   &countingEmbedder{},
+		version:    "test-version",
 		embCache:   newEmbeddingLRU(2),
 		embFlights: make(map[string]*embeddingFlight),
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log"
 	"os"
 	"strings"
 )
@@ -125,8 +126,9 @@ func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) 
 	}
 	defer func() { _ = f.Close() }()
 
+	truncated := false
 	if info, err := f.Stat(); err == nil && info.Size() > maxTextReadBytes {
-		return "", nil
+		truncated = true
 	}
 
 	data, err := io.ReadAll(io.LimitReader(f, maxTextReadBytes+1))
@@ -134,10 +136,14 @@ func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) 
 		return "", err
 	}
 	if int64(len(data)) > maxTextReadBytes {
-		return "", nil
+		data = data[:maxTextReadBytes]
+		truncated = true
 	}
 	if looksBinaryTextSample(data) {
 		return "", nil
+	}
+	if truncated {
+		log.Printf("Text extractor truncated %s at %d bytes", path, maxTextReadBytes)
 	}
 
 	return string(data), nil

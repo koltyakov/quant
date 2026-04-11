@@ -263,7 +263,7 @@ func TestTextExtractor_Extract(t *testing.T) {
 	}
 }
 
-func TestTextExtractor_SkipsOversizedFiles(t *testing.T) {
+func TestTextExtractor_TruncatesOversizedFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.log")
 	content := strings.Repeat("a", maxTextReadBytes+1)
@@ -276,8 +276,11 @@ func TestTextExtractor_SkipsOversizedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if text != "" {
-		t.Fatalf("expected oversized file to be skipped, got %q", text[:min(len(text), 32)])
+	if len(text) != maxTextReadBytes {
+		t.Fatalf("expected oversized file to be truncated to %d bytes, got %d", maxTextReadBytes, len(text))
+	}
+	if text != content[:maxTextReadBytes] {
+		t.Fatalf("expected oversized file content to be truncated, got %q", text[:min(len(text), 32)])
 	}
 }
 

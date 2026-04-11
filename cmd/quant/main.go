@@ -125,7 +125,7 @@ func runMCP(cfg *config.Config) error {
 		idx.runInitialSync(serverCtx)
 	}()
 
-	mcpServer := mcp.NewServer(cfg, store, embedder)
+	mcpServer := mcp.NewServer(cfg, store, embedder, Version)
 	log.Printf("Starting MCP server (transport: %s)", cfg.Transport)
 
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {

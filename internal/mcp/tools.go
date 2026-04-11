@@ -48,11 +48,13 @@ func (s *Server) registerTools() {
 // Queries beyond this length are truncated before embedding to avoid sending
 // unnecessarily large payloads to the embedding backend.
 const (
-	maxQueryLength      = 4000
-	defaultSearchLimit  = 5
-	maxSearchLimit      = 50
-	defaultSourcesLimit = 100
-	maxSourcesLimit     = 500
+	maxQueryLength        = 4000
+	defaultSearchLimit    = 5
+	maxSearchLimit        = 50
+	defaultSourcesLimit   = 100
+	maxSourcesLimit       = 500
+	maxResultSnippetRunes = 1200
+	maxSearchOutputRunes  = 12000
 )
 
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -134,13 +136,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		return mcplib.NewToolResultText("No results found."), nil
 	}
 
-	output := ""
-	for i, r := range filtered {
-		output += fmt.Sprintf("--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n%s\n\n",
-			i+1, r.Score, r.ScoreKind, r.DocumentPath, r.ChunkIndex, r.ChunkContent)
-	}
-
-	return mcplib.NewToolResultText(output), nil
+	return mcplib.NewToolResultText(formatSearchResults(filtered)), nil
 }
 
 func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {
@@ -405,4 +401,105 @@ func formatDocumentSpotlights(docs []index.Document, limit int) string {
 		parts = append(parts, docs[i].Path)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func formatSearchResults(results []index.SearchResult) string {
+	if len(results) == 0 {
+		return "No results found."
+	}
+
+	var b strings.Builder
+	remaining := maxSearchOutputRunes
+	rendered := 0
+
+	for i, r := range results {
+		entry := renderSearchResultEntry(i+1, r, maxResultSnippetRunes)
+		entryRunes := len([]rune(entry))
+		if entryRunes > remaining {
+			if rendered == 0 {
+				entry = renderSearchResultEntry(i+1, r, entrySnippetBudget(r, remaining))
+				entryRunes = len([]rune(entry))
+				if entryRunes > remaining {
+					entry = truncateRunes(entry, remaining)
+					entryRunes = len([]rune(entry))
+				}
+				if entryRunes > 0 {
+					b.WriteString(entry)
+					remaining -= entryRunes
+					rendered++
+				}
+			}
+			break
+		}
+
+		b.WriteString(entry)
+		remaining -= entryRunes
+		rendered++
+	}
+
+	if omitted := len(results) - rendered; omitted > 0 && remaining > 0 {
+		footer := fmt.Sprintf("[omitted %d additional result(s) to stay within the output budget]\n", omitted)
+		if len([]rune(footer)) > remaining {
+			footer = truncateRunes(footer, remaining)
+		}
+		b.WriteString(footer)
+	}
+
+	return b.String()
+}
+
+func renderSearchResultEntry(position int, result index.SearchResult, snippetLimit int) string {
+	header := fmt.Sprintf(
+		"--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n",
+		position,
+		result.Score,
+		result.ScoreKind,
+		result.DocumentPath,
+		result.ChunkIndex,
+	)
+
+	content := strings.TrimSpace(result.ChunkContent)
+	snippet, truncated := truncateRunesWithFlag(content, snippetLimit)
+
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString(snippet)
+	if truncated {
+		b.WriteString("\n[chunk content truncated]")
+	}
+	b.WriteString("\n\n")
+	return b.String()
+}
+
+func entrySnippetBudget(result index.SearchResult, totalBudget int) int {
+	header := fmt.Sprintf(
+		"--- Result %d (score: %.4f, kind: %s) ---\nFile: %s (chunk %d)\n",
+		1,
+		result.Score,
+		result.ScoreKind,
+		result.DocumentPath,
+		result.ChunkIndex,
+	)
+	reserved := len([]rune(header)) + len([]rune("\n[chunk content truncated]\n\n"))
+	if totalBudget <= reserved {
+		return 0
+	}
+	return totalBudget - reserved
+}
+
+func truncateRunesWithFlag(text string, limit int) (string, bool) {
+	if limit <= 0 {
+		return "", strings.TrimSpace(text) != ""
+	}
+
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text, false
+	}
+	return string(runes[:limit]), true
+}
+
+func truncateRunes(text string, limit int) string {
+	truncated, _ := truncateRunesWithFlag(text, limit)
+	return truncated
 }
