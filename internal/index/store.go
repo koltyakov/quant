@@ -20,10 +20,13 @@ import (
 )
 
 type Store struct {
-	db     *sql.DB
-	dbPath string
-	backup string // non-empty if a pre-existing DB was backed up due to migration failure
+	db                        *sql.DB
+	dbPath                    string
+	backup                    string // non-empty if a pre-existing DB was backed up due to migration failure
+	maxVectorSearchCandidates int
 }
+
+const defaultMaxVectorSearchCandidates = 20000
 
 // NewStore opens (or creates) a SQLite database at dbPath.
 // If the database exists but migration fails, the old file is backed up and a
@@ -88,7 +91,11 @@ func openStore(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(conns)
 	db.SetMaxIdleConns(conns / 2)
 
-	s := &Store{db: db, dbPath: dbPath}
+	s := &Store{
+		db:                        db,
+		dbPath:                    dbPath,
+		maxVectorSearchCandidates: defaultMaxVectorSearchCandidates,
+	}
 	for _, pragma := range []string{
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA synchronous = NORMAL`,
@@ -117,6 +124,10 @@ func (s *Store) Close() error {
 
 func (s *Store) PingContext(ctx context.Context) error {
 	return s.db.PingContext(ctx)
+}
+
+func (s *Store) SetMaxVectorSearchCandidates(max int) {
+	s.maxVectorSearchCandidates = max
 }
 
 func (s *Store) migrate() error {
@@ -467,6 +478,11 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	if limit <= 0 {
 		return nil, nil
 	}
+	if ok, err := s.canRunVectorFallback(ctx, pathPrefix); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, nil
+	}
 
 	var rows *sql.Rows
 	var err error
@@ -492,6 +508,63 @@ func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limi
 	defer func() { _ = rows.Close() }()
 
 	return rerankByVector(rows, queryEmbedding, limit, exclude)
+}
+
+func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bool, error) {
+	if s.maxVectorSearchCandidates == 0 {
+		log.Printf("Skipping brute-force vector fallback: max_vector_candidates=0")
+		return false, nil
+	}
+	if s.maxVectorSearchCandidates < 0 {
+		return true, nil
+	}
+
+	probeLimit := s.maxVectorSearchCandidates + 1
+	var rows *sql.Rows
+	var err error
+	if pathPrefix != "" {
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT c.id
+			 FROM chunks c
+			 JOIN documents d ON c.document_id = d.id
+			 WHERE d.path LIKE ? ESCAPE '\'
+			 LIMIT ?`,
+			pathPattern, probeLimit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT c.id
+			 FROM chunks c
+			 LIMIT ?`,
+			probeLimit,
+		)
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	count := 0
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if count > s.maxVectorSearchCandidates {
+		log.Printf(
+			"Skipping brute-force vector fallback: candidate_count>%d path_prefix=%q",
+			s.maxVectorSearchCandidates,
+			pathPrefix,
+		)
+		return false, nil
+	}
+	return true, nil
 }
 
 // rerankKeywordCandidates combines keyword rank with vector similarity rank

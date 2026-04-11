@@ -79,11 +79,12 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | `--chunk-size` | `512` | Target chunk size in approximate words |
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0–1) |
 | `--index-workers` | auto (`2-8`) | Parallel workers for startup indexing |
+| `--max-vector-candidates` | `20000` | Maximum chunks eligible for brute-force vector fallback; `0` disables vector-only fallback |
 | `--config` | - | YAML config file path |
 
 All flags can also be set via env vars:
 `QUANT_DIR`, `QUANT_DB`, `QUANT_TRANSPORT`, `QUANT_LISTEN`, `QUANT_EMBED_URL`, `QUANT_EMBED_MODEL`, `QUANT_PDF_OCR_LANG`, `QUANT_CHUNK_SIZE`, `QUANT_CHUNK_OVERLAP`.
-Also `QUANT_INDEX_WORKERS`.
+Also `QUANT_INDEX_WORKERS` and `QUANT_MAX_VECTOR_CANDIDATES`.
 
 Automatic self-update is controlled separately via `QUANT_AUTOUPDATE=true`.
 

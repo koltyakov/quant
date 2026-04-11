@@ -24,31 +24,33 @@ const (
 )
 
 type Config struct {
-	WatchDir      string        `yaml:"dir"`
-	DBPath        string        `yaml:"db"`
-	Transport     Transport     `yaml:"transport"`
-	ListenAddr    string        `yaml:"listen"`
-	EmbedURL      string        `yaml:"embed_url"`
-	EmbedModel    string        `yaml:"embed_model"`
-	PDFOCRLang    string        `yaml:"pdf_ocr_lang"`
-	PDFOCRTimeout time.Duration `yaml:"pdf_ocr_timeout"`
-	ChunkSize     int           `yaml:"chunk_size"`
-	ChunkOverlap  float64       `yaml:"chunk_overlap"`
-	IndexWorkers  int           `yaml:"index_workers"`
-	ConfigFile    string        `yaml:"-"`
+	WatchDir            string        `yaml:"dir"`
+	DBPath              string        `yaml:"db"`
+	Transport           Transport     `yaml:"transport"`
+	ListenAddr          string        `yaml:"listen"`
+	EmbedURL            string        `yaml:"embed_url"`
+	EmbedModel          string        `yaml:"embed_model"`
+	PDFOCRLang          string        `yaml:"pdf_ocr_lang"`
+	PDFOCRTimeout       time.Duration `yaml:"pdf_ocr_timeout"`
+	ChunkSize           int           `yaml:"chunk_size"`
+	ChunkOverlap        float64       `yaml:"chunk_overlap"`
+	IndexWorkers        int           `yaml:"index_workers"`
+	MaxVectorCandidates int           `yaml:"max_vector_candidates"`
+	ConfigFile          string        `yaml:"-"`
 }
 
 func Default() *Config {
 	return &Config{
-		Transport:     TransportStdio,
-		ListenAddr:    ":8080",
-		EmbedURL:      "http://localhost:11434",
-		EmbedModel:    "nomic-embed-text",
-		PDFOCRLang:    "eng",
-		PDFOCRTimeout: 2 * time.Minute,
-		ChunkSize:     512,
-		ChunkOverlap:  0.15,
-		IndexWorkers:  defaultIndexWorkers(),
+		Transport:           TransportStdio,
+		ListenAddr:          ":8080",
+		EmbedURL:            "http://localhost:11434",
+		EmbedModel:          "nomic-embed-text",
+		PDFOCRLang:          "eng",
+		PDFOCRTimeout:       2 * time.Minute,
+		ChunkSize:           512,
+		ChunkOverlap:        0.15,
+		IndexWorkers:        defaultIndexWorkers(),
+		MaxVectorCandidates: 20000,
 	}
 }
 
@@ -77,6 +79,9 @@ func (c *Config) Validate() error {
 	}
 	if c.IndexWorkers < 1 || c.IndexWorkers > 64 {
 		return fmt.Errorf("index_workers must be between 1 and 64")
+	}
+	if c.MaxVectorCandidates < 0 {
+		return fmt.Errorf("max_vector_candidates must be >= 0")
 	}
 	return nil
 }
@@ -143,6 +148,8 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.ChunkOverlap = mustParseFloatFlag(f.Name, f.Value.String(), cfg.ChunkOverlap)
 		case "index-workers":
 			cfg.IndexWorkers = mustParseIntFlag(f.Name, f.Value.String(), cfg.IndexWorkers)
+		case "max-vector-candidates":
+			cfg.MaxVectorCandidates = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxVectorCandidates)
 		}
 	})
 
@@ -192,6 +199,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
+	flagSet.IntVar(&cfg.MaxVectorCandidates, "max-vector-candidates", cfg.MaxVectorCandidates, "Maximum chunks eligible for brute-force vector fallback (0 disables it)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg
@@ -209,17 +217,18 @@ func loadYAML(cfg *Config, path string) error {
 	baseDir := filepath.Dir(path)
 
 	type fileConfig struct {
-		WatchDir      string    `yaml:"dir"`
-		DBPath        string    `yaml:"db"`
-		Transport     Transport `yaml:"transport"`
-		ListenAddr    string    `yaml:"listen"`
-		EmbedURL      string    `yaml:"embed_url"`
-		EmbedModel    string    `yaml:"embed_model"`
-		PDFOCRLang    string    `yaml:"pdf_ocr_lang"`
-		PDFOCRTimeout *string   `yaml:"pdf_ocr_timeout"`
-		ChunkSize     *int      `yaml:"chunk_size"`
-		ChunkOverlap  *float64  `yaml:"chunk_overlap"`
-		IndexWorkers  *int      `yaml:"index_workers"`
+		WatchDir            string    `yaml:"dir"`
+		DBPath              string    `yaml:"db"`
+		Transport           Transport `yaml:"transport"`
+		ListenAddr          string    `yaml:"listen"`
+		EmbedURL            string    `yaml:"embed_url"`
+		EmbedModel          string    `yaml:"embed_model"`
+		PDFOCRLang          string    `yaml:"pdf_ocr_lang"`
+		PDFOCRTimeout       *string   `yaml:"pdf_ocr_timeout"`
+		ChunkSize           *int      `yaml:"chunk_size"`
+		ChunkOverlap        *float64  `yaml:"chunk_overlap"`
+		IndexWorkers        *int      `yaml:"index_workers"`
+		MaxVectorCandidates *int      `yaml:"max_vector_candidates"`
 	}
 
 	var parsed fileConfig
@@ -265,6 +274,9 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.IndexWorkers != nil {
 		cfg.IndexWorkers = *parsed.IndexWorkers
 	}
+	if parsed.MaxVectorCandidates != nil {
+		cfg.MaxVectorCandidates = *parsed.MaxVectorCandidates
+	}
 
 	return nil
 }
@@ -309,6 +321,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" {
 		cfg.IndexWorkers = mustParseIntEnv("QUANT_INDEX_WORKERS", v, cfg.IndexWorkers)
+	}
+	if v := os.Getenv("QUANT_MAX_VECTOR_CANDIDATES"); v != "" {
+		cfg.MaxVectorCandidates = mustParseIntEnv("QUANT_MAX_VECTOR_CANDIDATES", v, cfg.MaxVectorCandidates)
 	}
 }
 

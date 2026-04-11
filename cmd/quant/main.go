@@ -62,6 +62,7 @@ func runMCP(cfg *config.Config) error {
 	}()
 
 	log.Printf("Database opened: %s", cfg.DBPath)
+	store.SetMaxVectorSearchCandidates(cfg.MaxVectorCandidates)
 
 	rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
 		Model:      cfg.EmbedModel,
