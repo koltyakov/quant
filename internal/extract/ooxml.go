@@ -829,11 +829,12 @@ func writeParagraphBreak(buf *strings.Builder) {
 	if buf.Len() == 0 {
 		return
 	}
-	text := buf.String()
-	if strings.HasSuffix(text, "\n\n") {
+	s := buf.String()
+	n := len(s)
+	if n >= 2 && s[n-1] == '\n' && s[n-2] == '\n' {
 		return
 	}
-	if strings.HasSuffix(text, "\n") {
+	if n >= 1 && s[n-1] == '\n' {
 		buf.WriteByte('\n')
 		return
 	}

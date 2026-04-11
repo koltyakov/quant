@@ -358,7 +358,13 @@ func isStandaloneMarker(line string) bool {
 
 // isHeading returns true for markdown headings.
 func isHeading(line string) bool {
-	return strings.HasPrefix(line, "#")
+	if !strings.HasPrefix(line, "#") {
+		return false
+	}
+	if strings.HasPrefix(line, "#!") {
+		return false
+	}
+	return true
 }
 
 // isDocumentMarker returns true for structural document markers like [Page N], [Slide N], etc.

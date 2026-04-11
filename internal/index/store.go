@@ -221,14 +221,6 @@ func (s *Store) InsertChunk(ctx context.Context, chunk *ChunkRecord) error {
 }
 
 func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord) error {
-	// Remove existing chunks from HNSW before the DB delete so we have their IDs.
-	if s.hnsw != nil && s.hnsw.ready.Load() {
-		existingDoc, err := s.GetDocumentByPath(ctx, doc.Path)
-		if err == nil && existingDoc != nil {
-			s.hnswDeleteChunks(ctx, existingDoc.ID)
-		}
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -240,8 +232,28 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		return err
 	}
 
+	// Remove existing chunks from HNSW inside the transaction so we have
+	// deterministic cleanup even under concurrent calls for the same path.
+	var hnswDeleteIDs []int
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
+		if err == nil {
+			for rows.Next() {
+				var id int
+				if rows.Scan(&id) == nil {
+					hnswDeleteIDs = append(hnswDeleteIDs, id)
+				}
+			}
+			_ = rows.Close()
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting existing chunks: %w", err)
+	}
+
+	for _, id := range hnswDeleteIDs {
+		s.hnsw.Delete(id)
 	}
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?) RETURNING id`)
@@ -272,8 +284,10 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 
 	// Add newly inserted chunks to HNSW after commit.
 	if s.hnsw != nil && s.hnsw.ready.Load() {
-		meta, _ := s.embeddingMetadata(ctx)
-		if meta != nil && meta.Dimensions > 0 {
+		meta, metaErr := s.embeddingMetadata(ctx)
+		if metaErr != nil {
+			logx.Warn("failed to read embedding metadata for HNSW update", "err", metaErr)
+		} else if meta != nil && meta.Dimensions > 0 {
 			for _, ic := range inserted {
 				vec := decodeEmbeddingForHNSW(ic.embedding, meta.Dimensions)
 				if len(vec) > 0 {
@@ -316,7 +330,7 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 }
 
 func ChunkDiffKey(content string, chunkIndex int) string {
-	h := sha256.Sum256([]byte(content))
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", chunkIndex, content)))
 	return fmt.Sprintf("%x", h[:8])
 }
 
@@ -326,16 +340,32 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, path string) error {
+	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		doc, err := s.GetDocumentByPath(ctx, path)
 		if err == nil && doc != nil {
-			s.hnswDeleteChunks(ctx, doc.ID)
+			rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, doc.ID)
+			if err == nil {
+				for rows.Next() {
+					var id int
+					if rows.Scan(&id) == nil {
+						hnswDeleteIDs = append(hnswDeleteIDs, id)
+					}
+				}
+				_ = rows.Close()
+			}
 		}
 	}
+
 	_, err := s.db.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
 	if err != nil {
 		return err
 	}
+
+	for _, id := range hnswDeleteIDs {
+		s.hnsw.Delete(id)
+	}
+
 	s.FlushHNSW()
 	return nil
 }
@@ -679,43 +709,23 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bo
 		return true, nil
 	}
 
-	probeLimit := s.maxVectorSearchCandidates + 1
-	var rows *sql.Rows
-	var err error
+	var count int
 	if pathPrefix != "" {
 		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id
-			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id
-			 WHERE d.path LIKE ? ESCAPE '\'
-			 LIMIT ?`,
-			pathPattern, probeLimit,
-		)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id
-			 FROM chunks c
-			 LIMIT ?`,
-			probeLimit,
-		)
-	}
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	count := 0
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
+		err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path LIKE ? ESCAPE '\'`,
+			pathPattern,
+		).Scan(&count)
+		if err != nil {
 			return false, err
 		}
-		count++
+	} else {
+		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&count)
+		if err != nil {
+			return false, err
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
+
 	if count > s.maxVectorSearchCandidates {
 		logx.Info("skipping brute-force vector fallback", "candidate_count_over", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return false, nil
@@ -1102,6 +1112,12 @@ func (s *Store) resetIndex(ctx context.Context) error {
 
 var ftsTokenPattern = regexp.MustCompile(`[\pL\pN_]+`)
 
+var ftsOperatorPattern = regexp.MustCompile(`\b(AND|OR|NOT|NEAR)\b`)
+
+func ftsSanitizePhrase(phrase string) string {
+	return ftsOperatorPattern.ReplaceAllString(phrase, "")
+}
+
 // camelCasePattern matches camelCase identifiers (at least one lowercase letter followed by an uppercase).
 var camelCasePattern = regexp.MustCompile(`[a-z][A-Z]`)
 
@@ -1152,7 +1168,7 @@ func splitIdentifier(token string) []string {
 // "getUserName" also matches chunks containing the individual words.
 // Prefix matching: the last bare token gets a "*" suffix for autocomplete-style matching.
 func buildFTSQueries(query string) (andQuery, orQuery, nearQuery string) {
-	// Extract quoted phrases first.
+	// Extract quoted phrases first and sanitize them for FTS5.
 	var phrases []string
 	remaining := query
 	for {
@@ -1166,6 +1182,7 @@ func buildFTSQueries(query string) (andQuery, orQuery, nearQuery string) {
 		}
 		phrase := strings.TrimSpace(remaining[start+1 : start+1+end])
 		if phrase != "" {
+			phrase = ftsSanitizePhrase(phrase)
 			phrases = append(phrases, `"`+phrase+`"`)
 		}
 		remaining = remaining[:start] + " " + remaining[start+1+end+1:]

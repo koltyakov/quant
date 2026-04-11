@@ -244,8 +244,5 @@ func (s *Server) releaseToolSlot() {
 		return
 	}
 
-	select {
-	case <-s.toolLimiter:
-	default:
-	}
+	<-s.toolLimiter
 }
