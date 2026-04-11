@@ -25,7 +25,7 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 	// Collect top-level declaration text blocks.
 	var decls []string
 	for _, decl := range f.Decls {
-		// Skip import declarations — already in preamble.
+		// Skip import declarations - already in preamble.
 		if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
 			continue
 		}
@@ -45,7 +45,7 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 	}
 
 	// Merge adjacent small declarations up to chunkSize, prepending preamble to each chunk.
-	// Overlap is intentionally skipped for code chunks — declaration boundaries are cleaner
+	// Overlap is intentionally skipped for code chunks - declaration boundaries are cleaner
 	// split points than word-count overlaps.
 	var chunks []Chunk
 	var current []string

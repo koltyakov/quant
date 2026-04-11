@@ -40,7 +40,7 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 		return nil
 	}
 
-	// Overlap is skipped for code chunks — declaration boundaries are cleaner split points.
+	// Overlap is skipped for code chunks - declaration boundaries are cleaner split points.
 	var chunks []Chunk
 	var current []string
 	currentWords := 0

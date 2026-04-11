@@ -246,7 +246,7 @@ func (s *Store) searchVectorHNSW(ctx context.Context, queryEmbedding []float32, 
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	//nolint:gosec // placeholders are all literal "?" — no user input in the query string
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
 	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
 	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
