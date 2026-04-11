@@ -67,28 +67,7 @@ func (idx *indexer) runInitialSync(ctx context.Context) {
 	if !idx.beginResync() {
 		return
 	}
-	idx.store.LoadHNSW()
-	idx.checkHNSWStaleness(ctx)
 	idx.runResyncLoop(ctx, true)
-}
-
-func (idx *indexer) checkHNSWStaleness(ctx context.Context) {
-	if !idx.store.HNSWReady() {
-		return
-	}
-	_, chunkCount, err := idx.store.Stats(ctx)
-	if err != nil {
-		logx.Warn("could not verify hnsw staleness", "err", err)
-		return
-	}
-	hnswNodes := idx.store.HNSWLen()
-	if hnswNodes != chunkCount {
-		logx.Warn("hnsw graph stale, performing incremental repair", "hnsw_nodes", hnswNodes, "db_chunks", chunkCount)
-		if err := idx.store.RepairHNSW(ctx); err != nil {
-			logx.Warn("hnsw repair failed; discarding for full rebuild", "err", err)
-			idx.store.ResetHNSW()
-		}
-	}
 }
 
 func (idx *indexer) requestResync(ctx context.Context) {
@@ -705,7 +684,7 @@ func (idx *indexer) diffChunks(chunks []chunk.Chunk, existingByContent map[strin
 	var embedPositions []pendingEmbed
 
 	for i, c := range chunks {
-		key := index.ChunkDiffKey(c.Content, c.Index)
+		key := index.ChunkDiffKey(c.Content)
 		if existing, ok := existingByContent[key]; ok {
 			chunkRecords = append(chunkRecords, index.ChunkRecord{
 				Content:    c.Content,
