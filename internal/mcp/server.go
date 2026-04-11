@@ -19,7 +19,7 @@ import (
 
 type Server struct {
 	cfg      *config.Config
-	store    *index.Store
+	store    index.Searcher
 	embedder embed.Embedder
 	version  string
 	mcp      *mcpserver.MCPServer
@@ -44,7 +44,7 @@ const (
 	maxConcurrentToolCalls = 4
 )
 
-func NewServer(cfg *config.Config, store *index.Store, embedder embed.Embedder, version string) *Server {
+func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string) *Server {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		version = "dev"

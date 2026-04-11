@@ -1,6 +1,9 @@
 package index
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Document struct {
 	ID         int64
@@ -30,4 +33,11 @@ type SearchResult struct {
 	ChunkIndex   int
 	Score        float32
 	ScoreKind    string
+}
+
+type Searcher interface {
+	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
+	ListDocumentsLimit(ctx context.Context, limit int) ([]Document, error)
+	Stats(ctx context.Context) (docCount int, chunkCount int, err error)
+	PingContext(ctx context.Context) error
 }

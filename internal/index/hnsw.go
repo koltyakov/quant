@@ -10,25 +10,29 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/hnsw"
 	"github.com/koltyakov/quant/internal/logx"
 )
 
 const (
-	hnswM         = 16  // max neighbors per node
-	hnswEfSearch  = 100 // ef during search (>95% recall typical)
-	hnswMinChunks = 500 // below this, brute-force is fine
+	hnswM            = 16  // max neighbors per node
+	hnswEfSearch     = 100 // ef during search (>95% recall typical)
+	hnswMinChunks    = 500 // below this, brute-force is fine
+	hnswFlushDelayMs = 500 // debounce window for batching HNSW disk flushes
 )
 
 // hnswIndex manages a persistent, in-memory HNSW approximate nearest-neighbor graph.
 // It is built lazily after initial sync and updated incrementally on chunk add/delete.
 type hnswIndex struct {
-	mu    sync.RWMutex
-	graph *hnsw.Graph[int]
-	path  string
-	ready atomic.Bool
-	dirty atomic.Bool
+	mu         sync.RWMutex
+	graph      *hnsw.Graph[int]
+	path       string
+	ready      atomic.Bool
+	dirty      atomic.Bool
+	flushMu    sync.Mutex
+	flushTimer *time.Timer
 }
 
 func newHNSWIndex(dbPath string) *hnswIndex {
@@ -153,6 +157,34 @@ func (h *hnswIndex) flush() error {
 	return h.persist()
 }
 
+func (h *hnswIndex) scheduleFlush() {
+	h.flushMu.Lock()
+	defer h.flushMu.Unlock()
+
+	if h.flushTimer != nil {
+		h.flushTimer.Stop()
+	}
+	h.flushTimer = time.AfterFunc(hnswFlushDelayMs*time.Millisecond, func() {
+		h.flushMu.Lock()
+		h.flushTimer = nil
+		h.flushMu.Unlock()
+
+		if err := h.flush(); err != nil {
+			logx.Warn("failed to flush hnsw graph", "err", err)
+		}
+	})
+}
+
+func (h *hnswIndex) stopFlushTimer() {
+	h.flushMu.Lock()
+	defer h.flushMu.Unlock()
+
+	if h.flushTimer != nil {
+		h.flushTimer.Stop()
+		h.flushTimer = nil
+	}
+}
+
 // BuildHNSW loads all embeddings from the database and builds the in-memory HNSW graph.
 // Call this after the initial index sync completes. Skips if corpus is below hnswMinChunks.
 func (s *Store) BuildHNSW(ctx context.Context) error {
@@ -220,11 +252,22 @@ func (s *Store) HNSWReady() bool {
 	return s.hnsw != nil && s.hnsw.ready.Load()
 }
 
-// FlushHNSW persists the HNSW graph to disk if it has been modified since the last persist.
+// FlushHNSW schedules a debounced HNSW graph flush. Multiple calls within the
+// flush window are coalesced into a single disk write.
 func (s *Store) FlushHNSW() {
 	if s.hnsw == nil {
 		return
 	}
+	s.hnsw.scheduleFlush()
+}
+
+// FlushHNSWNow flushes the HNSW graph to disk immediately, cancelling any
+// pending debounced flush. Use for critical paths like bulk deletes.
+func (s *Store) FlushHNSWNow() {
+	if s.hnsw == nil {
+		return
+	}
+	s.hnsw.stopFlushTimer()
 	if err := s.hnsw.flush(); err != nil {
 		logx.Warn("failed to flush hnsw graph", "err", err)
 	}
@@ -287,33 +330,51 @@ func (s *Store) searchVectorHNSW(ctx context.Context, queryEmbedding []float32, 
 // searchVectorHNSWWithPrefix uses HNSW to over-fetch candidates, then filters
 // by path prefix in SQL. Falls back to brute-force if HNSW returns too few
 // prefix-matching results.
+const hnswPrefixMaxRetries = 2
+
 func (s *Store) searchVectorHNSWWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, exclude map[int]*searchCandidate) ([]SearchResult, error) {
-	fetchK := (limit+len(exclude)+10)*3 + 50
-	ids := s.hnsw.Search(queryEmbedding, fetchK)
-	if len(ids) == 0 {
-		return nil, nil
+	baseFetchK := (limit+len(exclude)+10)*3 + 50
+	multiplier := 1
+
+	for attempt := 0; attempt <= hnswPrefixMaxRetries; attempt++ {
+		fetchK := baseFetchK * multiplier
+		ids := s.hnsw.Search(queryEmbedding, fetchK)
+		if len(ids) == 0 {
+			return nil, nil
+		}
+
+		placeholders := make([]string, len(ids))
+		args := make([]any, 0, len(ids)+1)
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		args = append(args, pathPattern)
+
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+		          FROM chunks c JOIN documents d ON c.document_id = d.id
+		          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := rerankByVector(rows, queryEmbedding, limit, exclude)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(results) >= limit || attempt == hnswPrefixMaxRetries {
+			return results, nil
+		}
+
+		multiplier *= 3
 	}
 
-	placeholders := make([]string, len(ids))
-	args := make([]any, 0, len(ids)+1)
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	pathPattern := sqlLikePrefixPattern(pathPrefix)
-	args = append(args, pathPattern)
-
-	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
-	          FROM chunks c JOIN documents d ON c.document_id = d.id
-	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	return rerankByVector(rows, queryEmbedding, limit, exclude)
+	return nil, nil
 }
 
 // hnswDeleteChunks removes all chunks belonging to a document from the HNSW graph.

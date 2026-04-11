@@ -212,7 +212,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-		isDir := w.isWatchedDir(path)
+		isDir := w.removeWatchedDirEntry(path)
 		if isDir && scan.IsHiddenName(base) {
 			return
 		}
@@ -252,7 +252,7 @@ func (w *Watcher) signalResyncDebounced() {
 	w.mu.Unlock()
 }
 
-func (w *Watcher) isWatchedDir(path string) bool {
+func (w *Watcher) removeWatchedDirEntry(path string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

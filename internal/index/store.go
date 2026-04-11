@@ -3,6 +3,7 @@ package index
 import (
 	"container/heap"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"errors"
@@ -133,6 +134,7 @@ func openStore(dbPath string) (*Store, error) {
 func (s *Store) Close() error {
 	var err error
 	if s != nil && s.db != nil {
+		s.FlushHNSWNow()
 		if _, checkpointErr := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); checkpointErr != nil {
 			err = errors.Join(err, fmt.Errorf("checkpointing sqlite wal: %w", checkpointErr))
 		}
@@ -314,7 +316,8 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 }
 
 func ChunkDiffKey(content string, chunkIndex int) string {
-	return strconv.Itoa(chunkIndex) + ":" + content
+	h := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", h[:8])
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
@@ -352,7 +355,7 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		if err != nil {
 			return err
 		}
-		s.FlushHNSW()
+		s.FlushHNSWNow()
 		return nil
 	}
 

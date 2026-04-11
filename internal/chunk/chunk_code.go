@@ -8,7 +8,7 @@ import (
 // topLevelBlockPattern matches lines that typically start a top-level declaration
 // in common languages: Go, Python, JavaScript/TypeScript, Rust, Java, C/C++.
 var topLevelBlockPattern = regexp.MustCompile(
-	`^(func |class |def |export |public |private |protected |fn |impl |type |const |var |let |interface |enum |struct )`,
+	`^(func |class |def |export |public |private |protected |fn |impl |type |const |var |let |interface |enum |struct |pub fn |pub struct |pub enum |pub type |pub const |pub static |object |module |trait |async fn |async def |async )`,
 )
 
 // splitCode splits source code using a heuristic: it identifies top-level block

@@ -71,6 +71,11 @@ type retryState struct {
 	timer    *time.Timer
 }
 
+type pendingEmbed struct {
+	chunkIdx int
+	batchPos int
+}
+
 type syncReport struct {
 	hadIndexFailures bool
 }
@@ -802,52 +807,71 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
+	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
+
+	chunkRecords, toEmbed, embedPositions, err := idx.diffChunks(chunks, existingByContent)
+	if err != nil {
+		return indexNoop, err
+	}
+
+	if err := idx.embedChunks(ctx, key, toEmbed, embedPositions, chunkRecords); err != nil {
+		return indexNoop, err
+	}
+
 	indexedDoc := &index.Document{
 		Path:       key,
 		Hash:       hash,
 		ModifiedAt: modTime,
 	}
 
-	// Load existing chunk embeddings keyed by content+index for incremental diffing.
-	// Unchanged chunks reuse their stored embedding, skipping the Ollama round-trip.
-	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
+	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
+		return indexNoop, err
+	}
+
+	return indexUpdated, nil
+}
+
+// diffChunks compares new chunks against existing stored chunks and produces
+// a slice of ChunkRecords. Unchanged chunks reuse their stored embedding;
+// new or modified chunks get placeholder entries that embedChunks fills in.
+func (idx *indexer) diffChunks(chunks []chunk.Chunk, existingByContent map[string]index.ChunkRecord) (
+	[]index.ChunkRecord, []chunk.Chunk, []pendingEmbed, error) {
 
 	chunkRecords := make([]index.ChunkRecord, 0, len(chunks))
-
-	// Collect chunks that need new embeddings (changed or new content).
-	type pendingEmbed struct {
-		chunkIdx int // index into chunks slice
-		batchPos int // position in the to-embed batch
-	}
 	var toEmbed []chunk.Chunk
 	var embedPositions []pendingEmbed
 
 	for i, c := range chunks {
 		key := index.ChunkDiffKey(c.Content, c.Index)
 		if existing, ok := existingByContent[key]; ok {
-			// Unchanged chunk: reuse stored embedding.
 			chunkRecords = append(chunkRecords, index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
 				Embedding:  existing.Embedding,
 			})
-			_ = i
 		} else {
 			embedPositions = append(embedPositions, pendingEmbed{chunkIdx: i, batchPos: len(toEmbed)})
 			toEmbed = append(toEmbed, c)
-			chunkRecords = append(chunkRecords, index.ChunkRecord{}) // placeholder
+			chunkRecords = append(chunkRecords, index.ChunkRecord{})
 		}
 	}
+	return chunkRecords, toEmbed, embedPositions, nil
+}
 
-	// Pipelined embedding: a producer goroutine sends batches to Ollama; the main
-	// goroutine accumulates results. Batch N+1 is in-flight while batch N is processed,
-	// hiding network latency for documents with multiple embedding batches.
+// embedChunks fills placeholder ChunkRecords with newly computed embeddings.
+// It uses pipelined batching: a producer goroutine sends batches to the
+// embedder while the main goroutine accumulates results.
+func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, embedPositions []pendingEmbed, chunkRecords []index.ChunkRecord) error {
+	if len(toEmbed) == 0 {
+		return nil
+	}
+
 	type batchResult struct {
 		batchStart int
 		embeddings [][]float32
 		err        error
 	}
-	resultCh := make(chan batchResult, 2) // buffer 2 to keep producer ahead
+	resultCh := make(chan batchResult, 2)
 
 	go func() {
 		defer close(resultCh)
@@ -859,7 +883,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 			batch := toEmbed[batchStart:batchEnd]
 			texts := make([]string, len(batch))
 			for i, c := range batch {
-				texts[i] = buildEmbedInput(key, c.Heading, c.Content)
+				texts[i] = buildEmbedInput(docKey, c.Heading, c.Content)
 			}
 			embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
 			select {
@@ -872,7 +896,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 
 	for result := range resultCh {
 		if result.err != nil {
-			return indexNoop, fmt.Errorf("embedding chunks from %d: %w", result.batchStart, result.err)
+			return fmt.Errorf("embedding chunks from %d: %w", result.batchStart, result.err)
 		}
 		batchStart := result.batchStart
 		batchEnd := batchStart + defaultEmbedBatchSize
@@ -881,7 +905,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		}
 		batch := toEmbed[batchStart:batchEnd]
 		if len(result.embeddings) != len(batch) {
-			return indexNoop, fmt.Errorf(
+			return fmt.Errorf(
 				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
 				batchStart, batchEnd-1, len(result.embeddings), len(batch),
 			)
@@ -895,15 +919,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 			}
 		}
 	}
-	if ctx.Err() != nil {
-		return indexNoop, ctx.Err()
-	}
-
-	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
-		return indexNoop, err
-	}
-
-	return indexUpdated, nil
+	return ctx.Err()
 }
 
 func (idx *indexer) shouldIgnorePath(path string) bool {
