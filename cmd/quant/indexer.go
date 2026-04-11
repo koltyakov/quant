@@ -83,8 +83,11 @@ func (idx *indexer) checkHNSWStaleness(ctx context.Context) {
 	}
 	hnswNodes := idx.store.HNSWLen()
 	if hnswNodes != chunkCount {
-		logx.Warn("hnsw graph stale, discarding for rebuild", "hnsw_nodes", hnswNodes, "db_chunks", chunkCount)
-		idx.store.ResetHNSW()
+		logx.Warn("hnsw graph stale, performing incremental repair", "hnsw_nodes", hnswNodes, "db_chunks", chunkCount)
+		if err := idx.store.RepairHNSW(ctx); err != nil {
+			logx.Warn("hnsw repair failed; discarding for full rebuild", "err", err)
+			idx.store.ResetHNSW()
+		}
 	}
 }
 
@@ -725,10 +728,13 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 
 	type batchResult struct {
 		batchStart int
+		batch      []chunk.Chunk
 		embeddings [][]float32
 		err        error
 	}
-	resultCh := make(chan batchResult, 2)
+
+	numBatches := (len(toEmbed) + defaultEmbedBatchSize - 1) / defaultEmbedBatchSize
+	resultCh := make(chan batchResult, min(numBatches, 4))
 
 	go func() {
 		defer close(resultCh)
@@ -746,7 +752,7 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 			select {
 			case <-ctx.Done():
 				return
-			case resultCh <- batchResult{batchStart: batchStart, embeddings: embeddings, err: err}:
+			case resultCh <- batchResult{batchStart: batchStart, batch: batch, embeddings: embeddings, err: err}:
 			}
 		}
 	}()
@@ -755,24 +761,19 @@ func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []ch
 		if result.err != nil {
 			return fmt.Errorf("embedding chunks from %d: %w", result.batchStart, result.err)
 		}
-		batchStart := result.batchStart
-		batchEnd := batchStart + defaultEmbedBatchSize
-		if batchEnd > len(toEmbed) {
-			batchEnd = len(toEmbed)
-		}
-		batch := toEmbed[batchStart:batchEnd]
+		batch := result.batch
 		if len(result.embeddings) != len(batch) {
 			return fmt.Errorf(
 				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
-				batchStart, batchEnd-1, len(result.embeddings), len(batch),
+				result.batchStart, result.batchStart+len(batch)-1, len(result.embeddings), len(batch),
 			)
 		}
 		for i, c := range batch {
-			globalIdx := embedPositions[batchStart+i].chunkIdx
+			globalIdx := embedPositions[result.batchStart+i].chunkIdx
 			chunkRecords[globalIdx] = index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
-				Embedding:  index.EncodeFloat32(index.NormalizeFloat32(result.embeddings[i])),
+				Embedding:  index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i])),
 			}
 		}
 	}
@@ -786,7 +787,10 @@ func (idx *indexer) shouldIgnorePath(path string) bool {
 	return isCompanionLogPathForDB(idx.cfg.DBPath, path)
 }
 
-func buildEmbedInput(_, _ string, content string) string {
+func buildEmbedInput(docKey, heading string, content string) string {
+	if heading != "" {
+		return heading + "\n\n" + content
+	}
 	return content
 }
 

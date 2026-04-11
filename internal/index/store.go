@@ -524,8 +524,9 @@ type searchCandidate struct {
 
 // Search performs hybrid search combining FTS5 keyword prefilter with vector reranking.
 // pathPrefix optionally restricts results to documents whose path starts with the given prefix.
-// It merges candidates from AND and OR FTS queries, reranks them together, then fills any
-// remaining result slots with vector-only matches.
+// If queryEmbedding is nil, only keyword (FTS5) search is performed.
+// It collects keyword candidates, then adds vector-only candidates, and finally applies a
+// unified RRF fusion score to all candidates so keyword and vector signals are comparable.
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -552,7 +553,6 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 		rankOffset += collected
 	}
 
-	// NEAR pass: boost candidates where query terms appear within 10 tokens of each other.
 	if nearQuery != "" {
 		_, err := s.collectFTSCandidates(ctx, nearQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
 		if err != nil {
@@ -560,20 +560,16 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 		}
 	}
 
-	keywordResults := rerankKeywordCandidates(keywordCandidates, limit, pathQueryTokens(query))
-	if len(keywordResults) >= limit {
-		return keywordResults, nil
+	var vectorOnlyCandidates map[int]*searchCandidate
+	if queryEmbedding != nil {
+		var err error
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	vectorResults, err := s.searchVector(ctx, queryEmbedding, limit-len(keywordResults), pathPrefix, keywordCandidates)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(keywordResults) == 0 {
-		return vectorResults, nil
-	}
-	return append(keywordResults, vectorResults...), nil
+	return unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query)), nil
 }
 
 func searchCandidateLimit(limit int) int {
@@ -652,54 +648,6 @@ func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, query
 	return rank, nil
 }
 
-// searchVector performs vector similarity search. It uses the HNSW approximate
-// nearest-neighbor index when available, falling back to brute-force scan for small
-// corpora or when the index is not yet ready.
-func (s *Store) searchVector(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, exclude map[int]*searchCandidate) ([]SearchResult, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-
-	// Prefer HNSW when ready.
-	if s.hnsw != nil && s.hnsw.ready.Load() {
-		if pathPrefix == "" {
-			return s.searchVectorHNSW(ctx, queryEmbedding, limit, exclude)
-		}
-		return s.searchVectorHNSWWithPrefix(ctx, queryEmbedding, limit, pathPrefix, exclude)
-	}
-
-	if ok, err := s.canRunVectorFallback(ctx, pathPrefix); err != nil {
-		return nil, err
-	} else if !ok {
-		return nil, nil
-	}
-
-	var rows *sql.Rows
-	var err error
-	if pathPrefix != "" {
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
-			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id
-			 WHERE d.path LIKE ? ESCAPE '\'`,
-			pathPattern,
-		)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
-			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id`,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	return rerankByVector(rows, queryEmbedding, limit, exclude)
-}
-
 func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bool, error) {
 	if s.maxVectorSearchCandidates == 0 {
 		logx.Info("skipping brute-force vector fallback", "reason", "max_vector_candidates=0")
@@ -749,41 +697,222 @@ func pathQueryTokens(query string) []string {
 	return tokens
 }
 
-// rerankKeywordCandidates combines keyword rank with vector similarity rank
-// using Reciprocal Rank Fusion: score = 1/(k+keywordRank) + 1/(k+vectorRank), k=60.
-// pathTokens are raw query tokens checked against the document path for a rank bonus.
-func rerankKeywordCandidates(candidates map[int]*searchCandidate, limit int, pathTokens []string) []SearchResult {
-	if len(candidates) == 0 || limit <= 0 {
+// collectVectorCandidates gathers vector-only candidates (not already in keywordCandidates)
+// and returns them keyed by chunk ID for unified RRF fusion.
+func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate) (map[int]*searchCandidate, error) {
+	vectorOnly := make(map[int]*searchCandidate)
+
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		if pathPrefix == "" {
+			s.collectHNSWCandidates(ctx, queryEmbedding, limit, keywordCandidates, vectorOnly)
+		} else {
+			s.collectHNSWCandidatesWithPrefix(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, vectorOnly)
+		}
+		return vectorOnly, nil
+	}
+
+	if ok, err := s.canRunVectorFallback(ctx, pathPrefix); err != nil {
+		return nil, err
+	} else if !ok {
+		return vectorOnly, nil
+	}
+
+	var rows *sql.Rows
+	var err error
+	if pathPrefix != "" {
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			 FROM chunks c
+			 JOIN documents d ON c.document_id = d.id
+			 WHERE d.path LIKE ? ESCAPE '\'`,
+			pathPattern,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			 FROM chunks c
+			 JOIN documents d ON c.document_id = d.id`,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	return s.scanVectorRows(rows, queryEmbedding, limit, keywordCandidates, vectorOnly)
+}
+
+func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) (map[int]*searchCandidate, error) {
+	top := make(candidateHeap, 0, limit)
+	for rows.Next() {
+		var id int
+		var content string
+		var chunkIndex int
+		var embeddingBytes []byte
+		var docPath string
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
+			return nil, err
+		}
+		if _, ok := keywordCandidates[id]; ok {
+			continue
+		}
+
+		score := dotProductEncoded(queryEmbedding, embeddingBytes)
+		candidate := scoredResult{
+			id:         id,
+			path:       docPath,
+			score:      score,
+			content:    content,
+			chunkIndex: chunkIndex,
+		}
+
+		if len(top) < limit {
+			heap.Push(&top, candidate)
+		} else if candidate.score > top[0].score {
+			top[0] = candidate
+			heap.Fix(&top, 0)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, sr := range top {
+		vectorOnly[sr.id] = &searchCandidate{
+			id: sr.id,
+			result: SearchResult{
+				DocumentPath: sr.path,
+				ChunkContent: sr.content,
+				ChunkIndex:   sr.chunkIndex,
+				ScoreKind:    "rrf",
+			},
+			vectorScore: sr.score,
+		}
+	}
+	return vectorOnly, nil
+}
+
+func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+	fetchK := limit*3 + len(keywordCandidates) + 10
+	ids := s.hnsw.Search(queryEmbedding, fetchK)
+	if len(ids) == 0 {
+		return
+	}
+
+	s.loadHNSWChunkRows(ctx, ids, queryEmbedding, limit, keywordCandidates, vectorOnly)
+}
+
+func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+	baseFetchK := (limit+len(keywordCandidates)+10)*3 + 50
+	for attempt := 0; attempt <= hnswPrefixMaxRetries; attempt++ {
+		ids := s.hnsw.Search(queryEmbedding, baseFetchK)
+		if len(ids) == 0 {
+			return
+		}
+
+		placeholders := make([]string, len(ids))
+		args := make([]any, 0, len(ids)+1)
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		args = append(args, pathPattern)
+
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+		          FROM chunks c JOIN documents d ON c.document_id = d.id
+		          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return
+		}
+		defer func() { _ = rows.Close() }()
+
+		if _, err := s.scanVectorRows(rows, queryEmbedding, limit, keywordCandidates, vectorOnly); err != nil {
+			return
+		}
+
+		if len(vectorOnly) >= limit || attempt == hnswPrefixMaxRetries {
+			return
+		}
+		baseFetchK *= 3
+	}
+}
+
+func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+	          FROM chunks c JOIN documents d ON c.document_id = d.id
+	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	if _, err := s.scanVectorRows(rows, queryEmbedding, limit, keywordCandidates, vectorOnly); err != nil {
+		return
+	}
+}
+
+const rrfK = 60
+const noKeywordRank = 0
+
+// unifiedRRF merges keyword and vector-only candidates using balanced Reciprocal Rank Fusion.
+// Each signal (keyword rank, vector rank) contributes exactly one RRF term, so candidates with
+// only a vector signal are not systematically disadvantaged.
+// Path-match bonus is applied as an additional RRF term.
+func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string) []SearchResult {
+	if limit <= 0 {
 		return nil
 	}
 
-	ranked := make([]*searchCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		ranked = append(ranked, candidate)
+	all := make([]*searchCandidate, 0, len(keywordCandidates)+len(vectorOnlyCandidates))
+	for _, c := range keywordCandidates {
+		all = append(all, c)
+	}
+	for _, c := range vectorOnlyCandidates {
+		all = append(all, c)
 	}
 
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].vectorScore == ranked[j].vectorScore {
-			return ranked[i].keywordRank < ranked[j].keywordRank
+	if len(all) == 0 {
+		return nil
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].vectorScore == all[j].vectorScore {
+			return all[i].keywordRank < all[j].keywordRank
 		}
-		return ranked[i].vectorScore > ranked[j].vectorScore
+		return all[i].vectorScore > all[j].vectorScore
 	})
 
-	const k = 60
 	top := make(candidateHeap, 0, limit)
-	for i, candidate := range ranked {
+	for i, candidate := range all {
 		vectorRank := i + 1
-		rrf := 1.0/float32(k+candidate.keywordRank) + 1.0/float32(k+vectorRank)
-		// Path-match bonus: add a third RRF term if any query token appears in the doc path.
+		rrf := 1.0 / float32(rrfK+vectorRank)
+
+		if candidate.keywordRank > noKeywordRank {
+			rrf += 1.0 / float32(rrfK+candidate.keywordRank)
+		}
+
 		if len(pathTokens) > 0 {
 			lowerPath := strings.ToLower(candidate.result.DocumentPath)
 			for _, tok := range pathTokens {
 				if strings.Contains(lowerPath, tok) {
-					rrf += 1.0 / float32(k+1)
+					rrf += 1.0 / float32(rrfK+1)
 					break
 				}
 			}
 		}
+
 		result := candidate.result
 		result.Score = rrf
 		sr := scoredResult{result: result, score: rrf}
@@ -803,70 +932,13 @@ func rerankKeywordCandidates(candidates map[int]*searchCandidate, limit int, pat
 	return results
 }
 
-// rerankByVector computes dot product scores for candidate rows and returns top results.
-// Results are scored with RRF (1/(k+vectorRank)) so they are on the same scale as
-// keyword-hybrid results from rerankKeywordCandidates, making the two lists comparable
-// when merged in Search.
-func rerankByVector(rows *sql.Rows, queryEmbedding []float32, limit int, exclude map[int]*searchCandidate) ([]SearchResult, error) {
-	candidates := make(candidateHeap, 0, limit)
-	for rows.Next() {
-		var id int
-		var content string
-		var chunkIndex int
-		var embeddingBytes []byte
-		var docPath string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
-			return nil, err
-		}
-		if _, ok := exclude[id]; ok {
-			continue
-		}
-
-		score := dotProductEncoded(queryEmbedding, embeddingBytes)
-		candidate := scoredResult{
-			result: SearchResult{
-				DocumentPath: docPath,
-				ChunkContent: content,
-				ChunkIndex:   chunkIndex,
-				Score:        score,
-				ScoreKind:    "rrf",
-			},
-			score: score,
-		}
-
-		if limit <= 0 {
-			continue
-		}
-		if len(candidates) < limit {
-			heap.Push(&candidates, candidate)
-			continue
-		}
-		if candidate.score <= candidates[0].score {
-			continue
-		}
-		candidates[0] = candidate
-		heap.Fix(&candidates, 0)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-
-	const k = 60
-	results := make([]SearchResult, len(candidates))
-	for i, c := range candidates {
-		c.result.Score = 1.0 / float32(k+i+1)
-		results[i] = c.result
-	}
-	return results, nil
-}
-
 type scoredResult struct {
-	result SearchResult
-	score  float32
+	result     SearchResult
+	score      float32
+	id         int
+	path       string
+	content    string
+	chunkIndex int
 }
 
 type candidateHeap []scoredResult

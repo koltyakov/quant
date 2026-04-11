@@ -108,10 +108,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	startedAt := time.Now()
 	logx.Info("MCP search request", "query", summarizeLogText(query, 120), "limit", limit, "threshold", threshold, "path", pathPrefix)
 
-	queryEmbedding, err := s.cachedEmbed(ctx, query)
-	if err != nil {
-		logx.Error("MCP search error", "query", summarizeLogText(query, 120), "stage", "embed", "path", pathPrefix, "err", err, "duration", time.Since(startedAt).Round(time.Millisecond))
-		return nil, fmt.Errorf("embedding query: %w", err)
+	queryEmbedding, embedErr := s.cachedEmbed(ctx, query)
+	if embedErr != nil {
+		logx.Warn("MCP search embedding failed; falling back to keyword-only", "query", summarizeLogText(query, 120), "err", embedErr, "duration", time.Since(startedAt).Round(time.Millisecond))
 	}
 
 	results, err := s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
@@ -133,7 +132,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		return mcplib.NewToolResultText("No results found."), nil
 	}
 
-	return mcplib.NewToolResultText(formatSearchResults(filtered)), nil
+	output := formatSearchResults(filtered)
+	if embedErr != nil {
+		output = "[Note: embedding backend unavailable; showing keyword-only results]\n\n" + output
+	}
+	return mcplib.NewToolResultText(output), nil
 }
 
 func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {

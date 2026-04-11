@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,6 +274,78 @@ func (s *Store) ResetHNSW() {
 	s.hnsw.mu.Unlock()
 }
 
+// RepairHNSW incrementally synchronizes the in-memory HNSW graph with the database.
+// It adds missing chunks without discarding the existing graph structure, avoiding
+// a costly full rebuild for small drifts. Falls back to ResetHNSW if more than
+// half the chunks are missing or if orphaned nodes are detected.
+func (s *Store) RepairHNSW(ctx context.Context) error {
+	if s.hnsw == nil || !s.hnsw.ready.Load() {
+		return nil
+	}
+
+	meta, err := s.embeddingMetadata(ctx)
+	if err != nil || meta == nil || meta.Dimensions == 0 {
+		return fmt.Errorf("reading embedding metadata for hnsw repair: %w", err)
+	}
+	dims := meta.Dimensions
+
+	hnswNodes := s.hnsw.Len()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, embedding FROM chunks`)
+	if err != nil {
+		return fmt.Errorf("querying chunks for hnsw repair: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	type chunkInfo struct {
+		id  int
+		vec []float32
+	}
+	var missing []chunkInfo
+	dbCount := 0
+	for rows.Next() {
+		var id int
+		var embBytes []byte
+		if err := rows.Scan(&id, &embBytes); err != nil {
+			return fmt.Errorf("scanning chunk for hnsw repair: %w", err)
+		}
+		dbCount++
+		if _, found := s.hnsw.graph.Lookup(id); !found {
+			vec := decodeEmbeddingForHNSW(embBytes, dims)
+			if len(vec) > 0 {
+				missing = append(missing, chunkInfo{id: id, vec: vec})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading chunks for hnsw repair: %w", err)
+	}
+
+	orphanedCount := hnswNodes - (dbCount - len(missing))
+	if orphanedCount < 0 {
+		orphanedCount = 0
+	}
+
+	totalDrift := len(missing) + orphanedCount
+	if dbCount > 0 && totalDrift > dbCount/2 {
+		logx.Warn("hnsw drift too large; falling back to full rebuild", "missing", len(missing), "orphaned", orphanedCount, "total_chunks", dbCount)
+		s.ResetHNSW()
+		return nil
+	}
+
+	for _, c := range missing {
+		s.hnsw.Add(c.id, c.vec)
+	}
+
+	if totalDrift > 0 {
+		logx.Info("hnsw graph repaired incrementally", "added", len(missing), "orphaned_estimate", orphanedCount)
+		if err := s.hnsw.persist(); err != nil {
+			logx.Warn("failed to persist repaired hnsw graph", "err", err)
+		}
+	}
+
+	return nil
+}
+
 // FlushHNSW schedules a debounced HNSW graph flush. Multiple calls within the
 // flush window are coalesced into a single disk write.
 func (s *Store) FlushHNSW() {
@@ -319,86 +390,7 @@ func (s *Store) hnswAdd(id int, vec []float32) {
 	}
 }
 
-// searchVectorHNSW runs an ANN query via the HNSW graph and loads the chunk data
-// for the returned IDs. It fetches more candidates than needed to account for
-// exclusions, then returns the top-limit results by vector score.
-func (s *Store) searchVectorHNSW(ctx context.Context, queryEmbedding []float32, limit int, exclude map[int]*searchCandidate) ([]SearchResult, error) {
-	// Fetch extra candidates to account for excluded IDs.
-	fetchK := limit + len(exclude) + 10
-	ids := s.hnsw.Search(queryEmbedding, fetchK)
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	// Build IN clause and load chunk data.
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
-	          FROM chunks c JOIN documents d ON c.document_id = d.id
-	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	return rerankByVector(rows, queryEmbedding, limit, exclude)
-}
-
-// searchVectorHNSWWithPrefix uses HNSW to over-fetch candidates, then filters
-// by path prefix in SQL. Falls back to brute-force if HNSW returns too few
-// prefix-matching results.
 const hnswPrefixMaxRetries = 2
-
-func (s *Store) searchVectorHNSWWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, exclude map[int]*searchCandidate) ([]SearchResult, error) {
-	baseFetchK := (limit+len(exclude)+10)*3 + 50
-	multiplier := 1
-
-	for attempt := 0; attempt <= hnswPrefixMaxRetries; attempt++ {
-		fetchK := baseFetchK * multiplier
-		ids := s.hnsw.Search(queryEmbedding, fetchK)
-		if len(ids) == 0 {
-			return nil, nil
-		}
-
-		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+1)
-		for i, id := range ids {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		args = append(args, pathPattern)
-
-		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
-		          FROM chunks c JOIN documents d ON c.document_id = d.id
-		          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
-		rows, err := s.db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = rows.Close() }()
-
-		results, err := rerankByVector(rows, queryEmbedding, limit, exclude)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(results) >= limit || attempt == hnswPrefixMaxRetries {
-			return results, nil
-		}
-
-		multiplier *= 3
-	}
-
-	return nil, nil
-}
 
 // hnswDeleteChunks removes all chunks belonging to a document from the HNSW graph.
 func (s *Store) hnswDeleteChunks(ctx context.Context, docID int64) {
