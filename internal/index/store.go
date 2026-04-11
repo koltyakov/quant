@@ -520,6 +520,50 @@ type searchCandidate struct {
 	result      SearchResult
 	keywordRank int
 	vectorScore float32
+	modifiedAt  time.Time
+}
+
+// querySignalWeights controls the relative contribution of keyword vs vector
+// signals in RRF fusion. The weights multiply the respective 1/(K+rank) terms.
+type querySignalWeights struct {
+	keyword float32
+	vector  float32
+}
+
+// classifyQueryWeights returns signal weights based on query shape.
+// Identifier-like queries (camelCase, snake_case, short single tokens)
+// upweight keyword search; longer natural-language queries upweight vector search.
+func classifyQueryWeights(query string) querySignalWeights {
+	tokens := strings.Fields(query)
+	if len(tokens) == 0 {
+		return querySignalWeights{keyword: 1.0, vector: 1.0}
+	}
+
+	// Single token or two tokens that look like identifiers.
+	identifierTokens := 0
+	for _, tok := range tokens {
+		if camelCasePattern.MatchString(tok) || (strings.Contains(tok, "_") && tok != "_") || strings.Contains(tok, ".") {
+			identifierTokens++
+		}
+	}
+
+	switch {
+	case len(tokens) <= 2 && identifierTokens == len(tokens):
+		// Pure identifier query: "parseConfig", "user_name"
+		return querySignalWeights{keyword: 1.5, vector: 0.6}
+	case len(tokens) == 1:
+		// Single non-identifier token: could be either signal
+		return querySignalWeights{keyword: 1.2, vector: 0.9}
+	case identifierTokens > len(tokens)/2:
+		// Mixed but identifier-heavy
+		return querySignalWeights{keyword: 1.3, vector: 0.8}
+	case len(tokens) >= 4:
+		// Long natural-language query
+		return querySignalWeights{keyword: 0.7, vector: 1.4}
+	default:
+		// Short natural-language query (2-3 tokens)
+		return querySignalWeights{keyword: 1.0, vector: 1.0}
+	}
 }
 
 // Search performs hybrid search combining FTS5 keyword prefilter with vector reranking.
@@ -569,7 +613,8 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 		}
 	}
 
-	return unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query)), nil
+	weights := classifyQueryWeights(query)
+	return unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights), nil
 }
 
 func searchCandidateLimit(limit int) int {
@@ -586,23 +631,23 @@ func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, query
 	if pathPrefix != "" {
 		pathPattern := sqlLikePrefixPattern(pathPrefix)
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 			 FROM chunks_fts
 			 JOIN chunks c ON c.id = chunks_fts.rowid
 			 JOIN documents d ON c.document_id = d.id
 			 WHERE chunks_fts MATCH ? AND d.path LIKE ? ESCAPE '\'
-			 ORDER BY bm25(chunks_fts), c.chunk_index
+			 ORDER BY bm25(chunks_fts)
 			 LIMIT ?`,
 			ftsQuery, pathPattern, candidateLimit,
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 			 FROM chunks_fts
 			 JOIN chunks c ON c.id = chunks_fts.rowid
 			 JOIN documents d ON c.document_id = d.id
 			 WHERE chunks_fts MATCH ?
-			 ORDER BY bm25(chunks_fts), c.chunk_index
+			 ORDER BY bm25(chunks_fts)
 			 LIMIT ?`,
 			ftsQuery, candidateLimit,
 		)
@@ -619,7 +664,8 @@ func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, query
 		var chunkIndex int
 		var embeddingBytes []byte
 		var docPath string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
+		var modifiedAt time.Time
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt); err != nil {
 			return 0, err
 		}
 		rank++
@@ -640,6 +686,7 @@ func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, query
 			},
 			keywordRank: keywordRank,
 			vectorScore: dotProductEncoded(queryEmbedding, embeddingBytes),
+			modifiedAt:  modifiedAt,
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -722,7 +769,7 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 	if pathPrefix != "" {
 		pathPattern := sqlLikePrefixPattern(pathPrefix)
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id
 			 WHERE d.path LIKE ? ESCAPE '\'`,
@@ -730,7 +777,7 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 		)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id`,
 		)
@@ -751,7 +798,8 @@ func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit i
 		var chunkIndex int
 		var embeddingBytes []byte
 		var docPath string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath); err != nil {
+		var modifiedAt time.Time
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt); err != nil {
 			return nil, err
 		}
 		if _, ok := keywordCandidates[id]; ok {
@@ -765,6 +813,7 @@ func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit i
 			score:      score,
 			content:    content,
 			chunkIndex: chunkIndex,
+			modifiedAt: modifiedAt,
 		}
 
 		if len(top) < limit {
@@ -788,6 +837,7 @@ func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit i
 				ScoreKind:    "rrf",
 			},
 			vectorScore: sr.score,
+			modifiedAt:  sr.modifiedAt,
 		}
 	}
 	return vectorOnly, nil
@@ -821,7 +871,7 @@ func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedd
 		args = append(args, pathPattern)
 
 		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 		          FROM chunks c JOIN documents d ON c.document_id = d.id
 		          WHERE c.id IN (` + strings.Join(placeholders, ",") + `) AND d.path LIKE ? ESCAPE '\'`
 		rows, err := s.db.QueryContext(ctx, query, args...)
@@ -849,7 +899,7 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 		args[i] = id
 	}
 	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path
+	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
 	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -866,11 +916,26 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 const rrfK = 60
 const noKeywordRank = 0
 
-// unifiedRRF merges keyword and vector-only candidates using balanced Reciprocal Rank Fusion.
-// Each signal (keyword rank, vector rank) contributes exactly one RRF term, so candidates with
-// only a vector signal are not systematically disadvantaged.
-// Path-match bonus is applied as an additional RRF term.
-func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string) []SearchResult {
+// recencyHalfLife controls how fast the recency boost decays. Documents
+// modified within this duration get ~half the maximum recency bonus.
+const recencyHalfLife = 7 * 24 * time.Hour // 7 days
+
+// recencyBoostWeight scales the recency signal relative to keyword/vector RRF terms.
+const recencyBoostWeight float32 = 0.3
+
+// unifiedRRF merges keyword and vector-only candidates using Reciprocal Rank Fusion
+// with query-adaptive signal weighting, a mild recency boost, and document-level diversity.
+//
+// Signal weighting: keyword and vector 1/(K+rank) terms are scaled by weights from
+// classifyQueryWeights, so identifier-like queries favor keyword matches and
+// natural-language queries favor vector matches.
+//
+// Recency boost: documents modified recently receive a small additional score
+// based on exponential decay from recencyHalfLife.
+//
+// Document diversity: results are reordered so that the best chunk per unique
+// document is selected first, then remaining slots are filled with secondary chunks.
+func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string, weights querySignalWeights) []SearchResult {
 	if limit <= 0 {
 		return nil
 	}
@@ -887,6 +952,7 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 		return nil
 	}
 
+	// Sort by vector score descending to assign vector ranks.
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].vectorScore == all[j].vectorScore {
 			return all[i].keywordRank < all[j].keywordRank
@@ -894,13 +960,20 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 		return all[i].vectorScore > all[j].vectorScore
 	})
 
-	top := make(candidateHeap, 0, limit)
+	now := time.Now()
+
+	type scored struct {
+		result SearchResult
+		score  float32
+	}
+	allScored := make([]scored, 0, len(all))
+
 	for i, candidate := range all {
 		vectorRank := i + 1
-		rrf := 1.0 / float32(rrfK+vectorRank)
+		rrf := weights.vector / float32(rrfK+vectorRank)
 
 		if candidate.keywordRank > noKeywordRank {
-			rrf += 1.0 / float32(rrfK+candidate.keywordRank)
+			rrf += weights.keyword / float32(rrfK+candidate.keywordRank)
 		}
 
 		if len(pathTokens) > 0 {
@@ -913,32 +986,73 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 			}
 		}
 
+		// Recency boost: exponential decay based on document age.
+		if !candidate.modifiedAt.IsZero() {
+			age := now.Sub(candidate.modifiedAt)
+			if age < 0 {
+				age = 0
+			}
+			// decay = exp(-ln2 * age / halfLife), ranges from 1.0 (just modified) to ~0.
+			decay := float32(math.Exp(-0.693 * float64(age) / float64(recencyHalfLife)))
+			rrf += recencyBoostWeight * decay / float32(rrfK+1)
+		}
+
 		result := candidate.result
 		result.Score = rrf
-		sr := scoredResult{result: result, score: rrf}
-		if len(top) < limit {
-			heap.Push(&top, sr)
-		} else if rrf > top[0].score {
-			top[0] = sr
-			heap.Fix(&top, 0)
+		allScored = append(allScored, scored{result: result, score: rrf})
+	}
+
+	// Sort all candidates by score descending.
+	sort.Slice(allScored, func(i, j int) bool { return allScored[i].score > allScored[j].score })
+
+	// Document-level diversity: pick the best chunk per document first,
+	// then fill remaining slots with secondary chunks.
+	results := make([]SearchResult, 0, limit)
+	seen := make(map[string]bool)
+
+	// Pass 1: best chunk per unique document.
+	for _, s := range allScored {
+		if len(results) >= limit {
+			break
+		}
+		if seen[s.result.DocumentPath] {
+			continue
+		}
+		seen[s.result.DocumentPath] = true
+		results = append(results, s.result)
+	}
+
+	// Pass 2: fill remaining slots with secondary chunks (preserving score order).
+	if len(results) < limit {
+		for _, s := range allScored {
+			if len(results) >= limit {
+				break
+			}
+			// Skip chunks already selected in pass 1.
+			alreadySelected := false
+			for _, r := range results {
+				if r.DocumentPath == s.result.DocumentPath && r.ChunkIndex == s.result.ChunkIndex {
+					alreadySelected = true
+					break
+				}
+			}
+			if alreadySelected {
+				continue
+			}
+			results = append(results, s.result)
 		}
 	}
 
-	sort.Slice(top, func(i, j int) bool { return top[i].score > top[j].score })
-	results := make([]SearchResult, len(top))
-	for i := range top {
-		results[i] = top[i].result
-	}
 	return results
 }
 
 type scoredResult struct {
-	result     SearchResult
 	score      float32
 	id         int
 	path       string
 	content    string
 	chunkIndex int
+	modifiedAt time.Time
 }
 
 type candidateHeap []scoredResult

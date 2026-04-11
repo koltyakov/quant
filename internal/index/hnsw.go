@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	hnswM            = 16  // max neighbors per node
-	hnswEfSearch     = 100 // ef during search (>95% recall typical)
-	hnswMinChunks    = 500 // below this, brute-force is fine
-	hnswFlushDelayMs = 500 // debounce window for batching HNSW disk flushes
+	hnswM                = 16  // max neighbors per node
+	hnswEfSearch         = 100 // ef during search (>95% recall typical)
+	hnswPersistMinChunks = 500 // below this, graph is in-memory only (not persisted to disk)
+	hnswFlushDelayMs     = 500 // debounce window for batching HNSW disk flushes
 )
 
 // hnswIndex manages a persistent, in-memory HNSW approximate nearest-neighbor graph.
@@ -185,7 +185,8 @@ func (h *hnswIndex) stopFlushTimer() {
 }
 
 // BuildHNSW loads all embeddings from the database and builds the in-memory HNSW graph.
-// Call this after the initial index sync completes. Skips if corpus is below hnswMinChunks.
+// Call this after the initial index sync completes. The graph is always built regardless of
+// corpus size but is only persisted to disk when the corpus reaches hnswPersistMinChunks.
 func (s *Store) BuildHNSW(ctx context.Context) error {
 	if s.hnsw == nil {
 		return nil
@@ -229,19 +230,16 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 		return fmt.Errorf("reading chunks for hnsw: %w", err)
 	}
 
-	if count < hnswMinChunks {
-		logx.Info("skipping hnsw build (corpus too small)", "chunks", count, "min", hnswMinChunks)
-		return nil
-	}
-
 	s.hnsw.mu.Lock()
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
 	s.hnsw.ready.Store(true)
 	logx.Info("hnsw graph built", "chunks", count)
 
-	if err := s.hnsw.persist(); err != nil {
-		logx.Warn("failed to persist hnsw graph", "err", err)
+	if count >= hnswPersistMinChunks {
+		if err := s.hnsw.persist(); err != nil {
+			logx.Warn("failed to persist hnsw graph", "err", err)
+		}
 	}
 	return nil
 }

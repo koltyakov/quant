@@ -49,8 +49,8 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 		overlapWords = chunkSize / 4
 	}
 
-	// Track headings for context propagation.
-	var activeHeading string
+	// Track nested headings for breadcrumb context propagation.
+	var headingStack headingBreadcrumbs
 
 	var chunks []Chunk
 	var current []string
@@ -61,15 +61,15 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 		if strings.TrimSpace(content) == "" {
 			return
 		}
-		heading := activeHeading
-		// Prepend heading context if the chunk doesn't already start with one.
-		if heading != "" && !startsWithHeading(content) {
-			content = heading + "\n\n" + content
+		breadcrumb := headingStack.breadcrumb()
+		// Prepend breadcrumb context if the chunk doesn't already start with a heading.
+		if breadcrumb != "" && !startsWithHeading(content) {
+			content = breadcrumb + "\n\n" + content
 		}
 		chunks = append(chunks, Chunk{
 			Content: content,
 			Index:   len(chunks),
-			Heading: heading,
+			Heading: breadcrumb,
 		})
 	}
 
@@ -79,10 +79,10 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 			continue
 		}
 
-		// Track the most recent heading.
+		// Track the most recent heading at each depth level.
 		trimmed := strings.TrimSpace(unit)
 		if isHeading(trimmed) {
-			activeHeading = trimmed
+			headingStack.push(trimmed)
 		}
 
 		if currentWords > 0 && currentWords+unitWords > chunkSize {
@@ -105,6 +105,73 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 	}
 
 	return chunks
+}
+
+// headingBreadcrumbs maintains a stack of markdown headings by depth level,
+// producing a compact "Section > Subsection > Sub-subsection" breadcrumb.
+type headingBreadcrumbs struct {
+	// levels[i] holds the heading text (without # prefix) at depth i+1.
+	// When a new heading at depth N is pushed, all deeper levels are cleared.
+	levels [6]string
+	depth  int // deepest populated level (1-based); 0 = empty
+}
+
+// push records a markdown heading, clearing any deeper headings.
+func (h *headingBreadcrumbs) push(heading string) {
+	d := headingDepth(heading)
+	if d < 1 || d > 6 {
+		return
+	}
+	text := strings.TrimSpace(strings.TrimLeft(heading, "#"))
+	h.levels[d-1] = text
+	// Clear all deeper levels.
+	for i := d; i < 6; i++ {
+		h.levels[i] = ""
+	}
+	h.depth = d
+}
+
+// breadcrumb returns the current heading context as "H1 > H2 > H3".
+// Returns empty string if no headings have been seen.
+func (h *headingBreadcrumbs) breadcrumb() string {
+	var parts []string
+	for i := 0; i < 6; i++ {
+		if h.levels[i] != "" {
+			parts = append(parts, h.levels[i])
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		// Single heading: preserve original markdown format for clarity.
+		return strings.Repeat("#", h.singleDepth()) + " " + parts[0]
+	}
+	return strings.Join(parts, " > ")
+}
+
+// singleDepth returns the depth of the single populated heading, for preserving
+// the # prefix when there's only one level.
+func (h *headingBreadcrumbs) singleDepth() int {
+	for i := 0; i < 6; i++ {
+		if h.levels[i] != "" {
+			return i + 1
+		}
+	}
+	return 1
+}
+
+// headingDepth returns the depth of a markdown heading (number of leading # chars).
+func headingDepth(line string) int {
+	n := 0
+	for _, r := range line {
+		if r == '#' {
+			n++
+		} else {
+			break
+		}
+	}
+	return n
 }
 
 func splitUnits(text string) []string {
