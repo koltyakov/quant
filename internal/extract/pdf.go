@@ -51,10 +51,6 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if inspection.HasNativeText && inspection.HasIllustrations {
-		logx.Info("skipping illustrated pdf", "path", path)
-		return "", nil
-	}
 	if inspection.HasNativeText {
 		return inspection.Text, nil
 	}

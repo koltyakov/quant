@@ -241,7 +241,7 @@ func TestPDFExtractor_RejectsOversizedFiles(t *testing.T) {
 	}
 }
 
-func TestPDFExtractor_ExtractSkipsIllustratedNativeTextPDF(t *testing.T) {
+func TestPDFExtractor_ExtractKeepsTextForIllustratedNativeTextPDF(t *testing.T) {
 	path := writeTempFile(t, "illustrated.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
@@ -266,8 +266,8 @@ func TestPDFExtractor_ExtractSkipsIllustratedNativeTextPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected extract error: %v", err)
 	}
-	if text != "" {
-		t.Fatalf("expected illustrated PDF to be skipped, got %q", text)
+	if text != "[Page 1]\nhello world" {
+		t.Fatalf("expected illustrated PDF text to be preserved, got %q", text)
 	}
 }
 
