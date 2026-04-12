@@ -185,11 +185,10 @@ func TestCachedEmbed_LeaderCancellationDoesNotAbortSharedFlight(t *testing.T) {
 	}
 }
 
-func TestCachedEmbed_CanceledFlightRestartsForNextCaller(t *testing.T) {
+func TestCachedEmbed_CanceledFlightCachesResultForNextCaller(t *testing.T) {
 	embedder := &testutil.CancelAwareEmbedder{
-		Started:  make(chan struct{}),
-		Release:  make(chan struct{}),
-		Canceled: make(chan struct{}),
+		Started: make(chan struct{}),
+		Release: make(chan struct{}),
 	}
 	s := &Server{
 		embedder:   embedder,
@@ -211,22 +210,20 @@ func TestCachedEmbed_CanceledFlightRestartsForNextCaller(t *testing.T) {
 		t.Fatalf("expected cancellation error, got %v", err)
 	}
 
-	select {
-	case <-embedder.Canceled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for embedder cancellation")
-	}
-
 	close(embedder.Release)
 
-	if _, err := s.cachedEmbed(context.Background(), "abandoned-query"); err != nil {
-		t.Fatalf("expected restarted flight to succeed, got %v", err)
+	vec, err := s.cachedEmbed(context.Background(), "abandoned-query")
+	if err != nil {
+		t.Fatalf("expected cached result to be available, got %v", err)
+	}
+	if len(vec) == 0 {
+		t.Fatal("expected non-empty embedding from cache")
 	}
 
 	embedder.Mu.Lock()
 	defer embedder.Mu.Unlock()
-	if embedder.Calls["abandoned-query"] != 2 {
-		t.Fatalf("expected restarted flight to re-embed, got %d calls", embedder.Calls["abandoned-query"])
+	if embedder.Calls["abandoned-query"] != 1 {
+		t.Fatalf("expected one embed call (not restarted), got %d calls", embedder.Calls["abandoned-query"])
 	}
 }
 

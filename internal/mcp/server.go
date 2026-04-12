@@ -86,8 +86,6 @@ type embeddingLRU struct {
 type embeddingFlight struct {
 	done    chan struct{}
 	waiters int
-	cancel  context.CancelFunc
-	timer   *time.Timer
 	vec     []float32
 	err     error
 }

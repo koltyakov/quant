@@ -112,7 +112,10 @@ func TestDiffChunks_AllNew(t *testing.T) {
 		{Content: "alpha", Index: 0},
 		{Content: "beta", Index: 1},
 	}
-	records, toEmbed, positions := p.diffChunks(chunks, nil)
+	records, toEmbed, positions, err := p.DiffChunks(chunks, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(records) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(records))
 	}
@@ -133,7 +136,10 @@ func TestDiffChunks_ReusesExisting(t *testing.T) {
 	existing := map[string]index.ChunkRecord{
 		index.ChunkDiffKey("alpha"): {Content: "alpha", Embedding: []byte{1, 2, 3}},
 	}
-	records, toEmbed, _ := p.diffChunks(chunks, existing)
+	records, toEmbed, _, err := p.DiffChunks(chunks, existing)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(records) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(records))
 	}
@@ -150,7 +156,7 @@ func TestDiffChunks_ReusesExisting(t *testing.T) {
 
 func TestEmbedChunks_Empty(t *testing.T) {
 	p := &Pipeline{Embedder: &mockEmbedder{}}
-	err := p.embedChunks(context.Background(), "key", nil, nil, nil)
+	err := p.EmbedChunks(context.Background(), "key", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,12 +171,12 @@ func TestEmbedChunks_ShortBatch(t *testing.T) {
 		{Content: "alpha", Index: 0},
 		{Content: "beta", Index: 1},
 	}
-	positions := []pendingEmbed{
-		{chunkIdx: 0, batchPos: 0},
-		{chunkIdx: 1, batchPos: 1},
+	positions := []PendingEmbed{
+		{ChunkIdx: 0, BatchPos: 0},
+		{ChunkIdx: 1, BatchPos: 1},
 	}
 	records := make([]index.ChunkRecord, 2)
-	err := p.embedChunks(context.Background(), "key", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), "key", chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,9 +196,9 @@ func TestBuildEmbedInput(t *testing.T) {
 		{"k", "", "c", "c"},
 	}
 	for _, tt := range tests {
-		got := buildEmbedInput(tt.docKey, tt.heading, tt.content)
+		got := BuildEmbedInput(tt.docKey, tt.heading, tt.content)
 		if got != tt.want {
-			t.Errorf("buildEmbedInput(%q,%q,%q) = %q, want %q", tt.docKey, tt.heading, tt.content, got, tt.want)
+			t.Errorf("BuildEmbedInput(%q,%q,%q) = %q, want %q", tt.docKey, tt.heading, tt.content, got, tt.want)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/ingest"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
 	"github.com/koltyakov/quant/internal/scan"
@@ -90,9 +91,15 @@ func runMCP(cfg *config.Config) error {
 		hnswStore: store,
 		embedder:  embedder,
 		extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
-		paths:     newPathSyncTracker(),
-		live:      newLiveIndexQueue(liveQueueSizeForWorkers(cfg.IndexWorkers)),
-		retries:   newRetryScheduler(),
+		pipeline: &ingest.Pipeline{
+			Embedder:  embedder,
+			ChunkSize: cfg.ChunkSize,
+			Overlap:   cfg.ChunkOverlap,
+			BatchSize: cfg.EmbedBatchSize,
+		},
+		paths:   newPathSyncTracker(),
+		live:    newLiveIndexQueue(liveQueueSizeForWorkers(cfg.IndexWorkers)),
+		retries: newRetryScheduler(),
 	}
 
 	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})

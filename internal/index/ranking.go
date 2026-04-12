@@ -281,12 +281,51 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 	if len(candidates) == 0 {
 		return nil
 	}
+	hasKeyword := len(keywordCandidates) > 0
+	hasVector := len(vectorOnlyCandidates) > 0 || anyHasVectorScore(keywordCandidates)
 	return runRankingPipeline(candidates,
 		rrfBaseScore(weights),
 		recencyBoost(recencyHalfLife, recencyBoostWeight),
 		pathBoost(pathTokens),
+		normalizeScores(weights, hasKeyword, hasVector, len(pathTokens) > 0),
 		documentDiversity(limit),
 	)
+}
+
+func anyHasVectorScore(candidates map[int]*searchCandidate) bool {
+	for _, c := range candidates {
+		if c.vectorScore != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeScores divides each score by the theoretical maximum so that
+// the top candidate scores approach 1.0 and the threshold parameter becomes
+// intuitive. The max theoretical score assumes rank 1 for both keyword and
+// vector plus the maximum recency and path bonuses.
+func normalizeScores(weights querySignalWeights, hasKeyword, hasVector, hasPathTokens bool) rankingStage {
+	maxScore := float32(0)
+	if hasKeyword {
+		maxScore += weights.keyword / float32(rrfK+1)
+	}
+	if hasVector {
+		maxScore += weights.vector / float32(rrfK+1)
+	}
+	maxScore += recencyBoostWeight / float32(rrfK+1)
+	if hasPathTokens {
+		maxScore += 1.0 / float32(rrfK+1)
+	}
+	if maxScore == 0 {
+		maxScore = 1
+	}
+	return func(candidates []scoredCandidate) []scoredCandidate {
+		for i := range candidates {
+			candidates[i].score /= maxScore
+		}
+		return candidates
+	}
 }
 
 type scoredResult struct {

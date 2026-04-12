@@ -41,24 +41,27 @@ func (p *Pipeline) Process(ctx context.Context, docKey, filePath string, existin
 		return nil, nil, nil
 	}
 
-	records, toEmbed, embedPositions := p.diffChunks(chunks, existingChunks)
+	records, toEmbed, embedPositions, err := p.DiffChunks(chunks, existingChunks)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	if err := p.embedChunks(ctx, docKey, toEmbed, embedPositions, records); err != nil {
+	if err := p.EmbedChunks(ctx, docKey, toEmbed, embedPositions, records); err != nil {
 		return nil, nil, err
 	}
 
 	return &index.Document{Path: docKey}, records, nil
 }
 
-type pendingEmbed struct {
-	chunkIdx int
-	batchPos int
+type PendingEmbed struct {
+	ChunkIdx int
+	BatchPos int
 }
 
-func (p *Pipeline) diffChunks(chunks []chunk.Chunk, existing map[string]index.ChunkRecord) ([]index.ChunkRecord, []chunk.Chunk, []pendingEmbed) {
+func (p *Pipeline) DiffChunks(chunks []chunk.Chunk, existing map[string]index.ChunkRecord) ([]index.ChunkRecord, []chunk.Chunk, []PendingEmbed, error) {
 	records := make([]index.ChunkRecord, 0, len(chunks))
 	var toEmbed []chunk.Chunk
-	var positions []pendingEmbed
+	var positions []PendingEmbed
 
 	for i, c := range chunks {
 		key := index.ChunkDiffKey(c.Content)
@@ -69,15 +72,15 @@ func (p *Pipeline) diffChunks(chunks []chunk.Chunk, existing map[string]index.Ch
 				Embedding:  existing.Embedding,
 			})
 		} else {
-			positions = append(positions, pendingEmbed{chunkIdx: i, batchPos: len(toEmbed)})
+			positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
 			toEmbed = append(toEmbed, c)
 			records = append(records, index.ChunkRecord{})
 		}
 	}
-	return records, toEmbed, positions
+	return records, toEmbed, positions, nil
 }
 
-func (p *Pipeline) embedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, positions []pendingEmbed, records []index.ChunkRecord) error {
+func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
 	if len(toEmbed) == 0 {
 		return nil
 	}
@@ -107,7 +110,7 @@ func (p *Pipeline) embedChunks(ctx context.Context, docKey string, toEmbed []chu
 			batch := toEmbed[batchStart:batchEnd]
 			texts := make([]string, len(batch))
 			for i, c := range batch {
-				texts[i] = buildEmbedInput(docKey, c.Heading, c.Content)
+				texts[i] = BuildEmbedInput(docKey, c.Heading, c.Content)
 			}
 			embeddings, err := p.Embedder.EmbedBatch(ctx, texts)
 			select {
@@ -130,7 +133,7 @@ func (p *Pipeline) embedChunks(ctx context.Context, docKey string, toEmbed []chu
 			)
 		}
 		for i, c := range batch {
-			globalIdx := positions[result.batchStart+i].chunkIdx
+			globalIdx := positions[result.batchStart+i].ChunkIdx
 			records[globalIdx] = index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
@@ -141,7 +144,7 @@ func (p *Pipeline) embedChunks(ctx context.Context, docKey string, toEmbed []chu
 	return ctx.Err()
 }
 
-func buildEmbedInput(docKey, heading string, content string) string {
+func BuildEmbedInput(docKey, heading string, content string) string {
 	if heading != "" {
 		return heading + "\n\n" + content
 	}

@@ -25,7 +25,7 @@ func (s *Server) registerTools() {
 			mcplib.Description("Maximum number of results (default: 5)"),
 		),
 		mcplib.WithNumber("threshold",
-			mcplib.Description("Minimum result score (RRF scale, default: 0)"),
+			mcplib.Description("Minimum result score (0-1 normalized scale, default: 0)"),
 		),
 		mcplib.WithString("path",
 			mcplib.Description("Filter results to documents whose path starts with this prefix"),
@@ -324,53 +324,40 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 		return vec, nil
 	}
 	if flight, ok := s.embFlights[cacheKey]; ok {
-		if flight.timer != nil {
-			flight.timer.Stop()
-			flight.timer = nil
-		}
 		flight.waiters++
 		s.embCacheMu.Unlock()
-		return s.waitForEmbeddingFlight(ctx, cacheKey, flight)
+		return s.waitForEmbeddingFlight(ctx, flight)
 	}
-	//nolint:gosec // The cancel func is stored on the flight and released when the last waiter drops.
-	flightCtx, cancel := context.WithCancel(context.Background())
 	flight := &embeddingFlight{
 		done:    make(chan struct{}),
 		waiters: 1,
-		cancel:  cancel,
 	}
 	s.embFlights[cacheKey] = flight
 	s.embCacheMu.Unlock()
 
-	go s.runEmbeddingFlight(flightCtx, cacheKey, text, flight)
+	//nolint:gosec // G118: intentional background goroutine — must complete embedding even if caller cancels.
+	go s.runEmbeddingFlight(cacheKey, text, flight)
 
-	return s.waitForEmbeddingFlight(ctx, cacheKey, flight)
+	return s.waitForEmbeddingFlight(ctx, flight)
 }
 
-func (s *Server) waitForEmbeddingFlight(ctx context.Context, text string, flight *embeddingFlight) ([]float32, error) {
+func (s *Server) waitForEmbeddingFlight(ctx context.Context, flight *embeddingFlight) ([]float32, error) {
 	select {
 	case <-ctx.Done():
-		s.releaseEmbeddingFlight(text, flight)
+		s.releaseEmbeddingFlight(flight)
 		return nil, ctx.Err()
 	case <-flight.done:
-		s.releaseEmbeddingFlight(text, flight)
 		return flight.vec, flight.err
 	}
 }
 
-func (s *Server) runEmbeddingFlight(ctx context.Context, cacheKey, text string, flight *embeddingFlight) {
-	vec, err := s.embedder.Embed(ctx, text)
+func (s *Server) runEmbeddingFlight(cacheKey, text string, flight *embeddingFlight) {
+	vec, err := s.embedder.Embed(context.Background(), text)
 	if err == nil {
 		vec = index.NormalizeFloat32(vec)
 	}
 
 	s.embCacheMu.Lock()
-	defer s.embCacheMu.Unlock()
-
-	if flight.timer != nil {
-		flight.timer.Stop()
-		flight.timer = nil
-	}
 	if err == nil {
 		if s.embCache == nil {
 			s.embCache = newEmbeddingLRU(embCacheMaxSize)
@@ -381,33 +368,14 @@ func (s *Server) runEmbeddingFlight(ctx context.Context, cacheKey, text string, 
 	flight.vec = vec
 	flight.err = err
 	close(flight.done)
+	s.embCacheMu.Unlock()
 }
 
-func (s *Server) releaseEmbeddingFlight(_ string, flight *embeddingFlight) {
+func (s *Server) releaseEmbeddingFlight(flight *embeddingFlight) {
 	s.embCacheMu.Lock()
 	defer s.embCacheMu.Unlock()
-
 	if flight.waiters > 0 {
 		flight.waiters--
-	}
-	if flight.waiters == 0 && flight.cancel != nil && flight.timer == nil {
-		flight.timer = time.AfterFunc(25*time.Millisecond, func() {
-			s.embCacheMu.Lock()
-			defer s.embCacheMu.Unlock()
-
-			if flight.timer != nil {
-				flight.timer = nil
-			}
-			if flight.waiters != 0 {
-				return
-			}
-			select {
-			case <-flight.done:
-				return
-			default:
-				flight.cancel()
-			}
-		})
 	}
 }
 

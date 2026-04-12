@@ -15,6 +15,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/ingest"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
@@ -36,6 +37,7 @@ type indexer struct {
 	hnswStore index.HNSWBuilder
 	embedder  embed.Embedder
 	extractor extract.Extractor
+	pipeline  *ingest.Pipeline
 
 	paths   *pathSyncTracker
 	live    *liveIndexQueue
@@ -44,11 +46,6 @@ type indexer struct {
 	resyncMu      sync.Mutex
 	resyncRunning bool
 	resyncPending bool
-}
-
-type pendingEmbed struct {
-	chunkIdx int
-	batchPos int
 }
 
 type syncReport struct {
@@ -283,10 +280,7 @@ func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, erro
 		return report, err
 	}
 
-	reconcileMatcher, err := idx.newReconcileMatcher()
-	if err != nil {
-		return report, err
-	}
+	reconcileMatcher := scan.NewGitIgnoreMatcher(idx.cfg.WatchDir, gi)
 
 	for _, doc := range docs {
 		if !scannedPaths[doc.Path] {
@@ -515,14 +509,6 @@ func (idx *indexer) loadDocument(ctx context.Context, key string, doc *index.Doc
 	return doc, nil
 }
 
-func (idx *indexer) newReconcileMatcher() (*scan.GitIgnoreMatcher, error) {
-	rootIgnore, err := scan.LoadGitIgnore(idx.cfg.WatchDir)
-	if err != nil {
-		return nil, fmt.Errorf("loading gitignore: %w", err)
-	}
-	return scan.NewGitIgnoreMatcher(idx.cfg.WatchDir, rootIgnore), nil
-}
-
 func (idx *indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -627,6 +613,22 @@ func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Tim
 	return idx.syncDocument(ctx, key, path, &modTime, nil)
 }
 
+func (idx *indexer) getPipeline() *ingest.Pipeline {
+	if idx.pipeline == nil {
+		batchSize := idx.cfg.EmbedBatchSize
+		if batchSize < 1 {
+			batchSize = 16
+		}
+		idx.pipeline = &ingest.Pipeline{
+			Embedder:  idx.embedder,
+			ChunkSize: idx.cfg.ChunkSize,
+			Overlap:   idx.cfg.ChunkOverlap,
+			BatchSize: batchSize,
+		}
+	}
+	return idx.pipeline
+}
+
 func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (indexAction, error) {
 	hash := precomputedHash
 	if hash == "" {
@@ -663,12 +665,12 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 
 	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
 
-	chunkRecords, toEmbed, embedPositions, err := idx.diffChunks(chunks, existingByContent)
+	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(chunks, existingByContent)
 	if err != nil {
 		return indexNoop, err
 	}
 
-	if err := idx.embedChunks(ctx, key, toEmbed, embedPositions, chunkRecords); err != nil {
+	if err := idx.getPipeline().EmbedChunks(ctx, key, toEmbed, embedPositions, chunkRecords); err != nil {
 		return indexNoop, err
 	}
 
@@ -685,106 +687,11 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 	return indexUpdated, nil
 }
 
-func (idx *indexer) diffChunks(chunks []chunk.Chunk, existingByContent map[string]index.ChunkRecord) (
-	[]index.ChunkRecord, []chunk.Chunk, []pendingEmbed, error) {
-
-	chunkRecords := make([]index.ChunkRecord, 0, len(chunks))
-	var toEmbed []chunk.Chunk
-	var embedPositions []pendingEmbed
-
-	for i, c := range chunks {
-		key := index.ChunkDiffKey(c.Content)
-		if existing, ok := existingByContent[key]; ok {
-			chunkRecords = append(chunkRecords, index.ChunkRecord{
-				Content:    c.Content,
-				ChunkIndex: c.Index,
-				Embedding:  existing.Embedding,
-			})
-		} else {
-			embedPositions = append(embedPositions, pendingEmbed{chunkIdx: i, batchPos: len(toEmbed)})
-			toEmbed = append(toEmbed, c)
-			chunkRecords = append(chunkRecords, index.ChunkRecord{})
-		}
-	}
-	return chunkRecords, toEmbed, embedPositions, nil
-}
-
-func (idx *indexer) embedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, embedPositions []pendingEmbed, chunkRecords []index.ChunkRecord) error {
-	if len(toEmbed) == 0 {
-		return nil
-	}
-
-	batchSize := idx.cfg.EmbedBatchSize
-	if batchSize < 1 {
-		batchSize = 16
-	}
-
-	type batchResult struct {
-		batchStart int
-		batch      []chunk.Chunk
-		embeddings [][]float32
-		err        error
-	}
-
-	numBatches := (len(toEmbed) + batchSize - 1) / batchSize
-	resultCh := make(chan batchResult, min(numBatches, 4))
-
-	go func() {
-		defer close(resultCh)
-		for batchStart := 0; batchStart < len(toEmbed); batchStart += batchSize {
-			batchEnd := batchStart + batchSize
-			if batchEnd > len(toEmbed) {
-				batchEnd = len(toEmbed)
-			}
-			batch := toEmbed[batchStart:batchEnd]
-			texts := make([]string, len(batch))
-			for i, c := range batch {
-				texts[i] = buildEmbedInput(docKey, c.Heading, c.Content)
-			}
-			embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
-			select {
-			case <-ctx.Done():
-				return
-			case resultCh <- batchResult{batchStart: batchStart, batch: batch, embeddings: embeddings, err: err}:
-			}
-		}
-	}()
-
-	for result := range resultCh {
-		if result.err != nil {
-			return fmt.Errorf("embedding chunks from %d: %w", result.batchStart, result.err)
-		}
-		batch := result.batch
-		if len(result.embeddings) != len(batch) {
-			return fmt.Errorf(
-				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
-				result.batchStart, result.batchStart+len(batch)-1, len(result.embeddings), len(batch),
-			)
-		}
-		for i, c := range batch {
-			globalIdx := embedPositions[result.batchStart+i].chunkIdx
-			chunkRecords[globalIdx] = index.ChunkRecord{
-				Content:    c.Content,
-				ChunkIndex: c.Index,
-				Embedding:  index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i])),
-			}
-		}
-	}
-	return ctx.Err()
-}
-
 func (idx *indexer) shouldIgnorePath(path string) bool {
 	if idx == nil || idx.cfg == nil || idx.cfg.DBPath == "" {
 		return false
 	}
 	return isCompanionLogPathForDB(idx.cfg.DBPath, path)
-}
-
-func buildEmbedInput(docKey, heading string, content string) string {
-	if heading != "" {
-		return heading + "\n\n" + content
-	}
-	return content
 }
 
 func documentKey(root, path string) (string, error) {

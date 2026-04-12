@@ -32,6 +32,11 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 			return nil, err
 		}
 		rankOffset += collected
+
+		if len(keywordCandidates) >= candidateLimit {
+			orQuery = ""
+			nearQuery = ""
+		}
 	}
 
 	if orQuery != "" && orQuery != andQuery {
@@ -395,7 +400,11 @@ func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedd
 		return
 	}
 
-	// Otherwise brute-force score all prefix chunks (bounded by prefix size).
+	// Otherwise brute-force score all prefix chunks (bounded by prefix size and maxVectorSearchCandidates).
+	if s.maxVectorSearchCandidates > 0 && len(prefixSet) > s.maxVectorSearchCandidates {
+		logx.Info("skipping brute-force prefix vector fallback", "prefix_chunks", len(prefixSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
+		return
+	}
 	allPrefixIDs := make([]int, 0, len(prefixSet))
 	for id := range prefixSet {
 		allPrefixIDs = append(allPrefixIDs, id)

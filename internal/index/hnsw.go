@@ -48,6 +48,28 @@ func (h *hnswIndex) Delete(id int) {
 	h.graph.Delete(id)
 }
 
+func (h *hnswIndex) BatchDelete(ids []int) {
+	if !h.ready.Load() || len(ids) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range ids {
+		h.graph.Delete(id)
+	}
+}
+
+func (h *hnswIndex) BatchAdd(nodes []hnsw.Node[int]) {
+	if !h.ready.Load() || len(nodes) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, node := range nodes {
+		h.graph.Add(node)
+	}
+}
+
 // Search performs an approximate k-nearest-neighbor query.
 // Returns chunk IDs. Returns nil if the graph is not ready.
 func (h *hnswIndex) Search(query []float32, k int) []int {
@@ -133,17 +155,26 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 }
 
 func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO hnsw_state (id, built_at, node_count) VALUES (1, CURRENT_TIMESTAMP, ?)
-		 ON CONFLICT(id) DO UPDATE SET built_at = CURRENT_TIMESTAMP, node_count = ?`,
-		nodeCount, nodeCount,
+	meta, err := s.embeddingMetadata(ctx)
+	if err != nil || meta == nil {
+		return fmt.Errorf("reading embedding metadata for hnsw state: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions) VALUES (1, CURRENT_TIMESTAMP, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET built_at = CURRENT_TIMESTAMP, node_count = ?, model = ?, dimensions = ?`,
+		nodeCount, meta.Model, meta.Dimensions,
+		nodeCount, meta.Model, meta.Dimensions,
 	)
 	return err
 }
 
 func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	var nodeCount int
-	err := s.db.QueryRowContext(ctx, `SELECT node_count FROM hnsw_state WHERE id = 1`).Scan(&nodeCount)
+	var storedModel string
+	var storedDims int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT node_count, model, dimensions FROM hnsw_state WHERE id = 1`,
+	).Scan(&nodeCount, &storedModel, &storedDims)
 	if err != nil {
 		return false
 	}
@@ -153,6 +184,13 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 
 	meta, err := s.embeddingMetadata(ctx)
 	if err != nil || meta == nil || meta.Dimensions == 0 {
+		return false
+	}
+
+	if storedModel != meta.Model || storedDims != meta.Dimensions {
+		logx.Info("hnsw state model mismatch, skipping load",
+			"stored_model", storedModel, "current_model", meta.Model,
+			"stored_dims", storedDims, "current_dims", meta.Dimensions)
 		return false
 	}
 
@@ -214,13 +252,6 @@ func (s *Store) HNSWLen() int {
 	return s.hnsw.Len()
 }
 
-// hnswAdd adds a chunk vector to the index (incremental update after insert).
-func (s *Store) hnswAdd(id int, vec []float32) {
-	if s.hnsw != nil {
-		s.hnsw.Add(id, vec)
-	}
-}
-
 // hnswDeleteChunks removes all chunks belonging to a document from the HNSW graph.
 func (s *Store) hnswDeleteChunks(ctx context.Context, docID int64) {
 	if s.hnsw == nil || !s.hnsw.ready.Load() {
@@ -231,13 +262,15 @@ func (s *Store) hnswDeleteChunks(ctx context.Context, docID int64) {
 		return
 	}
 	defer func() { _ = rows.Close() }()
+	var ids []int
 	for rows.Next() {
 		var id int
 		if err := rows.Scan(&id); err != nil {
 			return
 		}
-		s.hnsw.Delete(id)
+		ids = append(ids, id)
 	}
+	s.hnsw.BatchDelete(ids)
 }
 
 // decodeEmbeddingForHNSW converts a stored embedding blob to []float32 for use in HNSW.

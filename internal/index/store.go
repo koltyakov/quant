@@ -173,9 +173,11 @@ func (s *Store) migrate() error {
 		value TEXT NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS hnsw_state (
-		id         INTEGER PRIMARY KEY CHECK (id = 1),
-		built_at   DATETIME NOT NULL,
-		node_count INTEGER NOT NULL
+		id          INTEGER PRIMARY KEY CHECK (id = 1),
+		built_at    DATETIME NOT NULL,
+		node_count  INTEGER NOT NULL,
+		model       TEXT NOT NULL DEFAULT '',
+		dimensions  INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 		content,
@@ -195,7 +197,33 @@ func (s *Store) migrate() error {
 	END;
 	`
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.migrateHNSWStateColumns()
+}
+
+func (s *Store) migrateHNSWStateColumns() error {
+	var modelCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('hnsw_state') WHERE name='model'`,
+	).Scan(&modelCount)
+	if err != nil {
+		return fmt.Errorf("checking hnsw_state schema: %w", err)
+	}
+	if modelCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE hnsw_state ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding hnsw_state.model column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE hnsw_state ADD COLUMN dimensions INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("adding hnsw_state.dimensions column: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
@@ -256,8 +284,8 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		return fmt.Errorf("deleting existing chunks: %w", err)
 	}
 
-	for _, id := range hnswDeleteIDs {
-		s.hnsw.Delete(id)
+	if len(hnswDeleteIDs) > 0 {
+		s.hnsw.BatchDelete(hnswDeleteIDs)
 	}
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?) RETURNING id`)
@@ -292,12 +320,14 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		if metaErr != nil {
 			logx.Warn("failed to read embedding metadata for HNSW update", "err", metaErr)
 		} else if meta != nil && meta.Dimensions > 0 {
+			var nodes []hnsw.Node[int]
 			for _, ic := range inserted {
 				vec := decodeEmbeddingForHNSW(ic.embedding, meta.Dimensions)
 				if len(vec) > 0 {
-					s.hnswAdd(ic.id, vec)
+					nodes = append(nodes, hnsw.MakeNode(ic.id, vec))
 				}
 			}
+			s.hnsw.BatchAdd(nodes)
 		}
 	}
 
@@ -364,8 +394,8 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 		return err
 	}
 
-	for _, id := range hnswDeleteIDs {
-		s.hnsw.Delete(id)
+	if len(hnswDeleteIDs) > 0 {
+		s.hnsw.BatchDelete(hnswDeleteIDs)
 	}
 
 	return nil
