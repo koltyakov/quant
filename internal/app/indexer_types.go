@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"path/filepath"
@@ -9,6 +9,23 @@ import (
 	"github.com/koltyakov/quant/internal/logx"
 )
 
+var (
+	IndexRetryBaseDelay   = 2 * time.Second
+	MaxIndexRetryAttempts = 3
+)
+
+const (
+	liveQueueMultiplier = 8
+	minLiveQueueSize    = 16
+	maxLiveQueueSize    = 512
+	maxRetryStates      = 256
+)
+
+type PathSyncTracker struct {
+	mu     sync.Mutex
+	states map[string]*pathState
+}
+
 type pathState struct {
 	running bool
 	dirty   bool
@@ -18,16 +35,11 @@ type pathState struct {
 	requestedMod time.Time
 }
 
-type pathSyncTracker struct {
-	mu     sync.Mutex
-	states map[string]*pathState
+func NewPathSyncTracker() *PathSyncTracker {
+	return &PathSyncTracker{states: make(map[string]*pathState)}
 }
 
-func newPathSyncTracker() *pathSyncTracker {
-	return &pathSyncTracker{states: make(map[string]*pathState)}
-}
-
-func (t *pathSyncTracker) begin(key string, modTime *time.Time) (uint64, bool) {
+func (t *PathSyncTracker) Begin(key string, modTime *time.Time) (uint64, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -56,7 +68,7 @@ func (t *pathSyncTracker) begin(key string, modTime *time.Time) (uint64, bool) {
 	return state.version, true
 }
 
-func (t *pathSyncTracker) finish(key string) (uint64, bool) {
+func (t *PathSyncTracker) Finish(key string) (uint64, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -72,7 +84,7 @@ func (t *pathSyncTracker) finish(key string) (uint64, bool) {
 	return 0, false
 }
 
-func (t *pathSyncTracker) isCurrent(key string, version uint64) bool {
+func (t *PathSyncTracker) IsCurrent(key string, version uint64) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -80,7 +92,7 @@ func (t *pathSyncTracker) isCurrent(key string, version uint64) bool {
 	return ok && state.running && state.version == version
 }
 
-func (t *pathSyncTracker) invalidatePrefix(prefix string) {
+func (t *PathSyncTracker) InvalidatePrefix(prefix string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -92,7 +104,7 @@ func (t *pathSyncTracker) invalidatePrefix(prefix string) {
 	}
 }
 
-func (t *pathSyncTracker) requestInvalidates(state *pathState, modTime *time.Time) bool {
+func (t *PathSyncTracker) requestInvalidates(state *pathState, modTime *time.Time) bool {
 	if state == nil {
 		return true
 	}
@@ -102,7 +114,13 @@ func (t *pathSyncTracker) requestInvalidates(state *pathState, modTime *time.Tim
 	if !state.hasModTime {
 		return true
 	}
-	return !sameModTime(state.requestedMod, *modTime)
+	return !SameModTime(state.requestedMod, *modTime)
+}
+
+type LiveIndexQueue struct {
+	mu     sync.Mutex
+	Jobs   chan string
+	states map[string]*livePathState
 }
 
 type livePathState struct {
@@ -112,20 +130,14 @@ type livePathState struct {
 	running    bool
 }
 
-type liveIndexQueue struct {
-	mu     sync.Mutex
-	jobs   chan string
-	states map[string]*livePathState
-}
-
-func newLiveIndexQueue(queueSize int) *liveIndexQueue {
-	return &liveIndexQueue{
-		jobs:   make(chan string, queueSize),
+func NewLiveIndexQueue(queueSize int) *LiveIndexQueue {
+	return &LiveIndexQueue{
+		Jobs:   make(chan string, queueSize),
 		states: make(map[string]*livePathState),
 	}
 }
 
-func (q *liveIndexQueue) markPending(path string, modTime time.Time) bool {
+func (q *LiveIndexQueue) MarkPending(path string, modTime time.Time) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -145,7 +157,7 @@ func (q *liveIndexQueue) markPending(path string, modTime time.Time) bool {
 	return true
 }
 
-func (q *liveIndexQueue) cancel(path string) {
+func (q *LiveIndexQueue) Cancel(path string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -159,7 +171,7 @@ func (q *liveIndexQueue) cancel(path string) {
 	}
 }
 
-func (q *liveIndexQueue) startProcessing(path string) (time.Time, bool) {
+func (q *LiveIndexQueue) StartProcessing(path string) (time.Time, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -174,7 +186,7 @@ func (q *liveIndexQueue) startProcessing(path string) (time.Time, bool) {
 	return modTime, true
 }
 
-func (q *liveIndexQueue) finishProcessing(path string) bool {
+func (q *LiveIndexQueue) FinishProcessing(path string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -191,22 +203,22 @@ func (q *liveIndexQueue) finishProcessing(path string) bool {
 	return false
 }
 
+type RetryScheduler struct {
+	mu     sync.Mutex
+	states map[string]*retryState
+}
+
 type retryState struct {
 	attempts int
 	modTime  time.Time
 	timer    *time.Timer
 }
 
-type retryScheduler struct {
-	mu     sync.Mutex
-	states map[string]*retryState
+func NewRetryScheduler() *RetryScheduler {
+	return &RetryScheduler{states: make(map[string]*retryState)}
 }
 
-func newRetryScheduler() *retryScheduler {
-	return &retryScheduler{states: make(map[string]*retryState)}
-}
-
-func (r *retryScheduler) clear(path string) {
+func (r *RetryScheduler) Clear(path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -223,7 +235,7 @@ func (r *retryScheduler) clear(path string) {
 	delete(r.states, path)
 }
 
-func (r *retryScheduler) evictOverflow() int {
+func (r *RetryScheduler) evictOverflow() int {
 	if len(r.states) <= maxRetryStates {
 		return 0
 	}
@@ -243,7 +255,7 @@ func (r *retryScheduler) evictOverflow() int {
 	return evicted
 }
 
-func (r *retryScheduler) schedule(path string, modTime time.Time, onFire func(retryModTime time.Time)) bool {
+func (r *RetryScheduler) Schedule(path string, modTime time.Time, onFire func(retryModTime time.Time)) bool {
 	if path == "" {
 		return false
 	}
@@ -269,19 +281,18 @@ func (r *retryScheduler) schedule(path string, modTime time.Time, onFire func(re
 		r.mu.Unlock()
 		return false
 	}
-	if state.attempts >= maxIndexRetryAttempts {
+	if state.attempts >= MaxIndexRetryAttempts {
 		attempts := state.attempts
 		delete(r.states, path)
 		r.mu.Unlock()
 		logx.Warn("giving up retrying path", "path", path, "attempts", attempts)
 		return false
 	}
-
 	state.attempts++
 	if state.modTime.IsZero() || modTime.After(state.modTime) {
 		state.modTime = modTime
 	}
-	delay := time.Duration(state.attempts) * indexRetryBaseDelay
+	delay := time.Duration(state.attempts) * IndexRetryBaseDelay
 	attempts := state.attempts
 	state.timer = time.AfterFunc(delay, func() {
 		r.mu.Lock()
@@ -298,6 +309,20 @@ func (r *retryScheduler) schedule(path string, modTime time.Time, onFire func(re
 	})
 	r.mu.Unlock()
 
-	logx.Warn("retrying path", "path", path, "delay", delay, "attempt", attempts, "max_attempts", maxIndexRetryAttempts)
+	logx.Warn("retrying path", "path", path, "delay", delay, "attempt", attempts, "max_attempts", MaxIndexRetryAttempts)
 	return true
+}
+
+func LiveQueueSizeForWorkers(workers int) int {
+	if workers < 1 {
+		workers = 1
+	}
+	size := workers * liveQueueMultiplier
+	if size < minLiveQueueSize {
+		size = minLiveQueueSize
+	}
+	if size > maxLiveQueueSize {
+		size = maxLiveQueueSize
+	}
+	return size
 }

@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -14,26 +14,24 @@ type ResyncCoordinator struct {
 	running bool
 	pending bool
 
-	// Callbacks for lifecycle events
-	onStartup func(ctx context.Context) (syncReport, error)
-	onResync  func(ctx context.Context) (syncReport, error)
+	onStartup func(ctx context.Context) (SyncReport, error)
+	onResync  func(ctx context.Context) (SyncReport, error)
 	onState   func(state runtimestate.IndexState, message string)
-	onReady   func(ctx context.Context, report syncReport)
+	onReady   func(ctx context.Context, report SyncReport)
+}
+
+type SyncReport struct {
+	HadIndexFailures bool
 }
 
 // ResyncCallbacks configures the coordinator's behavior.
 type ResyncCallbacks struct {
-	// OnStartup is called during the initial sync (blocking).
-	OnStartup func(ctx context.Context) (syncReport, error)
-	// OnResync is called during subsequent resyncs.
-	OnResync func(ctx context.Context) (syncReport, error)
-	// OnState is called to update the index state.
-	OnState func(state runtimestate.IndexState, message string)
-	// OnReady is called after a successful initial sync.
-	OnReady func(ctx context.Context, report syncReport)
+	OnStartup func(ctx context.Context) (SyncReport, error)
+	OnResync  func(ctx context.Context) (SyncReport, error)
+	OnState   func(state runtimestate.IndexState, message string)
+	OnReady   func(ctx context.Context, report SyncReport)
 }
 
-// NewResyncCoordinator creates a coordinator with the given callbacks.
 func NewResyncCoordinator(callbacks ResyncCallbacks) *ResyncCoordinator {
 	return &ResyncCoordinator{
 		onStartup: callbacks.OnStartup,
@@ -43,8 +41,6 @@ func NewResyncCoordinator(callbacks ResyncCallbacks) *ResyncCoordinator {
 	}
 }
 
-// RunInitialSync performs the initial filesystem sync synchronously.
-// This blocks until the initial sync completes.
 func (rc *ResyncCoordinator) RunInitialSync(ctx context.Context) {
 	if !rc.begin() {
 		return
@@ -52,8 +48,6 @@ func (rc *ResyncCoordinator) RunInitialSync(ctx context.Context) {
 	rc.runLoop(ctx, true)
 }
 
-// RequestResync schedules an asynchronous resync. If a resync is already
-// running, it marks a pending resync to run after the current one completes.
 func (rc *ResyncCoordinator) RequestResync(ctx context.Context) {
 	if !rc.begin() {
 		return
@@ -61,9 +55,6 @@ func (rc *ResyncCoordinator) RequestResync(ctx context.Context) {
 	go rc.runLoop(ctx, false)
 }
 
-// begin attempts to start a resync. Returns true if this caller should
-// proceed with the resync, false if one is already running (in which case
-// a pending resync is marked).
 func (rc *ResyncCoordinator) begin() bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -76,8 +67,6 @@ func (rc *ResyncCoordinator) begin() bool {
 	return true
 }
 
-// finish completes the current resync. If retryAllowed is true and there's
-// a pending resync, it returns true indicating the loop should continue.
 func (rc *ResyncCoordinator) finish(retryAllowed bool) bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -92,11 +81,10 @@ func (rc *ResyncCoordinator) finish(retryAllowed bool) bool {
 	return false
 }
 
-// runLoop executes the resync loop, handling initial startup vs subsequent resyncs.
 func (rc *ResyncCoordinator) runLoop(ctx context.Context, startup bool) {
 	first := startup
 	for {
-		var report syncReport
+		var report SyncReport
 		var err error
 
 		if first && rc.onStartup != nil {
@@ -113,7 +101,7 @@ func (rc *ResyncCoordinator) runLoop(ctx context.Context, startup bool) {
 			rc.setState(runtimestate.IndexStateDegraded, "filesystem resync failed; index may be partially stale")
 		} else if first {
 			rc.handleInitialSyncComplete(ctx, report)
-		} else if report.hadIndexFailures {
+		} else if report.HadIndexFailures {
 			rc.setState(runtimestate.IndexStateDegraded, "filesystem resync completed with indexing failures")
 		} else {
 			rc.setState(runtimestate.IndexStateReady, "filesystem resync complete")
@@ -126,9 +114,8 @@ func (rc *ResyncCoordinator) runLoop(ctx context.Context, startup bool) {
 	}
 }
 
-// handleInitialSyncComplete processes the completion of the initial sync.
-func (rc *ResyncCoordinator) handleInitialSyncComplete(ctx context.Context, report syncReport) {
-	if report.hadIndexFailures {
+func (rc *ResyncCoordinator) handleInitialSyncComplete(ctx context.Context, report SyncReport) {
+	if report.HadIndexFailures {
 		rc.setState(runtimestate.IndexStateDegraded, "initial scan completed with indexing failures")
 	} else {
 		rc.setState(runtimestate.IndexStateReady, "initial scan complete")
@@ -139,7 +126,6 @@ func (rc *ResyncCoordinator) handleInitialSyncComplete(ctx context.Context, repo
 	}
 }
 
-// setState updates the index state via the callback.
 func (rc *ResyncCoordinator) setState(state runtimestate.IndexState, message string) {
 	if rc.onState != nil {
 		rc.onState(state, message)

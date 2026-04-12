@@ -22,6 +22,7 @@ type Store struct {
 	backup                    string
 	maxVectorSearchCandidates int
 	hnsw                      *hnswIndex
+	retriever                 *Retriever
 	keywordWeightOverride     float32
 	vectorWeightOverride      float32
 }
@@ -104,6 +105,7 @@ func openStore(dbPath string) (*Store, error) {
 		maxVectorSearchCandidates: defaultMaxVectorSearchCandidates,
 		hnsw:                      newHNSWIndex(),
 	}
+	s.retriever = NewRetriever(s)
 	for _, pragma := range []string{
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA synchronous = NORMAL`,

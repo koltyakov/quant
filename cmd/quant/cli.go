@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/koltyakov/quant/internal/app"
 	"github.com/koltyakov/quant/internal/config"
 )
 
@@ -91,7 +92,7 @@ func runMCPCommand(args []string) int {
 	}
 
 	if err := runMCP(cfg); err != nil {
-		if errors.Is(err, errRestartRequired) {
+		if errors.Is(err, errRestartRequired) || errors.Is(err, app.ErrRestartRequired) {
 			return restartProcess()
 		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -6,8 +6,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
+
+	"github.com/koltyakov/quant/internal/app"
 )
 
 const (
@@ -28,11 +29,7 @@ type rotatingLogWriter struct {
 }
 
 func logPathForDB(dbPath string) string {
-	ext := filepath.Ext(dbPath)
-	if ext == "" {
-		return dbPath + ".log"
-	}
-	return strings.TrimSuffix(dbPath, ext) + ".log"
+	return app.LogPathForDB(dbPath)
 }
 
 func configureLogging(dbPath string) (io.WriteCloser, error) {
@@ -157,22 +154,5 @@ func rotatedLogPath(path string, generation int) string {
 }
 
 func isCompanionLogPathForDB(dbPath, path string) bool {
-	base := filepath.Clean(logPathForDB(dbPath))
-	path = filepath.Clean(path)
-	if path == base {
-		return true
-	}
-	if !strings.HasPrefix(path, base+".") {
-		return false
-	}
-	suffix := strings.TrimPrefix(path, base+".")
-	if suffix == "" {
-		return false
-	}
-	for _, r := range suffix {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
+	return app.IsCompanionLogPathForDB(dbPath, path)
 }
