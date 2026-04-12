@@ -122,6 +122,10 @@ func openStore(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
+	if err := s.cleanupOrphanedChunks(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("cleaning orphaned chunks: %w", err)
+	}
 
 	return s, nil
 }
@@ -378,9 +382,11 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
 
 func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	var hnswDeleteIDs []int
+	var docID int64
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		doc, err := s.GetDocumentByPath(ctx, path)
 		if err == nil && doc != nil {
+			docID = doc.ID
 			rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, doc.ID)
 			if err == nil {
 				for rows.Next() {
@@ -393,10 +399,34 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 			}
 		}
 	}
+	if docID == 0 {
+		doc, err := s.GetDocumentByPath(ctx, path)
+		if err != nil {
+			return err
+		}
+		if doc == nil {
+			return nil
+		}
+		docID = doc.ID
+	}
 
-	_, err := s.db.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("beginning delete transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := deleteChunksByDocumentIDTx(ctx, tx, docID); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, docID); err != nil {
+		return fmt.Errorf("deleting document: %w", err)
+	}
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing delete transaction: %w", err)
 	}
 
 	if len(hnswDeleteIDs) > 0 {
@@ -409,6 +439,25 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) error {
 	prefix = filepath.Clean(prefix)
 	if prefix == "." || prefix == "" {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("beginning delete-all transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks`); err != nil {
+			return fmt.Errorf("clearing chunks: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
+			return fmt.Errorf("clearing documents: %w", err)
+		}
+		if err := clearHNSWStateTx(ctx, tx); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("committing delete-all transaction: %w", err)
+		}
+
 		if s.hnsw != nil && s.hnsw.ready.Load() {
 			s.hnsw.mu.Lock()
 			s.hnsw.graph = hnsw.NewGraph[int]()
@@ -416,20 +465,23 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 			s.hnsw.graph.EfSearch = hnswEfSearch
 			s.hnsw.mu.Unlock()
 		}
-		_, err := s.db.ExecContext(ctx, `DELETE FROM documents`)
-		return err
+		return nil
 	}
 
+	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		rows, err := s.db.QueryContext(ctx,
-			`SELECT DISTINCT c.document_id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path = ? OR d.path LIKE ? ESCAPE '\'`,
+			`SELECT c.id
+			 FROM chunks c
+			 JOIN documents d ON c.document_id = d.id
+			 WHERE d.path = ? OR d.path LIKE ? ESCAPE '\'`,
 			prefix, sqlLikePrefixPattern(prefix),
 		)
 		if err == nil {
 			for rows.Next() {
-				var docID int64
-				if rows.Scan(&docID) == nil {
-					s.hnswDeleteChunks(ctx, docID)
+				var id int
+				if rows.Scan(&id) == nil {
+					hnswDeleteIDs = append(hnswDeleteIDs, id)
 				}
 			}
 			_ = rows.Close()
@@ -437,11 +489,38 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 	}
 
 	likePrefix := prefix + string(filepath.Separator) + "%"
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM documents WHERE path = ? OR path LIKE ?`,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning delete-by-prefix transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM chunks
+		 WHERE document_id IN (
+		 	SELECT id FROM documents WHERE path = ? OR path LIKE ? ESCAPE '\'
+		 )`,
 		prefix, likePrefix,
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("deleting chunks by prefix: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM documents WHERE path = ? OR path LIKE ? ESCAPE '\'`,
+		prefix, likePrefix,
+	); err != nil {
+		return fmt.Errorf("deleting documents by prefix: %w", err)
+	}
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing delete-by-prefix transaction: %w", err)
+	}
+
+	if len(hnswDeleteIDs) > 0 {
+		s.hnsw.BatchDelete(hnswDeleteIDs)
+	}
+	return nil
 }
 
 func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string) error {

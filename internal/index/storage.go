@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/koltyakov/quant/internal/logx"
 )
 
 func sqlLikePrefixPattern(prefix string) string {
@@ -106,18 +108,74 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks`); err != nil {
+		return fmt.Errorf("clearing chunks: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 		return fmt.Errorf("clearing documents: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
 		return fmt.Errorf("rebuilding chunks fts: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM hnsw_state`); err != nil {
-		return fmt.Errorf("clearing hnsw state: %w", err)
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing reset transaction: %w", err)
 	}
+	return nil
+}
+
+func deleteChunksByDocumentIDTx(ctx context.Context, tx *sql.Tx, docID int64) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID); err != nil {
+		return fmt.Errorf("deleting document chunks: %w", err)
+	}
+	return nil
+}
+
+func clearHNSWStateTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM hnsw_state`); err != nil {
+		return fmt.Errorf("clearing hnsw state: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) cleanupOrphanedChunks(ctx context.Context) error {
+	var orphanCount int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		 FROM chunks c
+		 LEFT JOIN documents d ON d.id = c.document_id
+		 WHERE d.id IS NULL`,
+	).Scan(&orphanCount); err != nil {
+		return fmt.Errorf("counting orphaned chunks: %w", err)
+	}
+	if orphanCount == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning orphan cleanup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM chunks
+		 WHERE NOT EXISTS (
+		 	SELECT 1 FROM documents d WHERE d.id = chunks.document_id
+		 )`,
+	); err != nil {
+		return fmt.Errorf("deleting orphaned chunks: %w", err)
+	}
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing orphan cleanup transaction: %w", err)
+	}
+
+	logx.Warn("removed orphaned chunks from index", "chunks", orphanCount)
 	return nil
 }

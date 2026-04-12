@@ -533,6 +533,52 @@ func TestStore_DeleteDocument(t *testing.T) {
 	}
 }
 
+func TestStore_DeleteDocumentDeletesChunksWhenForeignKeysDisabled(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+	store.db.SetMaxOpenConns(1)
+	store.db.SetMaxIdleConns(1)
+
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("unexpected error disabling foreign keys: %v", err)
+	}
+
+	doc := &Document{
+		Path:       "/test/file.txt",
+		Hash:       "abc123",
+		ModifiedAt: time.Now(),
+	}
+	docID, err := store.UpsertDocument(ctx, doc)
+	if err != nil {
+		t.Fatalf("unexpected error upserting document: %v", err)
+	}
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: docID,
+		Content:    "hello world",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32([]float32{1}),
+	}); err != nil {
+		t.Fatalf("unexpected error inserting chunk: %v", err)
+	}
+
+	if err := store.DeleteDocument(ctx, doc.Path); err != nil {
+		t.Fatalf("unexpected error deleting document: %v", err)
+	}
+
+	docCount, chunkCount, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error reading stats: %v", err)
+	}
+	if docCount != 0 || chunkCount != 0 {
+		t.Fatalf("expected empty index after delete, got %d docs and %d chunks", docCount, chunkCount)
+	}
+}
+
 func TestStore_DeleteDocumentsByPrefix(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")
@@ -592,6 +638,59 @@ func TestStore_Stats(t *testing.T) {
 	}
 	if docCount != 0 || chunkCount != 0 {
 		t.Errorf("expected empty stats, got %d docs, %d chunks", docCount, chunkCount)
+	}
+}
+
+func TestNewStore_CleansOrphanedChunks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/test.db"
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	store.db.SetMaxOpenConns(1)
+	store.db.SetMaxIdleConns(1)
+
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("unexpected error disabling foreign keys: %v", err)
+	}
+
+	docID, err := store.UpsertDocument(ctx, &Document{
+		Path:       "docs/file.txt",
+		Hash:       "hash",
+		ModifiedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error upserting document: %v", err)
+	}
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: docID,
+		Content:    "orphan me",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32([]float32{1}),
+	}); err != nil {
+		t.Fatalf("unexpected error inserting chunk: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, docID); err != nil {
+		t.Fatalf("unexpected error creating orphaned chunk: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected reopen error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	docCount, chunkCount, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error reading stats: %v", err)
+	}
+	if docCount != 0 || chunkCount != 0 {
+		t.Fatalf("expected orphan cleanup on open, got %d docs and %d chunks", docCount, chunkCount)
 	}
 }
 
