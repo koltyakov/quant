@@ -724,9 +724,15 @@ func TestHandleIndexStatus(t *testing.T) {
 	if !strings.Contains(text, "test-model") {
 		t.Fatalf("expected model name in status, got %q", text)
 	}
+	if !strings.Contains(text, "FTS: empty=false, logical_rows=2") {
+		t.Fatalf("expected FTS diagnostics in status, got %q", text)
+	}
 	structured := extractIndexStatusStructured(t, result)
 	if structured.State != string(runtimestate.IndexStateReady) {
 		t.Fatalf("expected ready structured state, got %+v", structured)
+	}
+	if structured.FTS == nil || structured.FTS.Empty || structured.FTS.LogicalRows != 2 {
+		t.Fatalf("expected populated FTS diagnostics, got %+v", structured)
 	}
 }
 

@@ -668,6 +668,30 @@ func TestStore_Stats(t *testing.T) {
 	}
 }
 
+func TestStore_FTSDiagnostics_ReportsLogicalEmptiness(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	diag, err := store.FTSDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected diagnostics error: %v", err)
+	}
+	if !diag.Empty {
+		t.Fatalf("expected empty FTS diagnostics, got %+v", diag)
+	}
+	if diag.LogicalRows != 0 {
+		t.Fatalf("expected zero logical rows, got %+v", diag)
+	}
+	if diag.DataRows != 2 || diag.IdxRows != 0 {
+		t.Fatalf("expected rebuilt empty shadow tables, got %+v", diag)
+	}
+}
+
 func TestNewStore_CleansOrphanedChunks(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := dir + "/test.db"

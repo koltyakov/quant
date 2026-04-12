@@ -30,6 +30,14 @@ type EmbeddingMetadata struct {
 	Normalized bool
 }
 
+// FTSDiagnostics describes the logical and physical state of the FTS index.
+type FTSDiagnostics struct {
+	LogicalRows int  `json:"logical_rows"`
+	DataRows    int  `json:"data_rows"`
+	IdxRows     int  `json:"idx_rows"`
+	Empty       bool `json:"empty"`
+}
+
 // SearchResult represents a search result with scoring information.
 type SearchResult struct {
 	DocumentPath string
@@ -65,6 +73,11 @@ type EmbeddingMetadataRepository interface {
 // StatsProvider provides index statistics.
 type StatsProvider interface {
 	Stats(ctx context.Context) (docCount int, chunkCount int, err error)
+}
+
+// FTSDiagnosticsProvider exposes FTS logical/physical diagnostics.
+type FTSDiagnosticsProvider interface {
+	FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error)
 }
 
 // HealthProvider provides health check capabilities.

@@ -100,15 +100,16 @@ type listSourcesResultRow struct {
 }
 
 type indexStatusToolResponse struct {
-	Documents      int       `json:"documents"`
-	Chunks         int       `json:"chunks"`
-	DBSizeBytes    int64     `json:"db_size_bytes"`
-	DBSize         string    `json:"db_size"`
-	WatchDir       string    `json:"watch_dir"`
-	Model          string    `json:"model"`
-	State          string    `json:"state,omitempty"`
-	StateMessage   string    `json:"state_message,omitempty"`
-	StateUpdatedAt time.Time `json:"state_updated_at,omitempty"`
+	Documents      int                   `json:"documents"`
+	Chunks         int                   `json:"chunks"`
+	DBSizeBytes    int64                 `json:"db_size_bytes"`
+	DBSize         string                `json:"db_size"`
+	WatchDir       string                `json:"watch_dir"`
+	Model          string                `json:"model"`
+	FTS            *index.FTSDiagnostics `json:"fts,omitempty"`
+	State          string                `json:"state,omitempty"`
+	StateMessage   string                `json:"state_message,omitempty"`
+	StateUpdatedAt time.Time             `json:"state_updated_at,omitempty"`
 }
 
 type findSimilarToolResponse struct {
@@ -328,6 +329,14 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		WatchDir:    s.cfg.WatchDir,
 		Model:       s.cfg.EmbedModel,
 	}
+	if provider, ok := s.store.(index.FTSDiagnosticsProvider); ok {
+		diag, diagErr := provider.FTSDiagnostics(ctx)
+		if diagErr != nil {
+			logx.Warn("MCP index_status fts diagnostics error", "err", diagErr)
+		} else {
+			structured.FTS = &diag
+		}
+	}
 	if s.state != nil {
 		snapshot := s.state.Snapshot()
 		structured.State = string(snapshot.State)
@@ -339,6 +348,12 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s",
 		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel,
 	)
+	if structured.FTS != nil {
+		output += fmt.Sprintf(
+			"\n  FTS: empty=%t, logical_rows=%d, data_rows=%d, idx_rows=%d",
+			structured.FTS.Empty, structured.FTS.LogicalRows, structured.FTS.DataRows, structured.FTS.IdxRows,
+		)
+	}
 	if structured.State != "" {
 		output += fmt.Sprintf("\n  State: %s", structured.State)
 		if structured.StateMessage != "" {

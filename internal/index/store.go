@@ -629,3 +629,20 @@ func (s *Store) Stats(ctx context.Context) (docCount int, chunkCount int, err er
 	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount)
 	return docCount, chunkCount, err
 }
+
+func (s *Store) FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error) {
+	var diag FTSDiagnostics
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts`).Scan(&diag.LogicalRows); err != nil {
+		return FTSDiagnostics{}, fmt.Errorf("counting chunks_fts rows: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_data`).Scan(&diag.DataRows); err != nil {
+		return FTSDiagnostics{}, fmt.Errorf("counting chunks_fts_data rows: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_idx`).Scan(&diag.IdxRows); err != nil {
+		return FTSDiagnostics{}, fmt.Errorf("counting chunks_fts_idx rows: %w", err)
+	}
+
+	diag.Empty = diag.LogicalRows == 0
+	return diag, nil
+}
