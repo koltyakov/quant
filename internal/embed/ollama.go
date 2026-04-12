@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,8 @@ type ollamaEmbedResponse struct {
 	Model      string      `json:"model"`
 	Embeddings [][]float32 `json:"embeddings"`
 }
+
+var ErrPermanent = errors.New("embed: permanent error")
 
 const MaxInputRunes = 4000
 
@@ -122,8 +125,11 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 				mid := len(truncated) / 2
 				left, errL := o.embedBatch(ctx, truncated[:mid], retries+1)
 				right, errR := o.embedBatch(ctx, truncated[mid:], retries+1)
-				if errL != nil || errR != nil {
-					return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
+				if errL != nil {
+					return nil, errL
+				}
+				if errR != nil {
+					return nil, errR
 				}
 				return append(left, right...), nil
 			}
@@ -143,7 +149,7 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 			}
 			return o.embedBatch(ctx, texts, retries+1)
 		}
-		return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
+		return nil, ollamaStatusError(resp.StatusCode, body)
 	}
 
 	var embedResp ollamaEmbedResponse
@@ -212,6 +218,13 @@ func ollamaEmbedURL(raw string) (string, error) {
 	embedURL.RawPath = ""
 	embedURL.Fragment = ""
 	return embedURL.String(), nil
+}
+
+func ollamaStatusError(statusCode int, body []byte) error {
+	if statusCode >= 400 && statusCode < 500 && statusCode != http.StatusTooManyRequests {
+		return fmt.Errorf("%w: ollama returned status %d: %s", ErrPermanent, statusCode, string(body))
+	}
+	return fmt.Errorf("ollama returned status %d: %s", statusCode, string(body))
 }
 
 // TruncateForInput cuts text to at most maxChars runes, preferring to break

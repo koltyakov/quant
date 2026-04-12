@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/koltyakov/quant/internal/config"
+	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/testutil"
@@ -110,6 +111,24 @@ func (f *blockingExtractor) Extract(context.Context, string) (string, error) {
 }
 
 func (f *blockingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
+
+type permanentFailingEmbedder struct {
+	calls atomic.Int32
+}
+
+func (e *permanentFailingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.calls.Add(1)
+	return nil, embed.ErrPermanent
+}
+
+func (e *permanentFailingEmbedder) EmbedBatch(context.Context, []string) ([][]float32, error) {
+	e.calls.Add(1)
+	return nil, embed.ErrPermanent
+}
+
+func (e *permanentFailingEmbedder) Dimensions() int { return 1 }
+
+func (e *permanentFailingEmbedder) Close() error { return nil }
 
 type selectiveBlockingExtractor struct {
 	texts       map[string]string
@@ -749,6 +768,59 @@ func TestInitialSyncWithReport_TracksIndexFailures(t *testing.T) {
 	}
 	if !report.hadIndexFailures {
 		t.Fatal("expected initial sync report to record indexing failures")
+	}
+}
+
+func TestInitialSyncWithReport_DoesNotRetryPermanentIndexFailures(t *testing.T) {
+	oldRetryDelay := indexRetryBaseDelay
+	oldRetryAttempts := maxIndexRetryAttempts
+	indexRetryBaseDelay = 10 * time.Millisecond
+	maxIndexRetryAttempts = 2
+	t.Cleanup(func() {
+		indexRetryBaseDelay = oldRetryDelay
+		maxIndexRetryAttempts = oldRetryAttempts
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	emb := &permanentFailingEmbedder{}
+	ext := &countingExtractor{text: "hello world"}
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  emb,
+		extractor: ext,
+	}
+
+	report, err := idx.initialSyncWithReport(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+	if !report.hadIndexFailures {
+		t.Fatal("expected initial sync report to record indexing failures")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if got := ext.calls.Load(); got != 1 {
+		t.Fatalf("expected no retry after permanent failure, got %d extraction attempts", got)
+	}
+	if got := emb.calls.Load(); got != 1 {
+		t.Fatalf("expected no retry after permanent failure, got %d embed attempts", got)
 	}
 }
 

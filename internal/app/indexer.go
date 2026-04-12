@@ -225,17 +225,7 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 		if result.err != nil {
 			report.HadIndexFailures = true
 			logx.Error("indexing failed", "path", result.path, "err", result.err)
-			if idx.retries != nil {
-				idx.retries.Schedule(result.path, result.modTime, func(retryModTime time.Time) {
-					select {
-					case <-ctx.Done():
-						idx.retries.Clear(result.path)
-						return
-					default:
-					}
-					idx.EnqueueLiveIndex(ctx, result.path, retryModTime)
-				})
-			}
+			idx.scheduleIndexRetry(ctx, result.path, result.modTime, result.err)
 			continue
 		}
 		if idx.retries != nil {
@@ -376,17 +366,7 @@ func (idx *Indexer) processLiveIndexRequestDirect(ctx context.Context, path stri
 	if err != nil {
 		idx.setIndexState(runtimestate.IndexStateDegraded, "live indexing failed; some files may be stale")
 		logx.Error("indexing failed", "path", path, "err", err)
-		if idx.retries != nil {
-			idx.retries.Schedule(path, modTime, func(retryModTime time.Time) {
-				select {
-				case <-ctx.Done():
-					idx.retries.Clear(path)
-					return
-				default:
-				}
-				idx.EnqueueLiveIndex(ctx, path, retryModTime)
-			})
-		}
+		idx.scheduleIndexRetry(ctx, path, modTime, err)
 	} else {
 		if idx.retries != nil {
 			idx.retries.Clear(path)
@@ -715,6 +695,41 @@ func SameModTime(a, b time.Time) bool {
 
 func normalizeModTime(t time.Time) time.Time {
 	return t.UTC().Round(0)
+}
+
+func (idx *Indexer) scheduleIndexRetry(ctx context.Context, path string, modTime time.Time, err error) {
+	if idx.retries == nil {
+		return
+	}
+	if !shouldRetryIndexError(err) {
+		idx.retries.Clear(path)
+		logx.Warn("not retrying path", "path", path, "err", err)
+		return
+	}
+	idx.retries.Schedule(path, modTime, func(retryModTime time.Time) {
+		select {
+		case <-ctx.Done():
+			idx.retries.Clear(path)
+			return
+		default:
+		}
+		idx.EnqueueLiveIndex(ctx, path, retryModTime)
+	})
+}
+
+func shouldRetryIndexError(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return false
+	case errors.Is(err, ErrOCRFailed):
+		return false
+	case errors.Is(err, embed.ErrPermanent):
+		return false
+	default:
+		return true
+	}
 }
 
 func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (IndexAction, error) {
