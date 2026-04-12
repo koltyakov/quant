@@ -456,11 +456,13 @@ func applyEnv(cfg *Config) {
 
 func defaultIndexWorkers() int {
 	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 {
-		return 2
+	if workers < 1 {
+		return 1
 	}
-	if workers > 8 {
-		return 8
+	// PDF extraction and chunk embedding are memory-heavy; keep the default
+	// conservative to avoid large parallel working sets on desktop machines.
+	if workers > 2 {
+		return 2
 	}
 	return workers
 }

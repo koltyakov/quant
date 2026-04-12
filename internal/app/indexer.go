@@ -22,6 +22,7 @@ import (
 )
 
 var ErrOCRFailed = extract.ErrOCRFailed
+var ErrFileTooLarge = extract.ErrFileTooLarge
 
 const quarantineDirName = ".quarantine"
 
@@ -736,6 +737,8 @@ func shouldRetryIndexError(err error) bool {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return false
 	case errors.Is(err, ErrOCRFailed):
+		return false
+	case errors.Is(err, ErrFileTooLarge):
 		return false
 	case errors.Is(err, embed.ErrPermanent):
 		return false

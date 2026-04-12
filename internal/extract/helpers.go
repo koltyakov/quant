@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +12,8 @@ import (
 )
 
 const maxExtractorFileSize int64 = 64 << 20
+
+var ErrFileTooLarge = errors.New("extractor file exceeds size limit")
 
 func checkContext(ctx context.Context) error {
 	if ctx == nil {
@@ -25,7 +28,7 @@ func ensureFileSize(path string, limit int64) error {
 		return err
 	}
 	if info.Size() > limit {
-		return fmt.Errorf("file exceeds extraction size limit: %s (%s > %s)", path, formatExtractBytes(info.Size()), formatExtractBytes(limit))
+		return fmt.Errorf("%w: %s (%s > %s)", ErrFileTooLarge, path, formatExtractBytes(info.Size()), formatExtractBytes(limit))
 	}
 	return nil
 }
@@ -58,7 +61,7 @@ func readZipFile(ctx context.Context, files []*zip.File, name string) ([]byte, e
 			if f.UncompressedSize64 <= math.MaxInt64 {
 				entrySize = int64(f.UncompressedSize64)
 			}
-			return nil, fmt.Errorf("zip entry exceeds extraction size limit: %s (%s > %s)", name, formatExtractBytes(entrySize), formatExtractBytes(maxExtractorFileSize))
+			return nil, fmt.Errorf("%w: zip entry %s (%s > %s)", ErrFileTooLarge, name, formatExtractBytes(entrySize), formatExtractBytes(maxExtractorFileSize))
 		}
 
 		rc, err := f.Open()
@@ -90,7 +93,7 @@ func readAllLimited(ctx context.Context, r io.Reader, limit int64, name string) 
 		if n > 0 {
 			total += int64(n)
 			if total > limit {
-				return nil, fmt.Errorf("%s exceeds extraction size limit (%s)", name, formatExtractBytes(limit))
+				return nil, fmt.Errorf("%w: %s (%s)", ErrFileTooLarge, name, formatExtractBytes(limit))
 			}
 			out = append(out, buf[:n]...)
 		}

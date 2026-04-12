@@ -238,6 +238,8 @@ func TestPDFExtractor_RejectsOversizedFiles(t *testing.T) {
 
 	if _, err := ext.Extract(context.Background(), path); err == nil {
 		t.Fatal("expected oversized PDF to be rejected")
+	} else if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("expected ErrFileTooLarge, got %v", err)
 	}
 }
 

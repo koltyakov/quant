@@ -106,6 +106,13 @@ func TestApplyEnv(t *testing.T) {
 	}
 }
 
+func TestDefaultIndexWorkers_IsConservative(t *testing.T) {
+	got := defaultIndexWorkers()
+	if got < 1 || got > 2 {
+		t.Fatalf("expected default index workers in [1,2], got %d", got)
+	}
+}
+
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
