@@ -52,11 +52,11 @@ func TestPDFExtractor_ExtractPrefersNativeText(t *testing.T) {
 	path := writeTempFile(t, "file.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
 			if filepath.Base(path) != "file.pdf" {
 				t.Fatalf("unexpected path: %s", path)
 			}
-			return "[Page 1]\nhello world", nil
+			return pdfInspection{Text: "[Page 1]\nhello world", HasNativeText: true}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			t.Fatal("ocrmypdf lookup should not run when native PDF text exists")
@@ -81,11 +81,11 @@ func TestPDFExtractor_ExtractUsesOCRFallbackWhenNativeTextMissing(t *testing.T) 
 	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
 			if filepath.Base(path) != "scan.pdf" {
 				t.Fatalf("unexpected path: %s", path)
 			}
-			return "", nil
+			return pdfInspection{}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
@@ -117,8 +117,8 @@ func TestPDFExtractor_ExtractSkipsOCRWhenBinaryUnavailable(t *testing.T) {
 	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
-			return "", nil
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			return "", false
@@ -142,8 +142,8 @@ func TestPDFExtractor_ExtractIgnoresOCRFailure(t *testing.T) {
 	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
-			return "", nil
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
@@ -168,8 +168,8 @@ func TestPDFExtractor_ExtractPropagatesCancellation(t *testing.T) {
 	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
-			return "", nil
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
@@ -190,8 +190,8 @@ func TestPDFExtractor_ExtractUsesConfiguredLanguages(t *testing.T) {
 
 	ext := &PDFExtractor{
 		ocrLanguages: "rus+eng",
-		extractNative: func(ctx context.Context, path string) (string, error) {
-			return "", nil
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{}, nil
 		},
 		findOCRBinary: func() (string, bool) {
 			return "/usr/bin/ocrmypdf", true
@@ -230,14 +230,68 @@ func TestPDFExtractor_RejectsOversizedFiles(t *testing.T) {
 	}
 
 	ext := &PDFExtractor{
-		extractNative: func(ctx context.Context, path string) (string, error) {
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
 			t.Fatal("native extractor should not run for oversized files")
-			return "", nil
+			return pdfInspection{}, nil
 		},
 	}
 
 	if _, err := ext.Extract(context.Background(), path); err == nil {
 		t.Fatal("expected oversized PDF to be rejected")
+	}
+}
+
+func TestPDFExtractor_ExtractSkipsIllustratedNativeTextPDF(t *testing.T) {
+	path := writeTempFile(t, "illustrated.pdf", []byte("%PDF-1.4"))
+
+	ext := &PDFExtractor{
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{
+				Text:             "[Page 1]\nhello world",
+				HasNativeText:    true,
+				HasIllustrations: true,
+			}, nil
+		},
+		findOCRBinary: func() (string, bool) {
+			t.Fatal("ocrmypdf lookup should not run for illustrated native-text PDFs")
+			return "", false
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
+			t.Fatal("ocrmypdf should not run for illustrated native-text PDFs")
+			return "", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("expected illustrated PDF to be skipped, got %q", text)
+	}
+}
+
+func TestPDFExtractor_ExtractStillUsesOCRForImageOnlyPDF(t *testing.T) {
+	path := writeTempFile(t, "scan.pdf", []byte("%PDF-1.4"))
+
+	ext := &PDFExtractor{
+		inspectPDF: func(ctx context.Context, path string) (pdfInspection, error) {
+			return pdfInspection{HasIllustrations: true}, nil
+		},
+		findOCRBinary: func() (string, bool) {
+			return "/usr/bin/ocrmypdf", true
+		},
+		runOCR: func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error) {
+			return "[Page 1]\nscanned text", nil
+		},
+	}
+
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected extract error: %v", err)
+	}
+	if text != "[Page 1]\nscanned text" {
+		t.Fatalf("unexpected OCR text: %q", text)
 	}
 }
 

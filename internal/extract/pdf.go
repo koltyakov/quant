@@ -22,7 +22,7 @@ const defaultPDFOCRTimeout = 2 * time.Minute
 
 type PDFExtractor struct {
 	findOCRBinary func() (string, bool)
-	extractNative func(ctx context.Context, path string) (string, error)
+	inspectPDF    func(ctx context.Context, path string) (pdfInspection, error)
 	runOCR        func(ctx context.Context, binaryPath, path, languages string, timeout time.Duration) (string, error)
 	ocrLanguages  string
 	ocrTimeout    time.Duration
@@ -30,6 +30,12 @@ type PDFExtractor struct {
 	ocrLookupOnce sync.Once
 	ocrBinaryPath string
 	ocrAvailable  bool
+}
+
+type pdfInspection struct {
+	Text             string
+	HasNativeText    bool
+	HasIllustrations bool
 }
 
 func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error) {
@@ -41,12 +47,16 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 		return "", err
 	}
 
-	text, err := p.nativeExtractor()(ctx, path)
+	inspection, err := p.pdfInspector()(ctx, path)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(text) != "" {
-		return text, nil
+	if inspection.HasNativeText && inspection.HasIllustrations {
+		logx.Info("skipping illustrated pdf", "path", path)
+		return "", nil
+	}
+	if inspection.HasNativeText {
+		return inspection.Text, nil
 	}
 
 	binaryPath, ok := p.ocrBinary()
@@ -54,7 +64,7 @@ func (p *PDFExtractor) Extract(ctx context.Context, path string) (string, error)
 		return "", nil
 	}
 
-	text, err = p.ocrRunner()(ctx, binaryPath, path, p.languages(), p.timeout())
+	text, err := p.ocrRunner()(ctx, binaryPath, path, p.languages(), p.timeout())
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -73,27 +83,31 @@ func (p *PDFExtractor) timeout() time.Duration {
 	return defaultPDFOCRTimeout
 }
 
-func extractPDFText(ctx context.Context, path string) (string, error) {
+func inspectPDF(ctx context.Context, path string) (pdfInspection, error) {
 	if err := checkContext(ctx); err != nil {
-		return "", err
+		return pdfInspection{}, err
 	}
 
 	f, r, err := pdf.Open(path)
 	if err != nil {
-		return "", err
+		return pdfInspection{}, err
 	}
 	defer func() { _ = f.Close() }()
 
+	result := pdfInspection{}
 	var parts []string
 	pageCount := r.NumPage()
 	for i := 1; i <= pageCount; i++ {
 		if err := checkContext(ctx); err != nil {
-			return "", err
+			return pdfInspection{}, err
 		}
 
 		page := r.Page(i)
 		if page.V.IsNull() {
 			continue
+		}
+		if pageHasIllustrations(page) {
+			result.HasIllustrations = true
 		}
 		content, err := page.GetPlainText(nil)
 		if err != nil {
@@ -104,20 +118,36 @@ func extractPDFText(ctx context.Context, path string) (string, error) {
 		if content == "" {
 			continue
 		}
+		result.HasNativeText = true
 		parts = append(parts, strings.TrimSpace(strings.Join([]string{
 			"[Page " + strconv.Itoa(i) + "]",
 			content,
 		}, "\n")))
 	}
 
-	return strings.Join(parts, "\n\n"), nil
+	result.Text = strings.Join(parts, "\n\n")
+	return result, nil
 }
 
-func (p *PDFExtractor) nativeExtractor() func(ctx context.Context, path string) (string, error) {
-	if p.extractNative != nil {
-		return p.extractNative
+func pageHasIllustrations(page pdf.Page) bool {
+	xObjects := page.Resources().Key("XObject")
+	if xObjects.IsNull() {
+		return false
 	}
-	return extractPDFText
+	for _, name := range xObjects.Keys() {
+		xObject := xObjects.Key(name)
+		if xObject.Key("Subtype").Name() == "Image" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *PDFExtractor) pdfInspector() func(ctx context.Context, path string) (pdfInspection, error) {
+	if p.inspectPDF != nil {
+		return p.inspectPDF
+	}
+	return inspectPDF
 }
 
 func (p *PDFExtractor) ocrBinary() (string, bool) {
