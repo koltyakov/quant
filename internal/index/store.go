@@ -422,6 +422,9 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting document: %w", err)
 	}
+	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+		return err
+	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
 	}
@@ -450,6 +453,9 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 			return fmt.Errorf("clearing documents: %w", err)
+		}
+		if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+			return err
 		}
 		if err := clearHNSWStateTx(ctx, tx); err != nil {
 			return err
@@ -509,6 +515,9 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		prefix, likePrefix,
 	); err != nil {
 		return fmt.Errorf("deleting documents by prefix: %w", err)
+	}
+	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err

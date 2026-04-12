@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+func ftsShadowRowCounts(t *testing.T, store *Store) (dataRows, idxRows int) {
+	t.Helper()
+
+	ctx := context.Background()
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_data`).Scan(&dataRows); err != nil {
+		t.Fatalf("unexpected error reading chunks_fts_data: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_idx`).Scan(&idxRows); err != nil {
+		t.Fatalf("unexpected error reading chunks_fts_idx: %v", err)
+	}
+	return dataRows, idxRows
+}
+
 func TestNewStore(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")
@@ -531,6 +544,11 @@ func TestStore_DeleteDocument(t *testing.T) {
 	if chunkCount != 0 {
 		t.Fatalf("expected chunk cascade delete, got %d chunks", chunkCount)
 	}
+
+	dataRows, idxRows := ftsShadowRowCounts(t, store)
+	if dataRows != 2 || idxRows != 0 {
+		t.Fatalf("expected rebuilt empty FTS shadow tables, got data=%d idx=%d", dataRows, idxRows)
+	}
 }
 
 func TestStore_DeleteDocumentDeletesChunksWhenForeignKeysDisabled(t *testing.T) {
@@ -620,6 +638,15 @@ func TestStore_DeleteDocumentsByPrefix(t *testing.T) {
 	}
 	if docs[0].Path != "src/main.go" {
 		t.Fatalf("expected src/main.go to remain, got %s", docs[0].Path)
+	}
+
+	if err := store.DeleteDocumentsByPrefix(ctx, "."); err != nil {
+		t.Fatalf("unexpected delete-all error: %v", err)
+	}
+
+	dataRows, idxRows := ftsShadowRowCounts(t, store)
+	if dataRows != 2 || idxRows != 0 {
+		t.Fatalf("expected rebuilt empty FTS shadow tables, got data=%d idx=%d", dataRows, idxRows)
 	}
 }
 

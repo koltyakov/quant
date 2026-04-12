@@ -114,8 +114,8 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 		return fmt.Errorf("clearing documents: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
-		return fmt.Errorf("rebuilding chunks fts: %w", err)
+	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
@@ -130,6 +130,13 @@ func (s *Store) resetIndex(ctx context.Context) error {
 func deleteChunksByDocumentIDTx(ctx context.Context, tx *sql.Tx, docID int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting document chunks: %w", err)
+	}
+	return nil
+}
+
+func rebuildChunksFTSTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
+		return fmt.Errorf("rebuilding chunks fts: %w", err)
 	}
 	return nil
 }
@@ -168,6 +175,9 @@ func (s *Store) cleanupOrphanedChunks(ctx context.Context) error {
 		 )`,
 	); err != nil {
 		return fmt.Errorf("deleting orphaned chunks: %w", err)
+	}
+	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
