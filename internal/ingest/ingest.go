@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/koltyakov/quant/internal/chunk"
 	"github.com/koltyakov/quant/internal/embed"
@@ -36,7 +37,7 @@ func (p *Pipeline) Process(ctx context.Context, docKey, filePath string, existin
 		return nil, nil, nil
 	}
 
-	chunks := chunk.SplitWithPath(text, filePath, p.ChunkSize, p.Overlap)
+	chunks := PrepareChunks(text, filePath, p.ChunkSize, p.Overlap)
 	if len(chunks) == 0 {
 		return nil, nil, nil
 	}
@@ -149,6 +150,57 @@ func BuildEmbedInput(docKey, heading string, content string) string {
 		return heading + "\n\n" + content
 	}
 	return content
+}
+
+func PrepareChunks(text, filePath string, chunkSize int, overlap float64) []chunk.Chunk {
+	chunks := chunk.SplitWithPath(text, filePath, chunkSize, overlap)
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	prepared := make([]chunk.Chunk, 0, len(chunks))
+	for _, c := range chunks {
+		prepared = append(prepared, splitChunkForEmbeddingBudget(c)...)
+	}
+	for i := range prepared {
+		prepared[i].Index = i
+	}
+	return prepared
+}
+
+func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
+	contentBudget := embedContentBudget(c.Heading)
+	if contentBudget < 1 {
+		contentBudget = 1
+	}
+	if utf8.RuneCountInString(BuildEmbedInput("", c.Heading, c.Content)) <= embed.MaxInputRunes {
+		return []chunk.Chunk{c}
+	}
+
+	remaining := strings.TrimSpace(c.Content)
+	parts := make([]chunk.Chunk, 0, 2)
+	for remaining != "" {
+		piece, consumed := embed.PrefixWithinInputBudget(remaining, contentBudget)
+		if piece == "" || consumed <= 0 {
+			piece = embed.TruncateForInput(remaining, contentBudget)
+			consumed = min(utf8.RuneCountInString(remaining), contentBudget)
+		}
+		parts = append(parts, chunk.Chunk{Content: piece, Heading: c.Heading})
+		remainingRunes := []rune(remaining)
+		if consumed >= len(remainingRunes) {
+			break
+		}
+		remaining = strings.TrimSpace(string(remainingRunes[consumed:]))
+	}
+	return parts
+}
+
+func embedContentBudget(heading string) int {
+	budget := embed.MaxInputRunes
+	if heading != "" {
+		budget -= utf8.RuneCountInString(heading) + 2
+	}
+	return budget
 }
 
 func CodeSignature(block string) string {

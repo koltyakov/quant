@@ -68,6 +68,56 @@ const (
 	maxSearchOutputRunes  = 12000
 )
 
+type searchToolResponse struct {
+	Query           string                `json:"query"`
+	PathPrefix      string                `json:"path_prefix,omitempty"`
+	Limit           int                   `json:"limit"`
+	Threshold       float32               `json:"threshold"`
+	EmbeddingStatus string                `json:"embedding_status"`
+	Note            string                `json:"note,omitempty"`
+	Results         []searchToolResultRow `json:"results"`
+}
+
+type searchToolResultRow struct {
+	ChunkID      int64   `json:"chunk_id"`
+	Path         string  `json:"path"`
+	ChunkIndex   int     `json:"chunk_index"`
+	Score        float32 `json:"score"`
+	ScoreKind    string  `json:"score_kind"`
+	ChunkContent string  `json:"chunk_content"`
+}
+
+type listSourcesToolResponse struct {
+	Total   int                    `json:"total"`
+	Limit   int                    `json:"limit"`
+	Shown   int                    `json:"shown"`
+	Sources []listSourcesResultRow `json:"sources"`
+}
+
+type listSourcesResultRow struct {
+	Path      string    `json:"path"`
+	IndexedAt time.Time `json:"indexed_at"`
+}
+
+type indexStatusToolResponse struct {
+	Documents      int       `json:"documents"`
+	Chunks         int       `json:"chunks"`
+	DBSizeBytes    int64     `json:"db_size_bytes"`
+	DBSize         string    `json:"db_size"`
+	WatchDir       string    `json:"watch_dir"`
+	Model          string    `json:"model"`
+	State          string    `json:"state,omitempty"`
+	StateMessage   string    `json:"state_message,omitempty"`
+	StateUpdatedAt time.Time `json:"state_updated_at,omitempty"`
+}
+
+type findSimilarToolResponse struct {
+	ChunkID int64                 `json:"chunk_id"`
+	Limit   int                   `json:"limit"`
+	Source  searchToolResultRow   `json:"source"`
+	Results []searchToolResultRow `json:"results"`
+}
+
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	if err := s.acquireToolSlot(ctx); err != nil {
 		return nil, err
@@ -140,14 +190,32 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	logx.Info("MCP search result", "query", summarizeLogText(query, 120), "path", pathPrefix, "raw_hits", len(results), "returned", len(filtered), "duration", time.Since(startedAt).Round(time.Millisecond), "spotlight", formatSearchSpotlights(filtered, 3))
 
 	if len(filtered) == 0 {
-		return mcplib.NewToolResultText("No results found."), nil
+		structured := searchToolResponse{
+			Query:           query,
+			PathPrefix:      pathPrefix,
+			Limit:           limit,
+			Threshold:       threshold,
+			EmbeddingStatus: embeddingStatus(embedErr),
+			Note:            embeddingNote(embedErr),
+			Results:         nil,
+		}
+		return mcplib.NewToolResultStructured(structured, "No results found."), nil
 	}
 
 	output := formatSearchResults(filtered)
+	structured := searchToolResponse{
+		Query:           query,
+		PathPrefix:      pathPrefix,
+		Limit:           limit,
+		Threshold:       threshold,
+		EmbeddingStatus: embeddingStatus(embedErr),
+		Note:            embeddingNote(embedErr),
+		Results:         searchRows(filtered),
+	}
 	if embedErr != nil {
 		output = "[Note: embedding backend unavailable; showing keyword-only results]\n\n" + output
 	}
-	return mcplib.NewToolResultText(output), nil
+	return mcplib.NewToolResultStructured(structured, output), nil
 }
 
 func normalizeSearchPathPrefix(watchDir, raw string) (string, error) {
@@ -211,8 +279,15 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 
 	logx.Info("MCP list_sources", "count", docCount, "returned", len(docs), "spotlight", formatDocumentSpotlights(docs, 5))
 
+	structured := listSourcesToolResponse{
+		Total:   docCount,
+		Limit:   limit,
+		Shown:   len(docs),
+		Sources: listSourceRows(docs),
+	}
+
 	if docCount == 0 {
-		return mcplib.NewToolResultText("No documents indexed."), nil
+		return mcplib.NewToolResultStructured(structured, "No documents indexed."), nil
 	}
 
 	total := docCount
@@ -229,7 +304,7 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 		output += fmt.Sprintf("  ... and %d more\n", total-len(docs))
 	}
 
-	return mcplib.NewToolResultText(output), nil
+	return mcplib.NewToolResultStructured(structured, output), nil
 }
 
 func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -245,15 +320,35 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	}
 
 	dbSize := sqliteDiskUsage(s.cfg.DBPath)
+	structured := indexStatusToolResponse{
+		Documents:   docCount,
+		Chunks:      chunkCount,
+		DBSizeBytes: dbSize,
+		DBSize:      formatBytes(dbSize),
+		WatchDir:    s.cfg.WatchDir,
+		Model:       s.cfg.EmbedModel,
+	}
+	if s.state != nil {
+		snapshot := s.state.Snapshot()
+		structured.State = string(snapshot.State)
+		structured.StateMessage = snapshot.Message
+		structured.StateUpdatedAt = snapshot.UpdatedAt
+	}
 
 	output := fmt.Sprintf(
 		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s",
 		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel,
 	)
+	if structured.State != "" {
+		output += fmt.Sprintf("\n  State: %s", structured.State)
+		if structured.StateMessage != "" {
+			output += fmt.Sprintf("\n  State Detail: %s", structured.StateMessage)
+		}
+	}
 
-	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel)
+	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel, "state", structured.State)
 
-	return mcplib.NewToolResultText(output), nil
+	return mcplib.NewToolResultStructured(structured, output), nil
 }
 
 func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -298,7 +393,13 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 	logx.Info("MCP find_similar", "chunk_id", int64(chunkID), "source", source.DocumentPath, "results", len(results), "duration", time.Since(startedAt).Round(time.Millisecond))
 
 	if len(results) == 0 {
-		return mcplib.NewToolResultText("No similar chunks found."), nil
+		structured := findSimilarToolResponse{
+			ChunkID: int64(chunkID),
+			Limit:   limit,
+			Source:  searchRow(*source),
+			Results: nil,
+		}
+		return mcplib.NewToolResultStructured(structured, "No similar chunks found."), nil
 	}
 
 	header := fmt.Sprintf("Source chunk %d from %s (chunk %d):\n%s\n\nSimilar chunks:\n",
@@ -306,7 +407,57 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 		summarizeLogText(source.ChunkContent, 200))
 
 	output := header + formatSearchResults(results)
-	return mcplib.NewToolResultText(output), nil
+	structured := findSimilarToolResponse{
+		ChunkID: int64(chunkID),
+		Limit:   limit,
+		Source:  searchRow(*source),
+		Results: searchRows(results),
+	}
+	return mcplib.NewToolResultStructured(structured, output), nil
+}
+
+func embeddingStatus(err error) string {
+	if err != nil {
+		return "keyword_only"
+	}
+	return "hybrid"
+}
+
+func embeddingNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "embedding backend unavailable; showing keyword-only results"
+}
+
+func searchRows(results []index.SearchResult) []searchToolResultRow {
+	rows := make([]searchToolResultRow, 0, len(results))
+	for _, result := range results {
+		rows = append(rows, searchRow(result))
+	}
+	return rows
+}
+
+func searchRow(result index.SearchResult) searchToolResultRow {
+	return searchToolResultRow{
+		ChunkID:      result.ChunkID,
+		Path:         result.DocumentPath,
+		ChunkIndex:   result.ChunkIndex,
+		Score:        result.Score,
+		ScoreKind:    result.ScoreKind,
+		ChunkContent: result.ChunkContent,
+	}
+}
+
+func listSourceRows(docs []index.Document) []listSourcesResultRow {
+	rows := make([]listSourcesResultRow, 0, len(docs))
+	for _, doc := range docs {
+		rows = append(rows, listSourcesResultRow{
+			Path:      doc.Path,
+			IndexedAt: doc.IndexedAt,
+		})
+	}
+	return rows
 }
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {

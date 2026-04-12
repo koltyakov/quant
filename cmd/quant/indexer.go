@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/koltyakov/quant/internal/chunk"
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
 	"github.com/koltyakov/quant/internal/ingest"
 	"github.com/koltyakov/quant/internal/logx"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -42,6 +42,8 @@ type indexer struct {
 	paths   *pathSyncTracker
 	live    *liveIndexQueue
 	retries *retryScheduler
+
+	indexState *runtimestate.IndexStateTracker
 
 	resyncMu      sync.Mutex
 	resyncRunning bool
@@ -94,6 +96,7 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 	first := startup
 	for {
 		if first {
+			idx.setIndexState(runtimestate.IndexStateIndexing, "initial filesystem scan in progress")
 			logx.Info("starting initial scan", "watch_dir", idx.cfg.WatchDir)
 		} else {
 			logx.Info("starting filesystem resync", "watch_dir", idx.cfg.WatchDir)
@@ -105,6 +108,7 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 				idx.finishResync(false)
 				return
 			}
+			idx.setIndexState(runtimestate.IndexStateDegraded, "filesystem resync failed; index may be partially stale")
 			logx.Error("filesystem resync failed", "err", err)
 		} else if first {
 			docCount, _, err := idx.store.Stats(ctx)
@@ -113,8 +117,10 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 			} else {
 				logx.Info("initial scan complete", "documents", docCount)
 				if report.hadIndexFailures {
+					idx.setIndexState(runtimestate.IndexStateDegraded, "initial scan completed with indexing failures")
 					logx.Warn("initial scan completed with indexing failures", "action", "keeping database backup until a clean rebuild succeeds")
 				} else {
+					idx.setIndexState(runtimestate.IndexStateReady, "initial scan complete")
 					idx.hnswStore.RemoveBackup()
 				}
 			}
@@ -128,6 +134,10 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 					}
 				}()
 			}
+		} else if report.hadIndexFailures {
+			idx.setIndexState(runtimestate.IndexStateDegraded, "filesystem resync completed with indexing failures")
+		} else {
+			idx.setIndexState(runtimestate.IndexStateReady, "filesystem resync complete")
 		}
 
 		first = false
@@ -381,6 +391,7 @@ func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime t
 		return true
 	default:
 		idx.live.cancel(path)
+		idx.setIndexState(runtimestate.IndexStateDegraded, "live index queue overflow; full resync scheduled")
 		logx.Warn("live index queue full; scheduling resync", "path", path)
 		idx.requestResync(ctx)
 		return false
@@ -400,6 +411,7 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 		case idx.live.jobs <- path:
 		default:
 			idx.live.cancel(path)
+			idx.setIndexState(runtimestate.IndexStateDegraded, "live index queue overflow; full resync scheduled")
 			logx.Warn("live index queue full; scheduling resync", "path", path)
 			idx.requestResync(ctx)
 		}
@@ -409,6 +421,7 @@ func (idx *indexer) processLiveIndexRequest(ctx context.Context, path string) {
 func (idx *indexer) processLiveIndexRequestDirect(ctx context.Context, path string, modTime time.Time) {
 	action, err := idx.indexFile(ctx, path, modTime)
 	if err != nil {
+		idx.setIndexState(runtimestate.IndexStateDegraded, "live indexing failed; some files may be stale")
 		logx.Error("indexing failed", "path", path, "err", err)
 		if idx.retries != nil {
 			idx.retries.schedule(path, modTime, func(retryModTime time.Time) {
@@ -432,6 +445,13 @@ func (idx *indexer) processLiveIndexRequestDirect(ctx context.Context, path stri
 			logx.Info("removed document from index", "path", path)
 		}
 	}
+}
+
+func (idx *indexer) setIndexState(state runtimestate.IndexState, message string) {
+	if idx == nil || idx.indexState == nil {
+		return
+	}
+	idx.indexState.Set(state, message)
 }
 
 func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
@@ -659,7 +679,7 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}
 
-	chunks := chunk.SplitWithPath(text, path, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
+	chunks := ingest.PrepareChunks(text, path, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
 		return removeDocumentIfPresent(ctx, idx.store, doc, key)
 	}

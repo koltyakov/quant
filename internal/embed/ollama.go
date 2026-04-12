@@ -31,6 +31,8 @@ type ollamaEmbedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
+const MaxInputRunes = 4000
+
 func NewOllama(ctx context.Context, baseURL, model string) (*Ollama, error) {
 	return newOllama(ctx, baseURL, model, &http.Client{Timeout: 60 * time.Second})
 }
@@ -81,10 +83,9 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 		return nil, fmt.Errorf("ollama: max retry budget (%d) exceeded", maxEmbedRetries)
 	}
 
-	const maxChars = 4000
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
-		truncated[i] = truncateForEmbedding(t, maxChars)
+		truncated[i] = TruncateForInput(t, MaxInputRunes)
 	}
 
 	reqBody := ollamaEmbedRequest{
@@ -128,7 +129,7 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 			}
 			rCount := utf8.RuneCountInString(truncated[0])
 			if rCount > 64 {
-				truncated[0] = truncateForEmbedding(truncated[0], rCount/2)
+				truncated[0] = TruncateForInput(truncated[0], rCount/2)
 				return o.embedBatch(ctx, truncated, retries+1)
 			}
 		}
@@ -213,20 +214,27 @@ func ollamaEmbedURL(raw string) (string, error) {
 	return embedURL.String(), nil
 }
 
-// truncateForEmbedding cuts text to at most maxChars runes, preferring to break
+// TruncateForInput cuts text to at most maxChars runes, preferring to break
 // at a natural boundary (paragraph, sentence, clause, or word). It searches a
 // 256-character window just before the cut point for the best break marker,
 // falling back to a hard cut if no suitable boundary is found within the window.
 // The window size balances break quality against preserving most of the allowed
 // length - a larger window would find better breaks but discard more text.
-func truncateForEmbedding(text string, maxChars int) string {
+func TruncateForInput(text string, maxChars int) string {
+	prefix, _ := PrefixWithinInputBudget(text, maxChars)
+	return prefix
+}
+
+// PrefixWithinInputBudget returns the largest leading segment that fits within
+// maxChars runes, along with the number of original input runes consumed.
+func PrefixWithinInputBudget(text string, maxChars int) (string, int) {
 	if maxChars <= 0 || utf8.RuneCountInString(text) <= maxChars {
-		return text
+		return text, utf8.RuneCountInString(text)
 	}
 
 	runes := []rune(text)
 	if len(runes) <= maxChars {
-		return text
+		return text, len(runes)
 	}
 
 	cut := maxChars
@@ -238,12 +246,13 @@ func truncateForEmbedding(text string, maxChars int) string {
 
 	for _, marker := range []string{"\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "} {
 		if idx := strings.LastIndex(window, marker); idx >= 0 {
-			candidate := strings.TrimSpace(string(runes[:windowStart+idx+len(marker)]))
+			consumed := windowStart + idx + len([]rune(marker))
+			candidate := strings.TrimSpace(string(runes[:consumed]))
 			if utf8.RuneCountInString(candidate) >= maxChars/2 {
-				return candidate
+				return candidate, consumed
 			}
 		}
 	}
 
-	return strings.TrimSpace(string(runes[:cut]))
+	return strings.TrimSpace(string(runes[:cut])), cut
 }

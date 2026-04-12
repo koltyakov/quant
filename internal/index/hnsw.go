@@ -148,7 +148,7 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	logx.Info("hnsw graph built", "chunks", count)
 
 	if err := s.saveHNSWState(ctx, count); err != nil {
-		logx.Warn("failed to persist hnsw state", "err", err)
+		logx.Warn("failed to persist hnsw metadata snapshot", "err", err)
 	}
 
 	return nil
@@ -168,6 +168,9 @@ func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
 	return err
 }
 
+// LoadHNSWFromState reconstructs the in-memory graph from stored chunk
+// embeddings after validating the recorded metadata snapshot.
+// It does not deserialize a persisted HNSW graph structure.
 func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	var nodeCount int
 	var storedModel string
@@ -188,7 +191,7 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	}
 
 	if storedModel != meta.Model || storedDims != meta.Dimensions {
-		logx.Info("hnsw state model mismatch, skipping load",
+		logx.Info("hnsw metadata snapshot mismatch, skipping graph reconstruction",
 			"stored_model", storedModel, "current_model", meta.Model,
 			"stored_dims", storedDims, "current_dims", meta.Dimensions)
 		return false
@@ -235,7 +238,7 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
 	s.hnsw.ready.Store(true)
-	logx.Info("hnsw graph loaded from persisted state", "chunks", loaded)
+	logx.Info("hnsw graph reconstructed from chunk embeddings using metadata snapshot", "chunks", loaded)
 	return true
 }
 

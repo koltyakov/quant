@@ -79,9 +79,11 @@ For the full flag reference, environment variables, YAML config, and auto-update
 |---|---|
 | `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path` |
 | `list_sources` | List indexed documents. Params: `limit` |
-| `index_status` | Stats: total docs, chunks, DB size, watch dir, model |
+| `index_status` | Stats: total docs, chunks, DB size, watch dir, model, lifecycle state |
 
 `search` embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common scale.
+
+All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback.
 
 ## Supported File Types
 
@@ -118,8 +120,10 @@ flowchart TD
 - **No CGO** - uses `modernc.org/sqlite` (pure Go SQLite)
 - **Hybrid retrieval** - SQLite FTS5 prefilter + normalized vector rerank
 - **Bounded-memory rerank** - top-k heap keeps vector reranking memory stable as candidate sets grow
+- **Lifecycle-aware readiness** - startup indexing state is surfaced through readiness checks and `index_status`
 - **SQLite tuned for concurrency** - WAL + busy timeout + multi-connection pool allow reads during writes
 - **Transactional indexing** - chunk replacement happens in a single SQLite transaction per document
+- **Validated ANN reconstruction** - startup HNSW reconstruction reuses stored chunk embeddings after validating the recorded model metadata snapshot
 - **File watching** via `fsnotify` with 500ms debounce and self-healing resync on overflow
 
 ## Further reading

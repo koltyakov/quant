@@ -16,6 +16,7 @@ import (
 	"github.com/koltyakov/quant/internal/ingest"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -97,9 +98,10 @@ func runMCP(cfg *config.Config) error {
 			Overlap:   cfg.ChunkOverlap,
 			BatchSize: cfg.EmbedBatchSize,
 		},
-		paths:   newPathSyncTracker(),
-		live:    newLiveIndexQueue(liveQueueSizeForWorkers(cfg.IndexWorkers)),
-		retries: newRetryScheduler(),
+		paths:      newPathSyncTracker(),
+		live:       newLiveIndexQueue(liveQueueSizeForWorkers(cfg.IndexWorkers)),
+		retries:    newRetryScheduler(),
+		indexState: runtimestate.NewIndexStateTracker(),
 	}
 
 	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})
@@ -138,7 +140,7 @@ func runMCP(cfg *config.Config) error {
 		idx.runInitialSync(serverCtx)
 	}()
 
-	mcpServer := mcp.NewServer(cfg, store, embedder, Version)
+	mcpServer := mcp.NewServer(cfg, store, embedder, Version, idx.indexState)
 	logx.Info("starting MCP server", "transport", cfg.Transport)
 
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {

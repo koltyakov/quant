@@ -45,7 +45,7 @@ func newTestHTTPClient(t *testing.T, statusCode int, body any) *http.Client {
 
 func TestTruncateForEmbeddingPrefersBoundaries(t *testing.T) {
 	text := strings.Repeat("alpha beta gamma ", 40) + "\n\n" + strings.Repeat("delta epsilon zeta ", 40)
-	truncated := truncateForEmbedding(text, 120)
+	truncated := TruncateForInput(text, 120)
 
 	if len([]rune(truncated)) > 120 {
 		t.Fatalf("expected truncated text to fit limit, got %d", len([]rune(truncated)))
@@ -55,6 +55,20 @@ func TestTruncateForEmbeddingPrefersBoundaries(t *testing.T) {
 	}
 	if strings.TrimSpace(truncated) == "" {
 		t.Fatal("expected non-empty truncated text")
+	}
+}
+
+func TestPrefixWithinInputBudget_ReturnsConsumedRunes(t *testing.T) {
+	text := "alpha beta gamma\n\ndelta epsilon"
+	prefix, consumed := PrefixWithinInputBudget(text, 18)
+	if prefix == "" {
+		t.Fatal("expected non-empty prefix")
+	}
+	if consumed <= 0 || consumed > len([]rune(text)) {
+		t.Fatalf("expected consumed runes within bounds, got %d", consumed)
+	}
+	if len([]rune(prefix)) > 18 {
+		t.Fatalf("expected prefix to fit budget, got %d runes", len([]rune(prefix)))
 	}
 }
 

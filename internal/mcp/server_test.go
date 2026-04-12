@@ -18,6 +18,7 @@ import (
 
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/index"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/testutil"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
@@ -356,6 +357,13 @@ func TestHandleSearch_ReturnsMatchingResults(t *testing.T) {
 	}
 	if !strings.Contains(text, "score:") {
 		t.Fatalf("expected score in results, got %q", text)
+	}
+	structured := extractSearchStructured(t, result)
+	if structured.Query != "compiled language" {
+		t.Fatalf("expected structured query to be preserved, got %+v", structured)
+	}
+	if len(structured.Results) == 0 {
+		t.Fatalf("expected structured results, got %+v", structured)
 	}
 }
 
@@ -732,6 +740,33 @@ func TestHandleReadiness_ReturnsServiceUnavailableWhenDependenciesAreMissing(t *
 	}
 }
 
+func TestHandleReadiness_ReturnsServiceUnavailableWhileIndexStarting(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	tracker := runtimestate.NewIndexStateTracker()
+	s := &Server{
+		cfg:      &config.Config{WatchDir: dir, DBPath: dbPath},
+		store:    store,
+		embedder: &testutil.QueryCountingEmbedder{},
+		state:    tracker,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, readinessPath, nil)
+	rec := httptest.NewRecorder()
+	s.handleReadiness(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, rec.Code)
+	}
+}
+
 func TestHandleListSources(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
@@ -879,6 +914,10 @@ func TestHandleIndexStatus(t *testing.T) {
 	if !strings.Contains(text, "test-model") {
 		t.Fatalf("expected model name in status, got %q", text)
 	}
+	structured := extractIndexStatusStructured(t, result)
+	if structured.State != string(runtimestate.IndexStateReady) {
+		t.Fatalf("expected ready structured state, got %+v", structured)
+	}
 }
 
 func TestHandleIndexStatus_IncludesSQLiteSidecars(t *testing.T) {
@@ -923,13 +962,15 @@ func TestHandleIndexStatus_IncludesSQLiteSidecars(t *testing.T) {
 }
 
 func TestNewServer_UsesRuntimeVersion(t *testing.T) {
-	s := NewServer(&config.Config{}, nil, &testutil.QueryCountingEmbedder{}, "v9.9.9")
+	s := NewServer(&config.Config{}, nil, &testutil.QueryCountingEmbedder{}, "v9.9.9", nil)
 	if s.version != "v9.9.9" {
 		t.Fatalf("expected server version to match runtime version, got %q", s.version)
 	}
 }
 
 func newTestServer(dir, dbPath string, store *index.Store) *Server {
+	tracker := runtimestate.NewIndexStateTracker()
+	tracker.Set(runtimestate.IndexStateReady, "test ready")
 	return &Server{
 		cfg: &config.Config{
 			WatchDir:   dir,
@@ -939,6 +980,7 @@ func newTestServer(dir, dbPath string, store *index.Store) *Server {
 		store:      store,
 		embedder:   &testutil.QueryCountingEmbedder{},
 		version:    "test-version",
+		state:      tracker,
 		embCache:   newEmbeddingLRU(2),
 		embFlights: make(map[string]*embeddingFlight),
 	}
@@ -969,6 +1011,24 @@ func extractToolText(t *testing.T, result *mcplib.CallToolResult) string {
 		t.Fatalf("expected text content, got %T", result.Content[0])
 	}
 	return txt.Text
+}
+
+func extractSearchStructured(t *testing.T, result *mcplib.CallToolResult) searchToolResponse {
+	t.Helper()
+	structured, ok := result.StructuredContent.(searchToolResponse)
+	if !ok {
+		t.Fatalf("expected search structured content, got %T", result.StructuredContent)
+	}
+	return structured
+}
+
+func extractIndexStatusStructured(t *testing.T, result *mcplib.CallToolResult) indexStatusToolResponse {
+	t.Helper()
+	structured, ok := result.StructuredContent.(indexStatusToolResponse)
+	if !ok {
+		t.Fatalf("expected index_status structured content, got %T", result.StructuredContent)
+	}
+	return structured
 }
 
 func testTime() time.Time {

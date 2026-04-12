@@ -14,6 +14,7 @@ import (
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -23,6 +24,7 @@ type Server struct {
 	embedder embed.Embedder
 	version  string
 	mcp      *mcpserver.MCPServer
+	state    *runtimestate.IndexStateTracker
 
 	embCacheMu sync.Mutex
 	embCache   *embeddingLRU
@@ -50,7 +52,7 @@ const (
 	embedCircuitResetTimeout = 30 * time.Second
 )
 
-func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string) *Server {
+func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string, state *runtimestate.IndexStateTracker) *Server {
 	version = strings.TrimSpace(version)
 	if version == "" {
 		version = "dev"
@@ -66,6 +68,7 @@ func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder
 		store:        store,
 		embedder:     embedder,
 		version:      version,
+		state:        state,
 		embCache:     newEmbeddingLRU(embCacheMaxSize),
 		embFlights:   make(map[string]*embeddingFlight),
 		maxToolSlots: maxTools,
@@ -293,6 +296,18 @@ func (s *Server) readinessError(ctx context.Context) error {
 	}
 	if s.embedder == nil {
 		return errors.New("embedder is unavailable")
+	}
+	if s.state != nil {
+		snapshot := s.state.Snapshot()
+		if !snapshot.Ready() {
+			if snapshot.State == "" {
+				return errors.New("index is not ready")
+			}
+			if snapshot.Message != "" {
+				return fmt.Errorf("index is %s: %s", snapshot.State, snapshot.Message)
+			}
+			return fmt.Errorf("index is %s", snapshot.State)
+		}
 	}
 	return nil
 }

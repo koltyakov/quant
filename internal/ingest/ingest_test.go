@@ -3,9 +3,11 @@ package ingest
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/koltyakov/quant/internal/chunk"
+	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
 )
 
@@ -199,6 +201,20 @@ func TestBuildEmbedInput(t *testing.T) {
 		got := BuildEmbedInput(tt.docKey, tt.heading, tt.content)
 		if got != tt.want {
 			t.Errorf("BuildEmbedInput(%q,%q,%q) = %q, want %q", tt.docKey, tt.heading, tt.content, got, tt.want)
+		}
+	}
+}
+
+func TestPrepareChunks_RespectsEmbeddingBudget(t *testing.T) {
+	text := "# Heading\n\n" + strings.Repeat("alpha beta gamma delta ", 500)
+	chunks := PrepareChunks(text, "notes.md", 10_000, 0)
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversized chunk to be split for embedding budget, got %d chunk(s)", len(chunks))
+	}
+	for i, c := range chunks {
+		input := BuildEmbedInput("doc", c.Heading, c.Content)
+		if len([]rune(input)) > embed.MaxInputRunes {
+			t.Fatalf("chunk %d exceeds embedding budget: %d", i, len([]rune(input)))
 		}
 	}
 }
