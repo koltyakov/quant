@@ -1,24 +1,59 @@
 # Embedding Models
 
-## Model choice
+## Backend
 
-`quant` uses Ollama as the embedding backend. The config fields are named generically so an alternative backend can be added later without renaming the surface.
+`quant` uses Ollama as the embedding backend via its `/api/embed` endpoint. The config fields are named generically (`embed_url`, `embed_model`) so an alternative backend can be added later without renaming the surface.
+
+## Model choice
 
 Practical defaults for local use:
 
-| Model | Notes |
-|---|---|
-| `nomic-embed-text` | Best default balance of quality and footprint for local use |
-| `all-minilm` | Smaller and cheaper to run; lower retrieval quality |
-| `mxbai-embed-large` | Higher quality; requires more RAM |
-
-If you later add a hosted backend, `text-embedding-3-small` is the cheapest widely-used OpenAI embedding option.
+| Model | Dimensions | Notes |
+|---|---|---|
+| `nomic-embed-text` | 768 | Best default balance of quality and footprint for local use |
+| `all-minilm` | 384 | Smaller and cheaper to run; lower retrieval quality |
+| `mxbai-embed-large` | 1024 | Higher quality; requires more RAM |
 
 Pull a model before starting `quant`:
 
 ```bash
 ollama pull nomic-embed-text
 ```
+
+## How embeddings are used
+
+### During indexing
+
+1. Extracted text is chunked and each chunk is embedded via `EmbedBatch`.
+2. Chunks are sent to Ollama in batches of `--embed-batch-size` (default 16).
+3. Each embedding is L2-normalized and then quantized to int8 (1 byte per dimension) before storage in SQLite.
+4. Unchanged chunks reuse their stored embeddings (incremental reindexing).
+
+### During search
+
+1. The search query is embedded via the `CachingEmbedder`, which wraps the Ollama backend with:
+   - **LRU cache** (128 entries) - repeated or similar queries reuse cached embeddings.
+   - **In-flight deduplication** - concurrent searches for the same text share a single backend request.
+   - **Circuit breaker** - after 5 consecutive embedding failures, the breaker opens for 30 seconds and search falls back to keyword-only results.
+2. The normalized query embedding is compared against stored chunk embeddings using dot product.
+
+## Int8 quantization
+
+Embeddings are quantized from float32 (4 bytes/dim) to int8 (1 byte/dim + 8-byte header) using per-vector min/max scaling:
+
+```
+quantized[i] = round((value[i] - min) / scale * 255)
+```
+
+This reduces storage by ~4x with less than 1% recall loss on L2-normalized vectors. The HNSW graph reconstructs float32 vectors from the quantized form on startup.
+
+## Embedding metadata
+
+The store records the embedding model name, dimensions, and normalization flag. If you change the model or the dimensions change, the store detects the mismatch and rebuilds the index from scratch on next startup.
+
+## Input truncation
+
+Ollama has a maximum input length per embedding call. `quant` truncates chunk content to fit within 4000 runes, preferring natural boundaries (paragraphs, sentences, words) over hard cuts.
 
 ## Hardware guidance
 

@@ -26,7 +26,8 @@ Or commit a project-level `.mcp.json`:
     "quant": {
       "type": "stdio",
       "command": "quant",
-      "args": ["mcp", "--dir", "/path/to/project"]
+      "args": ["mcp", "--dir", "/path/to/project"],
+      "env": { "QUANT_AUTOUPDATE": "true" }
     }
   }
 }
@@ -42,7 +43,8 @@ Add a project-level `.vscode/mcp.json`:
     "quant": {
       "type": "stdio",
       "command": "quant",
-      "args": ["mcp", "--dir", "/path/to/project"]
+      "args": ["mcp", "--dir", "/path/to/project"],
+      "env": { "QUANT_AUTOUPDATE": "true" }
     }
   }
 }
@@ -56,10 +58,19 @@ Add a local stdio MCP with the Codex CLI:
 codex mcp add quant -- quant mcp --dir /path/to/project
 ```
 
-For a domain-specific name:
+Or add to `codex.json` / `.codex/config.json`:
 
-```bash
-codex mcp add research-notes -- quant mcp --dir /path/to/research-notes
+```json
+{
+  "mcpServers": {
+    "quant": {
+      "type": "stdio",
+      "command": "quant",
+      "args": ["mcp", "--dir", "/path/to/project"],
+      "env": { "QUANT_AUTOUPDATE": "true" }
+    }
+  }
+}
 ```
 
 ## OpenCode
@@ -73,18 +84,41 @@ Add a local MCP in `opencode.json` or `opencode.jsonc`:
     "quant": {
       "type": "local",
       "command": ["quant", "mcp", "--dir", "/path/to/project"],
-      "enabled": true
+      "enabled": true,
+      "env": { "QUANT_AUTOUPDATE": "true" }
     }
   }
 }
 ```
 
+## Choosing a transport
+
+`quant` supports three MCP transports:
+
+| Transport | Default | How it works | Best for |
+|-----------|---------|-------------|----------|
+| `stdio` | Yes | Communicates over stdin/stdout. The client launches `quant` as a child process. | Local, single-client use. Lowest latency, no port management. Works with Claude Code, Codex, OpenCode, VS Code Copilot, and any client that can spawn a process. |
+| `sse` | No | HTTP-based Server-Sent Events. Client connects to `/sse` for streaming and sends messages to `/message`. | Remote or multi-client access when the client requires an HTTP URL rather than a child process. |
+| `http` | No | Streamable HTTP over a single `/mcp` endpoint. Same use cases as SSE but uses the newer MCP streamable HTTP transport. | Same scenarios as SSE. Prefer this over SSE if your client supports it - one endpoint instead of two. |
+
+**When in doubt, use `stdio`.** Only switch to `sse` or `http` when you need remote access or your client doesn't support stdio.
+
 ## SSE / HTTP transport
 
-For remote access or when the MCP client requires an HTTP endpoint, start `quant` with `--transport sse` or `--transport http` and point the client at the listen address:
+When using `sse` or `http`, start `quant` with `--transport` and `--listen`:
 
 ```bash
 quant mcp --dir ./my-project --transport sse --listen :9090
 ```
+
+### Endpoints
+
+| Transport | Endpoint | Description |
+|-----------|----------|-------------|
+| SSE | `http://localhost:9090/sse` | SSE stream for MCP events |
+| SSE | `http://localhost:9090/message` | Message endpoint for SSE transport |
+| HTTP | `http://localhost:9090/mcp` | Streamable HTTP MCP endpoint |
+| Both | `http://localhost:9090/healthz` | Liveness probe (always returns `ok`) |
+| Both | `http://localhost:9090/readyz` | Readiness probe (returns `ready` when index is initialized, `503` otherwise) |
 
 Most MCP clients that support remote servers accept a URL like `http://localhost:9090/sse` (SSE transport) or `http://localhost:9090/mcp` (streamable HTTP transport). Refer to your client's documentation for the exact connection format.
