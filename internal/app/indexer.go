@@ -23,6 +23,8 @@ import (
 
 var ErrOCRFailed = extract.ErrOCRFailed
 
+const quarantineDirName = ".quarantine"
+
 type IndexAction string
 
 const (
@@ -653,6 +655,10 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 		return false
 	}
 
+	if isQuarantinePath(idx.cfg.WatchDir, path) {
+		return true
+	}
+
 	if idx.cfg.DBPath != "" && IsCompanionLogPathForDB(idx.cfg.DBPath, path) {
 		return true
 	}
@@ -704,9 +710,12 @@ func (idx *Indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 	if !shouldRetryIndexError(err) {
 		idx.retries.Clear(path)
 		logx.Warn("not retrying path", "path", path, "err", err)
+		if shouldQuarantineIndexError(err) {
+			idx.quarantineFailedPath(ctx, path, err)
+		}
 		return
 	}
-	idx.retries.Schedule(path, modTime, func(retryModTime time.Time) {
+	result := idx.retries.Schedule(path, modTime, func(retryModTime time.Time) {
 		select {
 		case <-ctx.Done():
 			idx.retries.Clear(path)
@@ -715,6 +724,9 @@ func (idx *Indexer) scheduleIndexRetry(ctx context.Context, path string, modTime
 		}
 		idx.EnqueueLiveIndex(ctx, path, retryModTime)
 	})
+	if result == RetryScheduleGaveUp && shouldQuarantineIndexError(err) {
+		idx.quarantineFailedPath(ctx, path, err)
+	}
 }
 
 func shouldRetryIndexError(err error) bool {
@@ -730,6 +742,85 @@ func shouldRetryIndexError(err error) bool {
 	default:
 		return true
 	}
+}
+
+func shouldQuarantineIndexError(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return false
+	case errors.Is(err, ErrOCRFailed):
+		return true
+	case errors.Is(err, embed.ErrPermanent):
+		return true
+	default:
+		return false
+	}
+}
+
+func isQuarantinePath(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.Clean(rel)
+	return rel == quarantineDirName || strings.HasPrefix(rel, quarantineDirName+string(filepath.Separator))
+}
+
+func quarantineDestination(root, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
+	}
+	if rel == quarantineDirName || strings.HasPrefix(rel, quarantineDirName+string(filepath.Separator)) {
+		return filepath.Join(root, rel), nil
+	}
+	return filepath.Join(root, quarantineDirName, rel), nil
+}
+
+func (idx *Indexer) quarantineFailedPath(ctx context.Context, path string, failure error) {
+	if idx == nil || idx.cfg == nil || path == "" || failure == nil {
+		return
+	}
+
+	dst, err := quarantineDestination(idx.cfg.WatchDir, path)
+	if err != nil {
+		logx.Warn("quarantining failed path failed", "path", path, "err", err)
+		return
+	}
+	if path == dst {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
+		logx.Warn("quarantining failed path failed", "path", path, "dst", dst, "err", err)
+		return
+	}
+	_ = os.Remove(dst)
+	if err := os.Rename(path, dst); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		logx.Warn("quarantining failed path failed", "path", path, "dst", dst, "err", err)
+		return
+	}
+	logPath := dst + ".log"
+	if writeErr := os.WriteFile(logPath, []byte(failure.Error()+"\n"), 0640); writeErr != nil {
+		logx.Warn("writing quarantine log failed", "path", path, "log", logPath, "err", writeErr)
+	}
+
+	key, keyErr := DocumentKey(idx.cfg.WatchDir, path)
+	if keyErr != nil {
+		logx.Warn("removing quarantined document from index failed", "path", path, "err", keyErr)
+	} else if delErr := idx.store.DeleteDocument(ctx, key); delErr != nil {
+		logx.Warn("removing quarantined document from index failed", "path", path, "err", delErr)
+	}
+
+	logx.Warn("quarantined path", "path", path, "dst", dst, "log", logPath)
 }
 
 func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (IndexAction, error) {

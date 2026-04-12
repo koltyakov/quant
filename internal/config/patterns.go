@@ -64,6 +64,8 @@ func DefaultPathMatcher() *PathMatcher {
 			"*.log",
 			"tmp/**",
 			"temp/**",
+			".quarantine",
+			".quarantine/**",
 
 			// Coverage and test artifacts
 			"coverage/**",

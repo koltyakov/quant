@@ -824,6 +824,111 @@ func TestInitialSyncWithReport_DoesNotRetryPermanentIndexFailures(t *testing.T) 
 	}
 }
 
+func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "books", "sample.txt")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0750); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  &permanentFailingEmbedder{},
+		extractor: &countingExtractor{text: "hello world"},
+	}
+
+	report, err := idx.initialSyncWithReport(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+	if !report.hadIndexFailures {
+		t.Fatal("expected initial sync report to record indexing failures")
+	}
+
+	quarantinePath := filepath.Join(dir, ".quarantine", "books", "sample.txt")
+	data, err := os.ReadFile(quarantinePath)
+	if err != nil {
+		t.Fatalf("expected quarantined file, got %v", err)
+	}
+	if string(data) != "hello world" {
+		t.Fatalf("expected quarantined file contents to match source, got %q", string(data))
+	}
+
+	logData, err := os.ReadFile(quarantinePath + ".log")
+	if err != nil {
+		t.Fatalf("expected quarantine log, got %v", err)
+	}
+	if !strings.Contains(string(logData), embed.ErrPermanent.Error()) {
+		t.Fatalf("expected quarantine log to contain permanent error, got %q", string(logData))
+	}
+
+	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("expected source file to be moved, stat err=%v", err)
+	}
+
+	doc, err := store.GetDocumentByPath(context.Background(), filepath.ToSlash(filepath.Join("books", "sample.txt")))
+	if err != nil {
+		t.Fatalf("unexpected load error: %v", err)
+	}
+	if doc != nil {
+		t.Fatalf("expected quarantined document to be removed from index, got %+v", doc)
+	}
+}
+
+func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
+	dir := t.TempDir()
+	quarantinePath := filepath.Join(dir, ".quarantine", "books", "sample.txt")
+	if err := os.MkdirAll(filepath.Dir(quarantinePath), 0750); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+	if err := os.WriteFile(quarantinePath, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("unexpected error writing file: %v", err)
+	}
+
+	store, err := index.NewStore(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("unexpected error opening store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("unexpected close error: %v", err)
+		}
+	})
+
+	idx := &indexer{
+		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:     store,
+		embedder:  testutil.StaticEmbedder{},
+		extractor: fakeExtractor{text: "hello world"},
+	}
+
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatalf("unexpected initial sync error: %v", err)
+	}
+
+	docs, err := store.ListDocuments(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected list error: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("expected quarantine tree to be ignored, got %d docs", len(docs))
+	}
+}
+
 func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")

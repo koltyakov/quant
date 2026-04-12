@@ -208,6 +208,15 @@ type RetryScheduler struct {
 	states map[string]*retryState
 }
 
+type RetryScheduleResult int
+
+const (
+	RetryScheduleIgnored RetryScheduleResult = iota
+	RetrySchedulePending
+	RetryScheduleScheduled
+	RetryScheduleGaveUp
+)
+
 type retryState struct {
 	attempts int
 	modTime  time.Time
@@ -255,9 +264,9 @@ func (r *RetryScheduler) evictOverflow() int {
 	return evicted
 }
 
-func (r *RetryScheduler) Schedule(path string, modTime time.Time, onFire func(retryModTime time.Time)) bool {
+func (r *RetryScheduler) Schedule(path string, modTime time.Time, onFire func(retryModTime time.Time)) RetryScheduleResult {
 	if path == "" {
-		return false
+		return RetryScheduleIgnored
 	}
 
 	r.mu.Lock()
@@ -279,14 +288,14 @@ func (r *RetryScheduler) Schedule(path string, modTime time.Time, onFire func(re
 			state.modTime = modTime
 		}
 		r.mu.Unlock()
-		return false
+		return RetrySchedulePending
 	}
 	if state.attempts >= MaxIndexRetryAttempts {
 		attempts := state.attempts
 		delete(r.states, path)
 		r.mu.Unlock()
 		logx.Warn("giving up retrying path", "path", path, "attempts", attempts)
-		return false
+		return RetryScheduleGaveUp
 	}
 	state.attempts++
 	if state.modTime.IsZero() || modTime.After(state.modTime) {
@@ -310,7 +319,7 @@ func (r *RetryScheduler) Schedule(path string, modTime time.Time, onFire func(re
 	r.mu.Unlock()
 
 	logx.Warn("retrying path", "path", path, "delay", delay, "attempt", attempts, "max_attempts", MaxIndexRetryAttempts)
-	return true
+	return RetryScheduleScheduled
 }
 
 func LiveQueueSizeForWorkers(workers int) int {
