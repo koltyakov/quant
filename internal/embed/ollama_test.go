@@ -142,3 +142,21 @@ func TestOllamaEmbedBatchMarksClientErrorsPermanent(t *testing.T) {
 		t.Fatalf("expected permanent error, got %v", err)
 	}
 }
+
+func TestOllamaEmbedBatchMarksRetryBudgetExceededPermanent(t *testing.T) {
+	o := &Ollama{
+		baseURL: "http://ollama.test",
+		model:   "test-model",
+		httpClient: newTestHTTPClient(t, http.StatusBadRequest, map[string]string{
+			"error": "the input length exceeds the context length",
+		}),
+	}
+
+	_, err := o.EmbedBatch(context.Background(), []string{strings.Repeat("x", MaxInputRunes)})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("expected permanent error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "max retry budget") {
+		t.Fatalf("expected max retry budget error, got %v", err)
+	}
+}

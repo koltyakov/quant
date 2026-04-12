@@ -83,7 +83,7 @@ func (o *Ollama) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 
 func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([][]float32, error) {
 	if retries > maxEmbedRetries {
-		return nil, fmt.Errorf("ollama: max retry budget (%d) exceeded", maxEmbedRetries)
+		return nil, fmt.Errorf("%w: ollama: max retry budget (%d) exceeded", ErrPermanent, maxEmbedRetries)
 	}
 
 	truncated := make([]string, len(texts))
