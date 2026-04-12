@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
-	"github.com/koltyakov/quant/internal/ingest"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
-	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -34,17 +33,26 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		}
 	}
 
-	embedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
+	rawEmbedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
 		return fmt.Errorf("error connecting to ollama: %w", err)
 	}
 	defer func() {
-		if err := embedder.Close(); err != nil {
+		if err := rawEmbedder.Close(); err != nil {
 			logx.Error("closing embedder failed", "err", err)
 		}
 	}()
 
-	logx.Info("connected to embedding backend", "provider", "ollama", "model", cfg.EmbedModel, "dimensions", embedder.Dimensions())
+	logx.Info("connected to embedding backend", "provider", "ollama", "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
+
+	// Wrap the raw embedder with caching, flight dedup, and circuit breaker
+	// for query-time Embed() calls. EmbedBatch (used during indexing) passes through.
+	embedder := embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
+		CacheSize:           128,
+		CircuitFailureLimit: 5,
+		CircuitResetTimeout: 30 * time.Second,
+		NormalizeFunc:       index.NormalizeFloat32,
+	})
 
 	store, err := index.NewStore(cfg.DBPath)
 	if err != nil {
@@ -79,23 +87,13 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		return fmt.Errorf("error loading gitignore: %w", err)
 	}
 
-	idx := &Indexer{
+	idx := NewIndexer(IndexerConfig{
 		Cfg:       cfg,
 		Store:     store,
 		HNSWStore: store,
-		Embedder:  embedder,
+		Embedder:  rawEmbedder,
 		Extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
-		Pipeline: &ingest.Pipeline{
-			Embedder:  embedder,
-			ChunkSize: cfg.ChunkSize,
-			Overlap:   cfg.ChunkOverlap,
-			BatchSize: cfg.EmbedBatchSize,
-		},
-		Paths:      NewPathSyncTracker(),
-		Live:       NewLiveIndexQueue(LiveQueueSizeForWorkers(cfg.IndexWorkers)),
-		Retries:    NewRetryScheduler(),
-		IndexState: runtimestate.NewIndexStateTracker(),
-	}
+	})
 
 	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})
 	if err != nil {

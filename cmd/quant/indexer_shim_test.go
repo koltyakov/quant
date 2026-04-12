@@ -10,7 +10,6 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
-	"github.com/koltyakov/quant/internal/ingest"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -39,44 +38,6 @@ func newSyncReport(report app.SyncReport) syncReport {
 	return syncReport{hadIndexFailures: report.HadIndexFailures}
 }
 
-type pathSyncTracker struct {
-	inner *app.PathSyncTracker
-}
-
-func newPathSyncTracker() *pathSyncTracker {
-	return &pathSyncTracker{inner: app.NewPathSyncTracker()}
-}
-
-type liveIndexQueue struct {
-	inner *app.LiveIndexQueue
-	jobs  chan string
-}
-
-func newLiveIndexQueue(queueSize int) *liveIndexQueue {
-	inner := app.NewLiveIndexQueue(queueSize)
-	return &liveIndexQueue{inner: inner, jobs: inner.Jobs}
-}
-
-func wrapLiveIndexQueue(inner *app.LiveIndexQueue) *liveIndexQueue {
-	if inner == nil {
-		return nil
-	}
-	return &liveIndexQueue{inner: inner, jobs: inner.Jobs}
-}
-
-func (q *liveIndexQueue) startProcessing(path string) (time.Time, bool) {
-	return q.inner.StartProcessing(path)
-}
-
-type retryScheduler struct {
-	inner *app.RetryScheduler
-}
-
-func newRetryScheduler() *retryScheduler {
-	syncRetrySettings()
-	return &retryScheduler{inner: app.NewRetryScheduler()}
-}
-
 func syncRetrySettings() {
 	app.IndexRetryBaseDelay = indexRetryBaseDelay
 	app.MaxIndexRetryAttempts = maxIndexRetryAttempts
@@ -88,112 +49,57 @@ type indexer struct {
 	hnswStore index.HNSWBuilder
 	embedder  embed.Embedder
 	extractor extract.Extractor
-	pipeline  *ingest.Pipeline
-
-	paths   *pathSyncTracker
-	live    *liveIndexQueue
-	retries *retryScheduler
 
 	indexState *runtimestate.IndexStateTracker
-	resync     *ResyncCoordinator
+
+	// inner holds the real app.Indexer once built.
+	inner *app.Indexer
 }
 
-func (idx *indexer) toApp() *app.Indexer {
-	syncRetrySettings()
-	if idx.paths == nil {
-		idx.paths = newPathSyncTracker()
+func (idx *indexer) ensureInner() *app.Indexer {
+	if idx.inner == nil {
+		syncRetrySettings()
+		idx.inner = app.NewIndexer(app.IndexerConfig{
+			Cfg:       idx.cfg,
+			Store:     idx.store,
+			HNSWStore: idx.hnswStore,
+			Embedder:  idx.embedder,
+			Extractor: idx.extractor,
+		})
+		if idx.indexState != nil {
+			idx.inner.IndexState = idx.indexState
+		}
 	}
-	return &app.Indexer{
-		Cfg:        idx.cfg,
-		Store:      idx.store,
-		HNSWStore:  idx.hnswStore,
-		Embedder:   idx.embedder,
-		Extractor:  idx.extractor,
-		Pipeline:   idx.pipeline,
-		Paths:      idx.paths.inner,
-		IndexState: idx.indexState,
-		Resync:     idx.resync,
-		Live:       unwrapLiveIndexQueue(idx.live),
-		Retries:    unwrapRetryScheduler(idx.retries),
-	}
-}
-
-func (idx *indexer) fromApp(inner *app.Indexer) {
-	if inner == nil {
-		return
-	}
-	idx.pipeline = inner.Pipeline
-	idx.resync = inner.Resync
-	if inner.Live != nil {
-		idx.live = wrapLiveIndexQueue(inner.Live)
-	}
-	if inner.Retries != nil && idx.retries == nil {
-		idx.retries = &retryScheduler{inner: inner.Retries}
-	}
-	if inner.Paths != nil && idx.paths == nil {
-		idx.paths = &pathSyncTracker{inner: inner.Paths}
-	}
-}
-
-func unwrapLiveIndexQueue(q *liveIndexQueue) *app.LiveIndexQueue {
-	if q == nil {
-		return nil
-	}
-	return q.inner
-}
-
-func unwrapRetryScheduler(r *retryScheduler) *app.RetryScheduler {
-	if r == nil {
-		return nil
-	}
-	return r.inner
+	return idx.inner
 }
 
 func (idx *indexer) initialSync(ctx context.Context) error {
-	inner := idx.toApp()
-	err := inner.InitialSync(ctx)
-	idx.fromApp(inner)
-	return err
+	return idx.ensureInner().InitialSync(ctx)
 }
 
 func (idx *indexer) initialSyncWithReport(ctx context.Context) (syncReport, error) {
-	inner := idx.toApp()
-	report, err := inner.InitialSyncWithReport(ctx)
-	idx.fromApp(inner)
+	report, err := idx.ensureInner().InitialSyncWithReport(ctx)
 	return newSyncReport(report), err
 }
 
 func (idx *indexer) startLiveIndexWorkers(ctx context.Context, wg *sync.WaitGroup) {
-	inner := idx.toApp()
-	inner.StartLiveIndexWorkers(ctx, wg)
-	idx.fromApp(inner)
+	idx.ensureInner().StartLiveIndexWorkers(ctx, wg)
 }
 
 func (idx *indexer) enqueueLiveIndex(ctx context.Context, path string, modTime time.Time) bool {
-	inner := idx.toApp()
-	ok := inner.EnqueueLiveIndex(ctx, path, modTime)
-	idx.fromApp(inner)
-	return ok
+	return idx.ensureInner().EnqueueLiveIndex(ctx, path, modTime)
 }
 
 func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
-	inner := idx.toApp()
-	inner.HandleWatchEvent(ctx, event)
-	idx.fromApp(inner)
+	idx.ensureInner().HandleWatchEvent(ctx, event)
 }
 
 func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
-	inner := idx.toApp()
-	action, err := inner.SyncDocument(ctx, key, path, modTime, doc)
-	idx.fromApp(inner)
-	return action, err
+	return idx.ensureInner().SyncDocument(ctx, key, path, modTime, doc)
 }
 
 func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Time) (indexAction, error) {
-	inner := idx.toApp()
-	action, err := inner.IndexFile(ctx, path, modTime)
-	idx.fromApp(inner)
-	return action, err
+	return idx.ensureInner().IndexFile(ctx, path, modTime)
 }
 
 func documentKey(root, path string) (string, error) {

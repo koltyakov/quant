@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -26,19 +25,12 @@ type Server struct {
 	mcp      *mcpserver.MCPServer
 	state    *runtimestate.IndexStateTracker
 
-	embCacheMu sync.Mutex
-	embCache   *embeddingLRU
-	embFlights map[string]*embeddingFlight
-
 	toolLimiterOnce sync.Once
 	toolLimiter     chan struct{}
 	maxToolSlots    int
-
-	circuitBreaker *embedCircuitBreaker
 }
 
 const (
-	embCacheMaxSize        = 128
 	shutdownTimeout        = 5 * time.Second
 	readHeaderTimeout      = 5 * time.Second
 	healthPath             = "/healthz"
@@ -47,9 +39,6 @@ const (
 	ssePath                = "/sse"
 	sseMessagePath         = "/message"
 	maxConcurrentToolCalls = 4
-
-	embedCircuitFailureLimit = 5
-	embedCircuitResetTimeout = 30 * time.Second
 )
 
 func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string, state *runtimestate.IndexStateTracker) *Server {
@@ -69,150 +58,13 @@ func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder
 		embedder:     embedder,
 		version:      version,
 		state:        state,
-		embCache:     newEmbeddingLRU(embCacheMaxSize),
-		embFlights:   make(map[string]*embeddingFlight),
 		maxToolSlots: maxTools,
-		circuitBreaker: newEmbedCircuitBreaker(
-			embedCircuitFailureLimit,
-			embedCircuitResetTimeout,
-		),
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", version)
 	s.registerTools()
 
 	return s
-}
-
-type embeddingCacheEntry struct {
-	key   string
-	value []float32
-}
-
-type embeddingLRU struct {
-	capacity int
-	ll       *list.List
-	items    map[string]*list.Element
-}
-
-type embeddingFlight struct {
-	done    chan struct{}
-	waiters int
-	vec     []float32
-	err     error
-}
-
-type embedCircuitBreaker struct {
-	mu           sync.RWMutex
-	failures     int
-	lastFailure  time.Time
-	state        circuitState
-	failureLimit int
-	resetTimeout time.Duration
-}
-
-type circuitState int
-
-const (
-	circuitClosed circuitState = iota
-	circuitOpen
-)
-
-func newEmbeddingLRU(capacity int) *embeddingLRU {
-	if capacity < 1 {
-		capacity = 1
-	}
-	return &embeddingLRU{
-		capacity: capacity,
-		ll:       list.New(),
-		items:    make(map[string]*list.Element, capacity),
-	}
-}
-
-func (c *embeddingLRU) Get(key string) ([]float32, bool) {
-	elem, ok := c.items[key]
-	if !ok {
-		return nil, false
-	}
-	c.ll.MoveToFront(elem)
-	return elem.Value.(*embeddingCacheEntry).value, true
-}
-
-func (c *embeddingLRU) Put(key string, value []float32) {
-	if elem, ok := c.items[key]; ok {
-		entry := elem.Value.(*embeddingCacheEntry)
-		entry.value = value
-		c.ll.MoveToFront(elem)
-		return
-	}
-
-	elem := c.ll.PushFront(&embeddingCacheEntry{key: key, value: value})
-	c.items[key] = elem
-	if c.ll.Len() <= c.capacity {
-		return
-	}
-
-	tail := c.ll.Back()
-	if tail == nil {
-		return
-	}
-	c.ll.Remove(tail)
-	delete(c.items, tail.Value.(*embeddingCacheEntry).key)
-}
-
-func newEmbedCircuitBreaker(failureLimit int, resetTimeout time.Duration) *embedCircuitBreaker {
-	return &embedCircuitBreaker{
-		failureLimit: failureLimit,
-		resetTimeout: resetTimeout,
-		state:        circuitClosed,
-	}
-}
-
-func (cb *embedCircuitBreaker) Allow() bool {
-	if cb == nil {
-		return true
-	}
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	switch cb.state {
-	case circuitClosed:
-		return true
-	case circuitOpen:
-		if time.Since(cb.lastFailure) >= cb.resetTimeout {
-			cb.state = circuitClosed
-			cb.failures = 0
-			return true
-		}
-		return false
-	}
-	return false
-}
-
-func (cb *embedCircuitBreaker) RecordFailure() {
-	if cb == nil {
-		return
-	}
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	cb.failures++
-	cb.lastFailure = time.Now()
-	if cb.failures >= cb.failureLimit {
-		cb.state = circuitOpen
-	}
-}
-
-func (cb *embedCircuitBreaker) RecordSuccess() {
-	if cb == nil {
-		return
-	}
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	if cb.state == circuitClosed {
-		cb.failures = 0
-	}
 }
 
 type shutdownable interface {

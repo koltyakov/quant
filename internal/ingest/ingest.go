@@ -8,50 +8,14 @@ import (
 
 	"github.com/koltyakov/quant/internal/chunk"
 	"github.com/koltyakov/quant/internal/embed"
-	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
 )
 
 type Pipeline struct {
-	Extractor extract.Extractor
 	Embedder  embed.Embedder
-	Store     index.DocumentWriter
 	ChunkSize int
 	Overlap   float64
 	BatchSize int
-}
-
-type Result struct {
-	Chunks   int
-	Reused   int
-	Embedded int
-}
-
-func (p *Pipeline) Process(ctx context.Context, docKey, filePath string, existingChunks map[string]index.ChunkRecord) (*index.Document, []index.ChunkRecord, error) {
-	text, err := p.Extractor.Extract(ctx, filePath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("extracting text: %w", err)
-	}
-
-	if text == "" {
-		return nil, nil, nil
-	}
-
-	chunks := PrepareChunks(text, filePath, p.ChunkSize, p.Overlap)
-	if len(chunks) == 0 {
-		return nil, nil, nil
-	}
-
-	records, toEmbed, embedPositions, err := p.DiffChunks(chunks, existingChunks)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if err := p.EmbedChunks(ctx, docKey, toEmbed, embedPositions, records); err != nil {
-		return nil, nil, err
-	}
-
-	return &index.Document{Path: docKey}, records, nil
 }
 
 type PendingEmbed struct {

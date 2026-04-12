@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,7 +12,54 @@ import (
 )
 
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
-	return s.retriever.Search(ctx, query, queryEmbedding, limit, pathPrefix)
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	andQuery, orQuery, nearQuery := buildFTSQueries(query)
+	keywordCandidates := make(map[int]*searchCandidate)
+	rankOffset := 0
+	candidateLimit := searchCandidateLimit(limit)
+
+	if andQuery != "" {
+		collected, err := s.collectFTSCandidates(ctx, andQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
+		if err != nil {
+			return nil, err
+		}
+		rankOffset += collected
+
+		if len(keywordCandidates) >= candidateLimit {
+			orQuery = ""
+			nearQuery = ""
+		}
+	}
+
+	if orQuery != "" && orQuery != andQuery {
+		collected, err := s.collectFTSCandidates(ctx, orQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
+		if err != nil {
+			return nil, err
+		}
+		rankOffset += collected
+	}
+
+	if nearQuery != "" {
+		_, err := s.collectFTSCandidates(ctx, nearQuery, queryEmbedding, candidateLimit, pathPrefix, rankOffset, keywordCandidates)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var vectorOnlyCandidates map[int]*searchCandidate
+	if queryEmbedding != nil {
+		var err error
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	weights := classifyQueryWeights(query, s.keywordWeightOverride, s.vectorWeightOverride)
+	return unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights), nil
 }
 
 func (s *Store) GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult, error) {
@@ -37,7 +85,62 @@ func (s *Store) GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult,
 }
 
 func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error) {
-	return s.retriever.FindSimilar(ctx, chunkID, limit)
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	var embeddingBytes []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT embedding FROM chunks WHERE id = ?`, chunkID).Scan(&embeddingBytes); err != nil {
+		return nil, fmt.Errorf("loading chunk %d: %w", chunkID, err)
+	}
+
+	meta, err := s.embeddingMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil || meta.Dimensions == 0 {
+		return nil, nil
+	}
+
+	vec := decodeEmbeddingForHNSW(embeddingBytes, meta.Dimensions)
+	if len(vec) == 0 {
+		return nil, nil
+	}
+
+	queryEmbed := NormalizeFloat32(vec)
+	vectorOnly := make(map[int]*searchCandidate)
+
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		fetchK := limit + 1
+		ids := s.hnsw.Search(queryEmbed, fetchK)
+		filtered := make([]int, 0, len(ids))
+		for _, id := range ids {
+			if id != int(chunkID) {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			s.loadHNSWChunkRows(ctx, filtered, queryEmbed, limit, nil, vectorOnly)
+		}
+	}
+
+	candidates := mergeCandidates(nil, vectorOnly)
+	for i := range candidates {
+		if candidates[i].result.ChunkID == chunkID {
+			candidates = append(candidates[:i], candidates[i+1:]...)
+			break
+		}
+	}
+
+	results := make([]SearchResult, 0, min(len(candidates), limit))
+	for i, c := range candidates {
+		if i >= limit {
+			break
+		}
+		c.result.ScoreKind = "similar"
+		results = append(results, c.result)
+	}
+	return results, nil
 }
 
 func (s *Store) collectFTSCandidates(ctx context.Context, ftsQuery string, queryEmbedding []float32, candidateLimit int, pathPrefix string, rankOffset int, candidates map[int]*searchCandidate) (int, error) {

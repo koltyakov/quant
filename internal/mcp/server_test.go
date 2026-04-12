@@ -3,7 +3,6 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -40,192 +38,6 @@ func (s *shutdownRecorder) Start(string) error {
 func (s *shutdownRecorder) Shutdown(ctx context.Context) error {
 	s.shutdownCtx = ctx
 	return s.shutdownErr
-}
-
-func TestCachedEmbed_UsesLRUEviction(t *testing.T) {
-	embedder := &testutil.QueryCountingEmbedder{}
-	s := &Server{
-		embedder: embedder,
-		embCache: newEmbeddingLRU(2),
-	}
-
-	ctx := context.Background()
-	if _, err := s.cachedEmbed(ctx, "a"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(ctx, "b"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(ctx, "a"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(ctx, "c"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(ctx, "a"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(ctx, "b"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-
-	embedder.Mu.Lock()
-	defer embedder.Mu.Unlock()
-	if embedder.Calls["a"] != 1 {
-		t.Fatalf("expected a to stay cached, got %d embed calls", embedder.Calls["a"])
-	}
-	if embedder.Calls["b"] != 2 {
-		t.Fatalf("expected b to be evicted and recomputed, got %d embed calls", embedder.Calls["b"])
-	}
-	if embedder.Calls["c"] != 1 {
-		t.Fatalf("expected c to be embedded once, got %d embed calls", embedder.Calls["c"])
-	}
-}
-
-func TestCachedEmbed_DeduplicatesConcurrentRequests(t *testing.T) {
-	embedder := &testutil.QueryCountingEmbedder{}
-	s := &Server{
-		embedder:   embedder,
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
-	}
-
-	ctx := context.Background()
-	var wg sync.WaitGroup
-	errCh := make(chan error, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := s.cachedEmbed(ctx, "same-query")
-			errCh <- err
-		}()
-	}
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			t.Fatalf("unexpected embed error: %v", err)
-		}
-	}
-
-	embedder.Mu.Lock()
-	defer embedder.Mu.Unlock()
-	if embedder.Calls["same-query"] != 1 {
-		t.Fatalf("expected one embed call, got %d", embedder.Calls["same-query"])
-	}
-}
-
-func TestCachedEmbed_NormalizesWhitespaceInCacheKey(t *testing.T) {
-	embedder := &testutil.QueryCountingEmbedder{}
-	s := &Server{
-		embedder:   embedder,
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
-	}
-
-	if _, err := s.cachedEmbed(context.Background(), "alpha   beta"); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-	if _, err := s.cachedEmbed(context.Background(), " alpha beta "); err != nil {
-		t.Fatalf("unexpected embed error: %v", err)
-	}
-
-	embedder.Mu.Lock()
-	defer embedder.Mu.Unlock()
-	if embedder.Calls["alpha   beta"] != 1 {
-		t.Fatalf("expected the first normalized query to embed once, got %d", embedder.Calls["alpha   beta"])
-	}
-	if embedder.Calls[" alpha beta "] != 0 {
-		t.Fatalf("expected normalized cache hit for whitespace-only variant, got %d embeds", embedder.Calls[" alpha beta "])
-	}
-}
-
-func TestCachedEmbed_LeaderCancellationDoesNotAbortSharedFlight(t *testing.T) {
-	embedder := &testutil.CancelAwareEmbedder{
-		Started: make(chan struct{}),
-		Release: make(chan struct{}),
-	}
-	s := &Server{
-		embedder:   embedder,
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
-	}
-
-	leaderCtx, cancelLeader := context.WithCancel(context.Background())
-	leaderErrCh := make(chan error, 1)
-	go func() {
-		_, err := s.cachedEmbed(leaderCtx, "shared-query")
-		leaderErrCh <- err
-	}()
-
-	<-embedder.Started
-
-	followerErrCh := make(chan error, 1)
-	go func() {
-		_, err := s.cachedEmbed(context.Background(), "shared-query")
-		followerErrCh <- err
-	}()
-
-	cancelLeader()
-	if err := <-leaderErrCh; !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected leader to observe cancellation, got %v", err)
-	}
-
-	close(embedder.Release)
-
-	if err := <-followerErrCh; err != nil {
-		t.Fatalf("expected follower to reuse successful shared flight, got %v", err)
-	}
-
-	embedder.Mu.Lock()
-	defer embedder.Mu.Unlock()
-	if embedder.Calls["shared-query"] != 1 {
-		t.Fatalf("expected one shared embed call, got %d", embedder.Calls["shared-query"])
-	}
-}
-
-func TestCachedEmbed_CanceledFlightCachesResultForNextCaller(t *testing.T) {
-	embedder := &testutil.CancelAwareEmbedder{
-		Started: make(chan struct{}),
-		Release: make(chan struct{}),
-	}
-	s := &Server{
-		embedder:   embedder,
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	firstErrCh := make(chan error, 1)
-	go func() {
-		_, err := s.cachedEmbed(ctx, "abandoned-query")
-		firstErrCh <- err
-	}()
-
-	<-embedder.Started
-	cancel()
-
-	if err := <-firstErrCh; !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected cancellation error, got %v", err)
-	}
-
-	close(embedder.Release)
-
-	vec, err := s.cachedEmbed(context.Background(), "abandoned-query")
-	if err != nil {
-		t.Fatalf("expected cached result to be available, got %v", err)
-	}
-	if len(vec) == 0 {
-		t.Fatal("expected non-empty embedding from cache")
-	}
-
-	embedder.Mu.Lock()
-	defer embedder.Mu.Unlock()
-	if embedder.Calls["abandoned-query"] != 1 {
-		t.Fatalf("expected one embed call (not restarted), got %d calls", embedder.Calls["abandoned-query"])
-	}
 }
 
 func TestHandleSearch_LogsRequestAndSpotlight(t *testing.T) {
@@ -260,10 +72,8 @@ func TestHandleSearch_LogsRequestAndSpotlight(t *testing.T) {
 			DBPath:     dbPath,
 			EmbedModel: "test-model",
 		},
-		store:      store,
-		embedder:   &testutil.QueryCountingEmbedder{},
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
+		store:    store,
+		embedder: &testutil.QueryCountingEmbedder{},
 	}
 
 	var buf bytes.Buffer
@@ -977,12 +787,10 @@ func newTestServer(dir, dbPath string, store *index.Store) *Server {
 			DBPath:     dbPath,
 			EmbedModel: "test-model",
 		},
-		store:      store,
-		embedder:   &testutil.QueryCountingEmbedder{},
-		version:    "test-version",
-		state:      tracker,
-		embCache:   newEmbeddingLRU(2),
-		embFlights: make(map[string]*embeddingFlight),
+		store:    store,
+		embedder: &testutil.QueryCountingEmbedder{},
+		version:  "test-version",
+		state:    tracker,
 	}
 }
 

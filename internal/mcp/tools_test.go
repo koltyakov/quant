@@ -91,23 +91,6 @@ func TestSummarizeLogText(t *testing.T) {
 	}
 }
 
-func TestNormalizeEmbeddingCacheKey(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"  hello   world  ", "hello world"},
-		{"single", "single"},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		got := normalizeEmbeddingCacheKey(tt.input)
-		if got != tt.want {
-			t.Errorf("normalizeEmbeddingCacheKey(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {
 		input int64

@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -10,17 +9,6 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
 )
-
-type mockExtractor struct {
-	text string
-	err  error
-}
-
-func (m *mockExtractor) Extract(_ context.Context, _ string) (string, error) {
-	return m.text, m.err
-}
-
-func (m *mockExtractor) Supports(_ string) bool { return true }
 
 type mockEmbedder struct {
 	vectors [][]float32
@@ -57,56 +45,6 @@ func (m *mockEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float3
 
 func (m *mockEmbedder) Dimensions() int { return 1 }
 func (m *mockEmbedder) Close() error    { return nil }
-
-func TestProcess_EmptyText(t *testing.T) {
-	p := &Pipeline{
-		Extractor: &mockExtractor{text: ""},
-		ChunkSize: 100,
-		Overlap:   0.15,
-	}
-	doc, records, err := p.Process(context.Background(), "key", "file.txt", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if doc != nil || records != nil {
-		t.Fatalf("expected nil for empty text, got doc=%v records=%v", doc, records)
-	}
-}
-
-func TestProcess_ExtractError(t *testing.T) {
-	p := &Pipeline{
-		Extractor: &mockExtractor{err: errors.New("extract failed")},
-		ChunkSize: 100,
-		Overlap:   0.15,
-	}
-	_, _, err := p.Process(context.Background(), "key", "file.txt", nil)
-	if err == nil {
-		t.Fatal("expected extract error")
-	}
-}
-
-func TestProcess_Success(t *testing.T) {
-	p := &Pipeline{
-		Extractor: &mockExtractor{text: "hello world foo bar baz"},
-		Embedder:  &mockEmbedder{vectors: [][]float32{{1.0}}},
-		ChunkSize: 5,
-		Overlap:   0,
-		BatchSize: 10,
-	}
-	doc, records, err := p.Process(context.Background(), "key", "file.txt", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if doc == nil {
-		t.Fatal("expected non-nil doc")
-	}
-	if doc.Path != "key" {
-		t.Errorf("expected doc path 'key', got %q", doc.Path)
-	}
-	if len(records) == 0 {
-		t.Fatal("expected records")
-	}
-}
 
 func TestDiffChunks_AllNew(t *testing.T) {
 	p := &Pipeline{ChunkSize: 100, Overlap: 0.15}

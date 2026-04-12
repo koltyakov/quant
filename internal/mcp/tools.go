@@ -461,94 +461,7 @@ func listSourceRows(docs []index.Document) []listSourcesResultRow {
 }
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
-	cacheKey := normalizeEmbeddingCacheKey(text)
-
-	s.embCacheMu.Lock()
-	if s.embCache == nil {
-		s.embCache = newEmbeddingLRU(embCacheMaxSize)
-	}
-	if s.embFlights == nil {
-		s.embFlights = make(map[string]*embeddingFlight)
-	}
-	if vec, ok := s.embCache.Get(cacheKey); ok {
-		s.embCacheMu.Unlock()
-		s.circuitBreaker.RecordSuccess()
-		return vec, nil
-	}
-	if flight, ok := s.embFlights[cacheKey]; ok {
-		flight.waiters++
-		s.embCacheMu.Unlock()
-		return s.waitForEmbeddingFlight(ctx, flight)
-	}
-	flight := &embeddingFlight{
-		done:    make(chan struct{}),
-		waiters: 1,
-	}
-	s.embFlights[cacheKey] = flight
-	s.embCacheMu.Unlock()
-
-	if !s.circuitBreaker.Allow() {
-		s.embCacheMu.Lock()
-		flight.err = fmt.Errorf("embedding circuit breaker open")
-		delete(s.embFlights, cacheKey)
-		s.embCacheMu.Unlock()
-		select {
-		case <-flight.done:
-		default:
-			close(flight.done)
-		}
-		return nil, flight.err
-	}
-
-	//nolint:gosec // G118: intentional background goroutine — must complete embedding even if caller cancels.
-	go s.runEmbeddingFlight(cacheKey, text, flight)
-
-	return s.waitForEmbeddingFlight(ctx, flight)
-}
-
-func (s *Server) waitForEmbeddingFlight(ctx context.Context, flight *embeddingFlight) ([]float32, error) {
-	select {
-	case <-ctx.Done():
-		s.releaseEmbeddingFlight(flight)
-		return nil, ctx.Err()
-	case <-flight.done:
-		return flight.vec, flight.err
-	}
-}
-
-func (s *Server) runEmbeddingFlight(cacheKey, text string, flight *embeddingFlight) {
-	vec, err := s.embedder.Embed(context.Background(), text)
-	if err == nil {
-		vec = index.NormalizeFloat32(vec)
-		s.circuitBreaker.RecordSuccess()
-	} else {
-		s.circuitBreaker.RecordFailure()
-	}
-
-	s.embCacheMu.Lock()
-	if err == nil {
-		if s.embCache == nil {
-			s.embCache = newEmbeddingLRU(embCacheMaxSize)
-		}
-		s.embCache.Put(cacheKey, vec)
-	}
-	delete(s.embFlights, cacheKey)
-	flight.vec = vec
-	flight.err = err
-	select {
-	case <-flight.done:
-	default:
-		close(flight.done)
-	}
-	s.embCacheMu.Unlock()
-}
-
-func (s *Server) releaseEmbeddingFlight(flight *embeddingFlight) {
-	s.embCacheMu.Lock()
-	defer s.embCacheMu.Unlock()
-	if flight.waiters > 0 {
-		flight.waiters--
-	}
+	return s.embedder.Embed(ctx, text)
 }
 
 func formatBytes(b int64) string {
@@ -573,14 +486,6 @@ func sqliteDiskUsage(dbPath string) int64 {
 		}
 	}
 	return total
-}
-
-func normalizeEmbeddingCacheKey(text string) string {
-	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if normalized == "" {
-		return text
-	}
-	return normalized
 }
 
 func summarizeLogText(text string, limit int) string {
