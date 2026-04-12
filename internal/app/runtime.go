@@ -27,6 +27,8 @@ type AutoUpdateHooks struct {
 }
 
 func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks) error {
+	configureProcessMemory()
+
 	if hooks.Enabled != nil && hooks.Enabled() {
 		if hooks.CheckOnStart != nil && hooks.CheckOnStart(ctx, version) {
 			return ErrRestartRequired
