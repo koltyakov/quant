@@ -61,6 +61,7 @@ const (
 	liveQueueMultiplier = 8
 	minLiveQueueSize    = 16
 	maxLiveQueueSize    = 512
+	maxRetryStates      = 256
 )
 
 func (idx *indexer) runInitialSync(ctx context.Context) {

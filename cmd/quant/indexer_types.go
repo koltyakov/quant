@@ -223,6 +223,26 @@ func (r *retryScheduler) clear(path string) {
 	delete(r.states, path)
 }
 
+func (r *retryScheduler) evictOverflow() int {
+	if len(r.states) <= maxRetryStates {
+		return 0
+	}
+
+	evicted := 0
+	for path, state := range r.states {
+		if evicted >= len(r.states)-maxRetryStates+1 {
+			break
+		}
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(r.states, path)
+		evicted++
+	}
+	logx.Warn("retry scheduler evicted overflow entries", "count", evicted)
+	return evicted
+}
+
 func (r *retryScheduler) schedule(path string, modTime time.Time, onFire func(retryModTime time.Time)) bool {
 	if path == "" {
 		return false
@@ -231,6 +251,10 @@ func (r *retryScheduler) schedule(path string, modTime time.Time, onFire func(re
 	r.mu.Lock()
 	if r.states == nil {
 		r.states = make(map[string]*retryState)
+	}
+
+	if len(r.states) >= maxRetryStates {
+		r.evictOverflow()
 	}
 
 	state, ok := r.states[path]

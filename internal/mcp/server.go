@@ -31,6 +31,8 @@ type Server struct {
 	toolLimiterOnce sync.Once
 	toolLimiter     chan struct{}
 	maxToolSlots    int
+
+	circuitBreaker *embedCircuitBreaker
 }
 
 const (
@@ -43,6 +45,9 @@ const (
 	ssePath                = "/sse"
 	sseMessagePath         = "/message"
 	maxConcurrentToolCalls = 4
+
+	embedCircuitFailureLimit = 5
+	embedCircuitResetTimeout = 30 * time.Second
 )
 
 func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string) *Server {
@@ -64,6 +69,10 @@ func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder
 		embCache:     newEmbeddingLRU(embCacheMaxSize),
 		embFlights:   make(map[string]*embeddingFlight),
 		maxToolSlots: maxTools,
+		circuitBreaker: newEmbedCircuitBreaker(
+			embedCircuitFailureLimit,
+			embedCircuitResetTimeout,
+		),
 	}
 
 	s.mcp = mcpserver.NewMCPServer("quant", version)
@@ -89,6 +98,22 @@ type embeddingFlight struct {
 	vec     []float32
 	err     error
 }
+
+type embedCircuitBreaker struct {
+	mu           sync.RWMutex
+	failures     int
+	lastFailure  time.Time
+	state        circuitState
+	failureLimit int
+	resetTimeout time.Duration
+}
+
+type circuitState int
+
+const (
+	circuitClosed circuitState = iota
+	circuitOpen
+)
 
 func newEmbeddingLRU(capacity int) *embeddingLRU {
 	if capacity < 1 {
@@ -130,6 +155,61 @@ func (c *embeddingLRU) Put(key string, value []float32) {
 	}
 	c.ll.Remove(tail)
 	delete(c.items, tail.Value.(*embeddingCacheEntry).key)
+}
+
+func newEmbedCircuitBreaker(failureLimit int, resetTimeout time.Duration) *embedCircuitBreaker {
+	return &embedCircuitBreaker{
+		failureLimit: failureLimit,
+		resetTimeout: resetTimeout,
+		state:        circuitClosed,
+	}
+}
+
+func (cb *embedCircuitBreaker) Allow() bool {
+	if cb == nil {
+		return true
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case circuitClosed:
+		return true
+	case circuitOpen:
+		if time.Since(cb.lastFailure) >= cb.resetTimeout {
+			cb.state = circuitClosed
+			cb.failures = 0
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func (cb *embedCircuitBreaker) RecordFailure() {
+	if cb == nil {
+		return
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.failures++
+	cb.lastFailure = time.Now()
+	if cb.failures >= cb.failureLimit {
+		cb.state = circuitOpen
+	}
+}
+
+func (cb *embedCircuitBreaker) RecordSuccess() {
+	if cb == nil {
+		return
+	}
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == circuitClosed {
+		cb.failures = 0
+	}
 }
 
 type shutdownable interface {

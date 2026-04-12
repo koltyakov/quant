@@ -321,6 +321,7 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 	}
 	if vec, ok := s.embCache.Get(cacheKey); ok {
 		s.embCacheMu.Unlock()
+		s.circuitBreaker.RecordSuccess()
 		return vec, nil
 	}
 	if flight, ok := s.embFlights[cacheKey]; ok {
@@ -334,6 +335,19 @@ func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error
 	}
 	s.embFlights[cacheKey] = flight
 	s.embCacheMu.Unlock()
+
+	if !s.circuitBreaker.Allow() {
+		s.embCacheMu.Lock()
+		flight.err = fmt.Errorf("embedding circuit breaker open")
+		delete(s.embFlights, cacheKey)
+		s.embCacheMu.Unlock()
+		select {
+		case <-flight.done:
+		default:
+			close(flight.done)
+		}
+		return nil, flight.err
+	}
 
 	//nolint:gosec // G118: intentional background goroutine — must complete embedding even if caller cancels.
 	go s.runEmbeddingFlight(cacheKey, text, flight)
@@ -355,6 +369,9 @@ func (s *Server) runEmbeddingFlight(cacheKey, text string, flight *embeddingFlig
 	vec, err := s.embedder.Embed(context.Background(), text)
 	if err == nil {
 		vec = index.NormalizeFloat32(vec)
+		s.circuitBreaker.RecordSuccess()
+	} else {
+		s.circuitBreaker.RecordFailure()
 	}
 
 	s.embCacheMu.Lock()
@@ -367,7 +384,11 @@ func (s *Server) runEmbeddingFlight(cacheKey, text string, flight *embeddingFlig
 	delete(s.embFlights, cacheKey)
 	flight.vec = vec
 	flight.err = err
-	close(flight.done)
+	select {
+	case <-flight.done:
+	default:
+		close(flight.done)
+	}
 	s.embCacheMu.Unlock()
 }
 

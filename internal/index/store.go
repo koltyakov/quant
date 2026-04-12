@@ -253,6 +253,10 @@ func (s *Store) InsertChunk(ctx context.Context, chunk *ChunkRecord) error {
 }
 
 func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord) error {
+	return s.ReindexDocumentWithDeferredHNSW(ctx, doc, chunks, nil)
+}
+
+func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Document, chunks []ChunkRecord, deferredHNSW func()) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -264,8 +268,6 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		return err
 	}
 
-	// Remove existing chunks from HNSW inside the transaction so we have
-	// deterministic cleanup even under concurrent calls for the same path.
 	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
@@ -314,7 +316,10 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	// Add newly inserted chunks to HNSW after commit.
+	if deferredHNSW != nil {
+		deferredHNSW()
+	}
+
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		meta, metaErr := s.embeddingMetadata(ctx)
 		if metaErr != nil {
