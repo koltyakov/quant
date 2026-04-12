@@ -132,6 +132,9 @@ func TestDefaultPathMatcher(t *testing.T) {
 		{".DS_Store", false},
 		{"main.pyc", false},
 		{"__pycache__/module.cpython-39.pyc", false},
+		{"logs/app.log", true},
+		{".quarantine/books/sample.txt", false},
+		{".quarantine/books/sample.txt.log", false},
 		{"src/app.ts", true},
 		{"README.md", true},
 	}

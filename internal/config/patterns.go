@@ -60,8 +60,7 @@ func DefaultPathMatcher() *PathMatcher {
 			"*.so",
 			"*.dylib",
 
-			// Logs and temp
-			"*.log",
+			// Temp and quarantine
 			"tmp/**",
 			"temp/**",
 			".quarantine",
