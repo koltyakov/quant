@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// Document represents an indexed document in the store.
 type Document struct {
 	ID         int64
 	Path       string
@@ -13,6 +14,7 @@ type Document struct {
 	IndexedAt  time.Time
 }
 
+// ChunkRecord represents a chunk of content with its embedding.
 type ChunkRecord struct {
 	ID         int64
 	DocumentID int64
@@ -21,12 +23,14 @@ type ChunkRecord struct {
 	Embedding  []byte
 }
 
+// EmbeddingMetadata stores information about the embedding model configuration.
 type EmbeddingMetadata struct {
 	Model      string
 	Dimensions int
 	Normalized bool
 }
 
+// SearchResult represents a search result with scoring information.
 type SearchResult struct {
 	DocumentPath string
 	ChunkContent string
@@ -36,29 +40,77 @@ type SearchResult struct {
 	ChunkID      int64
 }
 
-type Searcher interface {
-	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
-	FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error)
-	GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult, error)
+// -----------------------------------------------------------------------------
+// Repository Interfaces
+// -----------------------------------------------------------------------------
+
+// DocumentRepository provides read operations for documents.
+type DocumentRepository interface {
+	GetDocumentByPath(ctx context.Context, path string) (*Document, error)
+	ListDocuments(ctx context.Context) ([]Document, error)
 	ListDocumentsLimit(ctx context.Context, limit int) ([]Document, error)
+}
+
+// ChunkRepository provides read operations for chunks.
+type ChunkRepository interface {
+	GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult, error)
+	GetDocumentChunksByPath(ctx context.Context, path string) (map[string]ChunkRecord, error)
+}
+
+// EmbeddingMetadataRepository manages embedding model metadata.
+type EmbeddingMetadataRepository interface {
+	EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata) (rebuild bool, err error)
+}
+
+// StatsProvider provides index statistics.
+type StatsProvider interface {
 	Stats(ctx context.Context) (docCount int, chunkCount int, err error)
+}
+
+// HealthProvider provides health check capabilities.
+type HealthProvider interface {
 	PingContext(ctx context.Context) error
 }
 
+// -----------------------------------------------------------------------------
+// Composite Interfaces
+// -----------------------------------------------------------------------------
+
+// Searcher provides search capabilities over the index.
+type Searcher interface {
+	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
+	FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error)
+	ChunkRepository
+	DocumentRepository
+	StatsProvider
+	HealthProvider
+}
+
+// DocumentWriter provides write operations for documents and chunks.
 type DocumentWriter interface {
 	ReindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord) error
 	DeleteDocument(ctx context.Context, path string) error
 	DeleteDocumentsByPrefix(ctx context.Context, prefix string) error
-	GetDocumentByPath(ctx context.Context, path string) (*Document, error)
-	GetDocumentChunksByPath(ctx context.Context, path string) (map[string]ChunkRecord, error)
-	ListDocuments(ctx context.Context) ([]Document, error)
 	RenameDocumentPath(ctx context.Context, oldPath, newPath string) error
-	Stats(ctx context.Context) (docCount int, chunkCount int, err error)
+	DocumentRepository
+	ChunkRepository
+	StatsProvider
 }
 
+// HNSWBuilder provides HNSW index management capabilities.
 type HNSWBuilder interface {
 	HNSWReady() bool
 	BuildHNSW(ctx context.Context) error
 	RemoveBackup()
 	LoadHNSWFromState(ctx context.Context) bool
+}
+
+// Store combines all repository interfaces for a complete index store.
+// This interface is useful for dependency injection in tests.
+type StoreInterface interface {
+	Searcher
+	DocumentWriter
+	HNSWBuilder
+	EmbeddingMetadataRepository
+	Close() error
 }

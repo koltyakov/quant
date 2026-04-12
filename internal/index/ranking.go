@@ -15,20 +15,20 @@ type searchCandidate struct {
 	modifiedAt  time.Time
 }
 
-// querySignalWeights controls the relative contribution of keyword vs vector
+// QuerySignalWeights controls the relative contribution of keyword vs vector
 // signals in RRF fusion. The weights multiply the respective 1/(K+rank) terms.
-type querySignalWeights struct {
-	keyword float32
-	vector  float32
+type QuerySignalWeights struct {
+	Keyword float32
+	Vector  float32
 }
 
 // classifyQueryWeights returns signal weights based on query shape.
 // Identifier-like queries (camelCase, snake_case, short single tokens)
 // upweight keyword search; longer natural-language queries upweight vector search.
-func classifyQueryWeights(query string, keywordOverride, vectorOverride float32) querySignalWeights {
+func classifyQueryWeights(query string, keywordOverride, vectorOverride float32) QuerySignalWeights {
 	tokens := strings.Fields(query)
 	if len(tokens) == 0 {
-		return applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, keywordOverride, vectorOverride)
+		return applyWeightOverrides(QuerySignalWeights{Keyword: 1.0, Vector: 1.0}, keywordOverride, vectorOverride)
 	}
 
 	identifierTokens := 0
@@ -38,33 +38,33 @@ func classifyQueryWeights(query string, keywordOverride, vectorOverride float32)
 		}
 	}
 
-	var weights querySignalWeights
+	var weights QuerySignalWeights
 	switch {
 	case len(tokens) <= 2 && identifierTokens == len(tokens):
-		weights = querySignalWeights{keyword: 1.5, vector: 0.6}
+		weights = QuerySignalWeights{Keyword: 1.5, Vector: 0.6}
 	case len(tokens) == 1:
-		weights = querySignalWeights{keyword: 1.2, vector: 0.9}
+		weights = QuerySignalWeights{Keyword: 1.2, Vector: 0.9}
 	case identifierTokens > len(tokens)/2:
-		weights = querySignalWeights{keyword: 1.3, vector: 0.8}
+		weights = QuerySignalWeights{Keyword: 1.3, Vector: 0.8}
 	case len(tokens) >= 4:
-		weights = querySignalWeights{keyword: 0.7, vector: 1.4}
+		weights = QuerySignalWeights{Keyword: 0.7, Vector: 1.4}
 	default:
-		weights = querySignalWeights{keyword: 1.0, vector: 1.0}
+		weights = QuerySignalWeights{Keyword: 1.0, Vector: 1.0}
 	}
 
 	return applyWeightOverrides(weights, keywordOverride, vectorOverride)
 }
 
-func applyWeightOverrides(w querySignalWeights, keywordOverride, vectorOverride float32) querySignalWeights {
+func applyWeightOverrides(w QuerySignalWeights, keywordOverride, vectorOverride float32) QuerySignalWeights {
 	if keywordOverride > 0 {
-		ratio := keywordOverride / w.keyword
-		w.keyword = keywordOverride
-		w.vector = w.vector * ratio
+		ratio := keywordOverride / w.Keyword
+		w.Keyword = keywordOverride
+		w.Vector = w.Vector * ratio
 	}
 	if vectorOverride > 0 {
-		ratio := vectorOverride / w.vector
-		w.vector = vectorOverride
-		w.keyword = w.keyword * ratio
+		ratio := vectorOverride / w.Vector
+		w.Vector = vectorOverride
+		w.Keyword = w.Keyword * ratio
 	}
 	return w
 }
@@ -152,13 +152,13 @@ func mergeCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCand
 }
 
 // rrfBaseScore assigns base RRF scores from keyword and vector ranks.
-func rrfBaseScore(weights querySignalWeights) rankingStage {
+func rrfBaseScore(weights QuerySignalWeights) rankingStage {
 	return func(candidates []scoredCandidate) []scoredCandidate {
 		for i := range candidates {
 			c := &candidates[i]
-			c.score += weights.vector / float32(rrfK+c.vectorRank)
+			c.score += weights.Vector / float32(rrfK+c.vectorRank)
 			if c.keywordRank > noKeywordRank {
-				c.score += weights.keyword / float32(rrfK+c.keywordRank)
+				c.score += weights.Keyword / float32(rrfK+c.keywordRank)
 			}
 		}
 		return candidates
@@ -273,7 +273,7 @@ func runRankingPipeline(candidates []scoredCandidate, stages ...rankingStage) []
 
 // unifiedRRF merges keyword and vector-only candidates using a composable ranking pipeline:
 // base RRF scoring, recency boost, path boost, and document diversity.
-func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string, weights querySignalWeights) []SearchResult {
+func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string, weights QuerySignalWeights) []SearchResult {
 	if limit <= 0 {
 		return nil
 	}
@@ -305,13 +305,13 @@ func anyHasVectorScore(candidates map[int]*searchCandidate) bool {
 // the top candidate scores approach 1.0 and the threshold parameter becomes
 // intuitive. The max theoretical score assumes rank 1 for both keyword and
 // vector plus the maximum recency and path bonuses.
-func normalizeScores(weights querySignalWeights, hasKeyword, hasVector, hasPathTokens bool) rankingStage {
+func normalizeScores(weights QuerySignalWeights, hasKeyword, hasVector, hasPathTokens bool) rankingStage {
 	maxScore := float32(0)
 	if hasKeyword {
-		maxScore += weights.keyword / float32(rrfK+1)
+		maxScore += weights.Keyword / float32(rrfK+1)
 	}
 	if hasVector {
-		maxScore += weights.vector / float32(rrfK+1)
+		maxScore += weights.Vector / float32(rrfK+1)
 	}
 	maxScore += recencyBoostWeight / float32(rrfK+1)
 	if hasPathTokens {

@@ -44,10 +44,7 @@ type indexer struct {
 	retries *retryScheduler
 
 	indexState *runtimestate.IndexStateTracker
-
-	resyncMu      sync.Mutex
-	resyncRunning bool
-	resyncPending bool
+	resync     *ResyncCoordinator
 }
 
 type syncReport struct {
@@ -66,61 +63,27 @@ const (
 	maxRetryStates      = 256
 )
 
-func (idx *indexer) runInitialSync(ctx context.Context) {
-	if !idx.beginResync() {
-		return
-	}
-	idx.runResyncLoop(ctx, true)
-}
-
-func (idx *indexer) requestResync(ctx context.Context) {
-	if !idx.beginResync() {
-		return
-	}
-	go idx.runResyncLoop(ctx, false)
-}
-
-func (idx *indexer) beginResync() bool {
-	idx.resyncMu.Lock()
-	defer idx.resyncMu.Unlock()
-
-	if idx.resyncRunning {
-		idx.resyncPending = true
-		return false
-	}
-	idx.resyncRunning = true
-	return true
-}
-
-func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
-	first := startup
-	for {
-		if first {
+func (idx *indexer) initResyncCoordinator() {
+	idx.resync = NewResyncCoordinator(ResyncCallbacks{
+		OnStartup: func(ctx context.Context) (syncReport, error) {
 			idx.setIndexState(runtimestate.IndexStateIndexing, "initial filesystem scan in progress")
 			logx.Info("starting initial scan", "watch_dir", idx.cfg.WatchDir)
-		} else {
+			return idx.initialSyncWithReport(ctx)
+		},
+		OnResync: func(ctx context.Context) (syncReport, error) {
 			logx.Info("starting filesystem resync", "watch_dir", idx.cfg.WatchDir)
-		}
-
-		report, err := idx.initialSyncWithReport(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				idx.finishResync(false)
-				return
-			}
-			idx.setIndexState(runtimestate.IndexStateDegraded, "filesystem resync failed; index may be partially stale")
-			logx.Error("filesystem resync failed", "err", err)
-		} else if first {
+			return idx.initialSyncWithReport(ctx)
+		},
+		OnState: idx.setIndexState,
+		OnReady: func(ctx context.Context, report syncReport) {
 			docCount, _, err := idx.store.Stats(ctx)
 			if err != nil {
 				logx.Error("fetching index stats failed", "err", err)
 			} else {
 				logx.Info("initial scan complete", "documents", docCount)
 				if report.hadIndexFailures {
-					idx.setIndexState(runtimestate.IndexStateDegraded, "initial scan completed with indexing failures")
 					logx.Warn("initial scan completed with indexing failures", "action", "keeping database backup until a clean rebuild succeeds")
 				} else {
-					idx.setIndexState(runtimestate.IndexStateReady, "initial scan complete")
 					idx.hnswStore.RemoveBackup()
 				}
 			}
@@ -134,31 +97,22 @@ func (idx *indexer) runResyncLoop(ctx context.Context, startup bool) {
 					}
 				}()
 			}
-		} else if report.hadIndexFailures {
-			idx.setIndexState(runtimestate.IndexStateDegraded, "filesystem resync completed with indexing failures")
-		} else {
-			idx.setIndexState(runtimestate.IndexStateReady, "filesystem resync complete")
-		}
-
-		first = false
-		if !idx.finishResync(true) {
-			return
-		}
-	}
+		},
+	})
 }
 
-func (idx *indexer) finishResync(retryAllowed bool) bool {
-	idx.resyncMu.Lock()
-	defer idx.resyncMu.Unlock()
-
-	if retryAllowed && idx.resyncPending {
-		idx.resyncPending = false
-		return true
+func (idx *indexer) runInitialSync(ctx context.Context) {
+	if idx.resync == nil {
+		idx.initResyncCoordinator()
 	}
+	idx.resync.RunInitialSync(ctx)
+}
 
-	idx.resyncRunning = false
-	idx.resyncPending = false
-	return false
+func (idx *indexer) requestResync(ctx context.Context) {
+	if idx.resync == nil {
+		idx.initResyncCoordinator()
+	}
+	idx.resync.RequestResync(ctx)
 }
 
 func (idx *indexer) initialSync(ctx context.Context) error {
@@ -709,10 +663,28 @@ func (idx *indexer) indexFileCore(ctx context.Context, key, path string, modTime
 }
 
 func (idx *indexer) shouldIgnorePath(path string) bool {
-	if idx == nil || idx.cfg == nil || idx.cfg.DBPath == "" {
+	if idx == nil || idx.cfg == nil {
 		return false
 	}
-	return isCompanionLogPathForDB(idx.cfg.DBPath, path)
+
+	// Always ignore companion log files for the database
+	if idx.cfg.DBPath != "" && isCompanionLogPathForDB(idx.cfg.DBPath, path) {
+		return true
+	}
+
+	// Check include/exclude patterns from config
+	matcher := idx.cfg.PathMatcher()
+	if matcher == nil {
+		return false
+	}
+
+	// Get relative path for pattern matching
+	relPath, err := filepath.Rel(idx.cfg.WatchDir, path)
+	if err != nil {
+		return false
+	}
+
+	return !matcher.ShouldIndex(relPath)
 }
 
 func documentKey(root, path string) (string, error) {

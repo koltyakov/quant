@@ -1,7 +1,6 @@
 package chunk
 
 import (
-	"path/filepath"
 	"strings"
 	"unicode"
 )
@@ -9,22 +8,12 @@ import (
 // SplitWithPath splits text into chunks using a code-aware strategy when the
 // file path indicates a source-code file, falling back to the generic paragraph
 // splitter for all other content.
+//
+// This function uses the DefaultRegistry to select the appropriate chunking
+// strategy based on file extension. Custom chunkers can be registered via
+// RegisterChunker() to extend support for additional file types.
 func SplitWithPath(text string, path string, chunkSize int, overlapFraction float64) []Chunk {
-	if path != "" {
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".go":
-			if chunks := splitGo(text, chunkSize, overlapFraction); chunks != nil {
-				return chunks
-			}
-		case ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".java", ".c", ".cpp", ".cc", ".h", ".hpp",
-			".rb", ".php", ".swift", ".kt", ".cs", ".scala", ".lua", ".ex", ".exs":
-			if chunks := splitCode(text, chunkSize, overlapFraction); chunks != nil {
-				return chunks
-			}
-		}
-	}
-	return Split(text, chunkSize, overlapFraction)
+	return DefaultRegistry.Split(text, path, chunkSize, overlapFraction)
 }
 
 type Chunk struct {

@@ -43,7 +43,12 @@ type Config struct {
 	KeywordWeight       float64       `yaml:"keyword_weight"`
 	VectorWeight        float64       `yaml:"vector_weight"`
 	WatchEventBuffer    int           `yaml:"watch_event_buffer"`
+	IncludePatterns     []string      `yaml:"include"`
+	ExcludePatterns     []string      `yaml:"exclude"`
 	ConfigFile          string        `yaml:"-"`
+
+	// pathMatcher is lazily initialized from IncludePatterns/ExcludePatterns
+	pathMatcher *PathMatcher
 }
 
 func Default() *Config {
@@ -114,6 +119,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("vector_weight must be between 0 and 10")
 	}
 	return nil
+}
+
+// PathMatcher returns the configured path matcher for include/exclude patterns.
+// If no patterns are configured, returns nil (all paths included).
+func (c *Config) PathMatcher() *PathMatcher {
+	if c.pathMatcher != nil {
+		return c.pathMatcher
+	}
+	if len(c.IncludePatterns) == 0 && len(c.ExcludePatterns) == 0 {
+		return nil
+	}
+	c.pathMatcher = &PathMatcher{
+		IncludePatterns: c.IncludePatterns,
+		ExcludePatterns: c.ExcludePatterns,
+	}
+	return c.pathMatcher
 }
 
 func validateEmbedURL(raw string) error {
@@ -297,6 +318,8 @@ func loadYAML(cfg *Config, path string) error {
 		KeywordWeight       *float64  `yaml:"keyword_weight"`
 		VectorWeight        *float64  `yaml:"vector_weight"`
 		WatchEventBuffer    *int      `yaml:"watch_event_buffer"`
+		IncludePatterns     []string  `yaml:"include"`
+		ExcludePatterns     []string  `yaml:"exclude"`
 	}
 
 	var parsed fileConfig
@@ -359,6 +382,12 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if parsed.VectorWeight != nil {
 		cfg.VectorWeight = *parsed.VectorWeight
+	}
+	if len(parsed.IncludePatterns) > 0 {
+		cfg.IncludePatterns = parsed.IncludePatterns
+	}
+	if len(parsed.ExcludePatterns) > 0 {
+		cfg.ExcludePatterns = parsed.ExcludePatterns
 	}
 
 	return nil

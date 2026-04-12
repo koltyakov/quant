@@ -123,35 +123,35 @@ func TestCandidateHeap(t *testing.T) {
 }
 
 func TestApplyWeightOverrides_NoOverride(t *testing.T) {
-	w := applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, 0, 0)
-	if w.keyword != 1.0 || w.vector != 1.0 {
-		t.Fatalf("expected unchanged weights, got k=%f v=%f", w.keyword, w.vector)
+	w := applyWeightOverrides(QuerySignalWeights{Keyword: 1.0, Vector: 1.0}, 0, 0)
+	if w.Keyword != 1.0 || w.Vector != 1.0 {
+		t.Fatalf("expected unchanged weights, got k=%f v=%f", w.Keyword, w.Vector)
 	}
 }
 
 func TestApplyWeightOverrides_KeywordOverride(t *testing.T) {
-	w := applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, 2.0, 0)
-	if w.keyword != 2.0 {
-		t.Fatalf("expected keyword=2.0, got %f", w.keyword)
+	w := applyWeightOverrides(QuerySignalWeights{Keyword: 1.0, Vector: 1.0}, 2.0, 0)
+	if w.Keyword != 2.0 {
+		t.Fatalf("expected keyword=2.0, got %f", w.Keyword)
 	}
-	if w.vector <= 0 {
-		t.Fatalf("expected vector > 0, got %f", w.vector)
+	if w.Vector <= 0 {
+		t.Fatalf("expected vector > 0, got %f", w.Vector)
 	}
 }
 
 func TestApplyWeightOverrides_VectorOverride(t *testing.T) {
-	w := applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, 0, 3.0)
-	if w.vector != 3.0 {
-		t.Fatalf("expected vector=3.0, got %f", w.vector)
+	w := applyWeightOverrides(QuerySignalWeights{Keyword: 1.0, Vector: 1.0}, 0, 3.0)
+	if w.Vector != 3.0 {
+		t.Fatalf("expected vector=3.0, got %f", w.Vector)
 	}
-	if w.keyword <= 0 {
-		t.Fatalf("expected keyword > 0, got %f", w.keyword)
+	if w.Keyword <= 0 {
+		t.Fatalf("expected keyword > 0, got %f", w.Keyword)
 	}
 }
 
 func TestApplyWeightOverrides_BothOverrides(t *testing.T) {
-	w := applyWeightOverrides(querySignalWeights{keyword: 1.0, vector: 1.0}, 2.0, 3.0)
-	if w.keyword <= 0 || w.vector <= 0 {
-		t.Fatalf("expected positive weights, got k=%f v=%f", w.keyword, w.vector)
+	w := applyWeightOverrides(QuerySignalWeights{Keyword: 1.0, Vector: 1.0}, 2.0, 3.0)
+	if w.Keyword <= 0 || w.Vector <= 0 {
+		t.Fatalf("expected positive weights, got k=%f v=%f", w.Keyword, w.Vector)
 	}
 }
