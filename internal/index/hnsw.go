@@ -255,27 +255,6 @@ func (s *Store) HNSWLen() int {
 	return s.hnsw.Len()
 }
 
-// hnswDeleteChunks removes all chunks belonging to a document from the HNSW graph.
-func (s *Store) hnswDeleteChunks(ctx context.Context, docID int64) {
-	if s.hnsw == nil || !s.hnsw.ready.Load() {
-		return
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
-	if err != nil {
-		return
-	}
-	defer func() { _ = rows.Close() }()
-	var ids []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return
-		}
-		ids = append(ids, id)
-	}
-	s.hnsw.BatchDelete(ids)
-}
-
 // decodeEmbeddingForHNSW converts a stored embedding blob to []float32 for use in HNSW.
 // Supports both float32 (dims*4 bytes) and int8 quantized (8+dims bytes) formats.
 func decodeEmbeddingForHNSW(data []byte, dims int) []float32 {

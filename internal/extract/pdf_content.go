@@ -2,6 +2,7 @@ package extract
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strconv"
@@ -244,7 +245,7 @@ func readPDFContentStream(stream pdf.Value, limit int64, name string) ([]byte, e
 	rc := stream.Reader()
 	defer func() { _ = rc.Close() }()
 
-	return readAllLimited(nil, rc, limit, name)
+	return readAllLimited(context.TODO(), rc, limit, name)
 }
 
 func pdfContentStreamEndsMidToken(data []byte) bool {
@@ -595,11 +596,11 @@ func (p *pdfContentParser) readHexString() (string, error) {
 			return "", fmt.Errorf("malformed hex string")
 		}
 		if !haveNibble {
-			nibble = byte(v)
+			nibble = byte(v) //nolint:gosec // fromHex returns 0-15
 			haveNibble = true
 			continue
 		}
-		out = append(out, nibble<<4|byte(v))
+		out = append(out, nibble<<4|byte(v)) //nolint:gosec // fromHex returns 0-15
 		haveNibble = false
 	}
 
@@ -624,7 +625,7 @@ func (p *pdfContentParser) readName() (pdfContentName, error) {
 			if hi < 0 || lo < 0 {
 				return "", fmt.Errorf("malformed name escape")
 			}
-			out = append(out, byte(hi<<4|lo))
+			out = append(out, byte(hi<<4|lo)) //nolint:gosec // fromHex returns 0-15
 			p.pos += 2
 			continue
 		}

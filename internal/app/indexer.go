@@ -818,7 +818,7 @@ func (idx *Indexer) quarantineFailedPath(ctx context.Context, path string, failu
 		return
 	}
 	logPath := dst + ".log"
-	if writeErr := os.WriteFile(logPath, []byte(failure.Error()+"\n"), 0640); writeErr != nil {
+	if writeErr := os.WriteFile(logPath, []byte(failure.Error()+"\n"), 0600); writeErr != nil {
 		logx.Warn("writing quarantine log failed", "path", path, "log", logPath, "err", writeErr)
 	}
 
