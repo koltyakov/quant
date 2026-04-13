@@ -21,6 +21,7 @@ The text extractor handles all common source code, markup, configuration, and da
 | Systems | `.rs` `.zig` `.nim` `.v` `.odin` |
 | Apple | `.swift` `.m` `.mm` |
 | Scripting | `.rb` `.php` `.pl` `.pm` `.lua` `.r` `.R` `.jl` `.tcl` `.awk` `.sed` `.perl` |
+| Documentation | `.pod` `.man` `.roff` |
 | Shell | `.sh` `.bash` `.zsh` `.fish` `.ps1` `.psm1` `.bat` `.cmd` |
 | Functional | `.hs` `.ml` `.mli` `.ex` `.exs` `.erl` `.hrl` `.elm` `.purs` `.rkt` `.scm` `.lisp` `.cl` |
 | Mobile | `.dart` |
@@ -40,7 +41,7 @@ The text extractor handles all common source code, markup, configuration, and da
 
 ### Jupyter notebooks (`.ipynb`)
 
-Extracts code cells and markdown cells. Code outputs (text only) are captured below their source cell. Each cell is marked with a `[Cell N]` header.
+Extracts code cells and markdown cells. Code outputs (text only) are captured below their source cell. Each cell is marked with a type-specific header: `[Markdown Cell N]`, `[Code Cell N]`, or `[Raw Cell N]`.
 
 ### PDF (`.pdf`)
 
@@ -55,9 +56,9 @@ OCR requires `ocrmypdf` to be installed and on `PATH`.
 
 | Format | Extensions |
 |--------|-----------|
-| Word | `.docx` |
-| PowerPoint | `.pptx` |
-| Excel | `.xlsx` |
+| Word | `.docx` `.docm` `.dotx` `.dotm` |
+| PowerPoint | `.pptx` `.pptm` `.ppsx` `.ppsm` `.potx` `.potm` |
+| Excel | `.xlsx` `.xlsm` `.xltx` `.xltm` `.xlam` |
 
 Slides are marked with `[Slide N]`. Sheets are marked with `[Sheet N]`.
 

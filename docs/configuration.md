@@ -34,6 +34,13 @@ All flags apply to `quant mcp`.
 | `--vector-weight` | `0` (auto) | Vector search signal multiplier (0--10). When `0`, `quant` chooses weights automatically based on query shape |
 | `--max-concurrent-tools` | `4` | Maximum concurrent MCP tool calls (1--32) |
 
+### Multi-instance flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--proxy-addr` | - | Address of the main-process proxy; when set, this instance runs in worker mode and delegates locking to the proxy |
+| `--no-lock` | `false` | Disable multi-instance locking and run fully standalone |
+
 ### Watcher flags
 
 | Flag | Default | Description |
@@ -70,6 +77,8 @@ All flags can be set via environment variables. The mapping is:
 | `QUANT_WATCH_EVENT_BUFFER` | `--watch-event-buffer` |
 | `QUANT_PDF_OCR_LANG` | `--pdf-ocr-lang` |
 | `QUANT_PDF_OCR_TIMEOUT` | `--pdf-ocr-timeout` |
+| `QUANT_PROXY_ADDR` | `--proxy-addr` |
+| `QUANT_NO_LOCK` | `--no-lock` |
 
 Auto-update is controlled separately:
 
@@ -108,6 +117,8 @@ max_concurrent_tools: 4
 watch_event_buffer: 256
 pdf_ocr_lang: eng
 pdf_ocr_timeout: 2m
+proxy_addr: ""
+no_lock: false
 include:
   - "**/*.go"
   - "**/*.md"

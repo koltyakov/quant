@@ -91,3 +91,12 @@ If the embedding backend is unavailable at query time:
 ## find_similar
 
 The `find_similar` tool bypasses keyword search entirely. It loads the stored embedding for the given chunk ID, then queries the HNSW graph for nearest neighbors. This is useful for "more like this" exploration when you already have a relevant chunk from a previous search.
+
+## Score kind
+
+Each result includes a `score_kind` field that indicates how the score was produced:
+
+| Value | Source |
+|-------|--------|
+| `"rrf"` | Hybrid search (`search` tool) - score is from RRF fusion of keyword and vector signals |
+| `"similar"` | Similarity search (`find_similar` tool) - score is raw vector similarity |
