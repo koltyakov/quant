@@ -1,25 +1,44 @@
 # Changelog
 
+## v0.8.0 (2026-04-12)
+
+### Features
+
+- **Proxy server for multi-process locking** - A new proxy server and client enable coordinated access to a shared Quant index across multiple processes, replacing the previous heartbeat-based lock with a simpler RPC mechanism.
+- **Dynamic memory management** - Memory limits are now computed dynamically based on platform and available system memory, and integrated into the indexing pipeline to prevent OOM conditions during large batch operations.
+- **PDF content extraction** - PDF files are now inspected and extracted with structure-aware logic that preserves text from illustrated narratives and other complex layouts, with dedicated test coverage.
+- **Oversized file handling** - Files exceeding configurable size limits are skipped during indexing with a new `ErrFileTooLarge` sentinel error; the Ollama embed batch also trims oversized content to stay within token budgets.
+- **Quarantine for permanent failures** - Documents that fail with permanent errors (e.g., retry budget exceeded, embedding failures) are quarantined and excluded from future indexing attempts, preventing wasteful retries.
+- **FTS diagnostics** - A new `FTSDiagnostics` struct and provider expose FTS index state for monitoring and debugging.
+- **Quarantine-aware path matching** - The default path matcher now excludes quarantine directories from indexing.
+
+### Improvements
+
+- **Simplified lock management** - Heartbeat functionality removed from the locking mechanism in favor of the new proxy-based approach.
+- **FTS rebuild refactor** - FTS rebuilding logic extracted into a dedicated function for clarity and maintainability.
+- **Log file permissions** - Log files are now created with appropriate permissions and improved context propagation in PDF extraction.
+- **Orphaned chunk cleanup** - Deleting a document now also cleans up any orphaned chunks left in the database.
+
 ## v0.7.0 (2026-04-11)
 
 ### Features
 
-- **Index state tracking** — The indexer now tracks its lifecycle (idle, syncing, live) and exposes it through the `index_status` MCP tool, giving clients real-time visibility into whether indexing is in progress.
-- **Structured MCP tool responses** — `search`, `list_sources`, and `index_status` return typed JSON objects instead of plain text, making results easier to parse and display in tool-calling clients.
-- **Rate-limited embedding** — Embedding requests are now rate-limited (configurable via `embed_rate_limit`) to avoid overwhelming the Ollama backend during bulk indexing.
-- **Health and readiness endpoints** — `/health` and `/ready` HTTP endpoints are now served alongside the MCP server for use by orchestrators and process monitors.
-- **Pluggable chunk splitter registry** — Chunk splitters are now registered centrally, making it straightforward to add new language-aware splitters without modifying the core pipeline.
-- **Configurable file pattern filtering** — Include and exclude glob patterns can be specified in config to control which files are indexed.
+- **Index state tracking** - The indexer now tracks its lifecycle (idle, syncing, live) and exposes it through the `index_status` MCP tool, giving clients real-time visibility into whether indexing is in progress.
+- **Structured MCP tool responses** - `search`, `list_sources`, and `index_status` return typed JSON objects instead of plain text, making results easier to parse and display in tool-calling clients.
+- **Rate-limited embedding** - Embedding requests are now rate-limited internally to avoid overwhelming the Ollama backend during bulk indexing.
+- **Health and readiness endpoints** - `/health` and `/ready` HTTP endpoints are now served alongside the MCP server for use by orchestrators and process monitors.
+- **Pluggable chunk splitter registry** - Chunk splitters are now registered centrally, making it straightforward to add new language-aware splitters without modifying the core pipeline.
+- **Configurable file pattern filtering** - Include and exclude glob patterns can be specified in config to control which files are indexed.
 
 ### Improvements
 
-- **`CachingEmbedder` decorator** — LRU cache, single-flight deduplication, and circuit breaker for embedding requests are now encapsulated in a reusable `embed.CachingEmbedder` wrapper rather than scattered across the MCP server.
-- **Indexer constructor with private fields** — `NewIndexer(IndexerConfig)` now wires all internal components (pipeline, path tracker, live queue, retry scheduler, state tracker) internally; callers supply only external dependencies.
-- **Retriever collapsed into Store** — The `Retriever` indirection layer was removed; hybrid search logic lives directly in `Store.Search` and `Store.FindSimilar`.
-- **Batch index operations** — Documents can be added and deleted in batches, reducing per-document overhead during initial sync.
-- **Score normalization** — Search scores are normalized before RRF fusion for more consistent ranking across result sets of different sizes.
-- **Embedding budget enforcement** — Chunks are trimmed to fit within the embedding model's token budget during ingest, preventing silent truncation at the API level.
-- **int8 quantization fix** — Corrected `dotProductEncoded` for int8-quantized vectors, fixing potential scoring errors on quantized embeddings.
+- **`CachingEmbedder` decorator** - LRU cache, single-flight deduplication, and circuit breaker for embedding requests are now encapsulated in a reusable `embed.CachingEmbedder` wrapper rather than scattered across the MCP server.
+- **Indexer constructor with private fields** - `NewIndexer(IndexerConfig)` now wires all internal components (pipeline, path tracker, live queue, retry scheduler, state tracker) internally; callers supply only external dependencies.
+- **Retriever collapsed into Store** - The `Retriever` indirection layer was removed; hybrid search logic lives directly in `Store.Search` and `Store.FindSimilar`.
+- **Batch index operations** - Documents can be added and deleted in batches, reducing per-document overhead during initial sync.
+- **Score normalization** - Search scores are normalized before RRF fusion for more consistent ranking across result sets of different sizes.
+- **Embedding budget enforcement** - Chunks are trimmed to fit within the embedding model's token budget during ingest, preventing silent truncation at the API level.
+- **int8 quantization fix** - Corrected `dotProductEncoded` for int8-quantized vectors, fixing potential scoring errors on quantized embeddings.
 
 ## v0.6.0 (2026-04-11)
 
