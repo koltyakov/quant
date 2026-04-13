@@ -1,7 +1,6 @@
 package lock
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,17 +8,14 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
 
 const (
-	lockFileName    = "quant.lock"
-	heartbeatPeriod = 2 * time.Second
-	staleThreshold  = 10 * time.Second
-	lockFileMode    = 0644
-	stateDirMode    = 0750
+	lockFileName = "quant.lock"
+	lockFileMode = 0644
+	stateDirMode = 0750
 )
 
 var (
@@ -28,11 +24,9 @@ var (
 )
 
 type LockInfo struct {
-	InstanceID    string    `json:"instance_id"`
-	PID           int       `json:"pid"`
-	ProxyAddr     string    `json:"proxy_addr"`
-	LastHeartbeat time.Time `json:"last_heartbeat"`
-	StartedAt     time.Time `json:"started_at"`
+	InstanceID string `json:"instance_id"`
+	PID        int    `json:"pid"`
+	ProxyAddr  string `json:"proxy_addr"`
 }
 
 type Lock struct {
@@ -41,11 +35,9 @@ type Lock struct {
 	instanceID string
 	info       LockInfo
 
-	mu     sync.Mutex
-	fd     int
-	held   bool
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu   sync.Mutex
+	fd   int
+	held bool
 }
 
 func LockPath(dir string) string {
@@ -74,11 +66,9 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	info := LockInfo{
-		InstanceID:    instanceID,
-		PID:           os.Getpid(),
-		ProxyAddr:     proxyAddr,
-		LastHeartbeat: time.Now().UTC(),
-		StartedAt:     time.Now().UTC(),
+		InstanceID: instanceID,
+		PID:        os.Getpid(),
+		ProxyAddr:  proxyAddr,
 	}
 
 	if err := writeLockInfo(fd, info); err != nil {
@@ -94,7 +84,6 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 		info:       info,
 		fd:         fd,
 		held:       true,
-		done:       make(chan struct{}),
 	}
 
 	logx.Info("acquired main lock", "instance", instanceID, "pid", os.Getpid(), "proxy", proxyAddr)
@@ -114,11 +103,9 @@ func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	info := LockInfo{
-		InstanceID:    instanceID,
-		PID:           os.Getpid(),
-		ProxyAddr:     proxyAddr,
-		LastHeartbeat: time.Now().UTC(),
-		StartedAt:     time.Now().UTC(),
+		InstanceID: instanceID,
+		PID:        os.Getpid(),
+		ProxyAddr:  proxyAddr,
 	}
 
 	if err := writeLockInfo(fd, info); err != nil {
@@ -134,7 +121,6 @@ func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
 		info:       info,
 		fd:         fd,
 		held:       true,
-		done:       make(chan struct{}),
 	}
 
 	logx.Info("stole stale lock", "instance", instanceID, "pid", os.Getpid(), "proxy", proxyAddr)
@@ -156,47 +142,7 @@ func CheckMainAlive(dir string) bool {
 	if err != nil {
 		return false
 	}
-	if isStale(info) {
-		return false
-	}
-	if info.PID > 0 {
-		proc, err := os.FindProcess(info.PID)
-		if err != nil {
-			return false
-		}
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-func (l *Lock) StartHeartbeat(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	l.cancel = cancel
-
-	go func() {
-		defer close(l.done)
-		ticker := time.NewTicker(heartbeatPeriod)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				l.mu.Lock()
-				if !l.held {
-					l.mu.Unlock()
-					return
-				}
-				l.info.LastHeartbeat = time.Now().UTC()
-				if err := writeLockInfo(l.fd, l.info); err != nil {
-					logx.Warn("heartbeat write failed", "err", err)
-				}
-				l.mu.Unlock()
-			}
-		}
-	}()
+	return isProcessAlive(info.PID)
 }
 
 func (l *Lock) UpdateProxyAddr(addr string) {
@@ -226,13 +172,6 @@ func (l *Lock) Release() error {
 	}
 	l.held = false
 
-	if l.cancel != nil {
-		l.cancel()
-	}
-	l.mu.Unlock()
-	<-l.done
-	l.mu.Lock()
-
 	_ = syscall.Flock(l.fd, syscall.LOCK_UN)
 	_ = syscall.Close(l.fd)
 	_ = os.Remove(l.lockPath)
@@ -248,20 +187,18 @@ func (l *Lock) ProxyAddr() string {
 }
 
 func isStale(info LockInfo) bool {
-	if time.Since(info.LastHeartbeat) > staleThreshold {
-		if info.PID > 0 {
-			proc, err := os.FindProcess(info.PID)
-			if err != nil {
-				return true
-			}
-			if err := proc.Signal(syscall.Signal(0)); err != nil {
-				return true
-			}
-		} else {
-			return true
-		}
+	return !isProcessAlive(info.PID)
+}
+
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
 	}
-	return false
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func readLockInfo(path string) (LockInfo, error) {

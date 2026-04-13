@@ -173,7 +173,6 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 
 	if lk != nil {
 		lk.UpdateProxyAddr(proxyAddr)
-		lk.StartHeartbeat(ctx)
 	}
 
 	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
@@ -271,10 +270,12 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	serverCtx, serverCancel := context.WithCancel(ctx)
 	defer serverCancel()
 
+	var promoted atomic.Bool
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchMainAndPromote(serverCtx, cfg, version, client, mainAddr, serverCancel)
+		watchMainAndPromote(serverCtx, cfg, version, client, mainAddr, serverCancel, &promoted)
 	}()
 
 	mcpServer := mcp.NewServer(cfg, client, workerEmbedder, version, nil)
@@ -282,15 +283,21 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
 		serverCancel()
 		wg.Wait()
+		if promoted.Load() {
+			return ErrRestartRequired
+		}
 		return err
 	}
 
 	serverCancel()
 	wg.Wait()
+	if promoted.Load() {
+		return ErrRestartRequired
+	}
 	return nil
 }
 
-func watchMainAndPromote(ctx context.Context, cfg *config.Config, version string, client *proxy.Client, mainAddr string, cancel context.CancelFunc) {
+func watchMainAndPromote(ctx context.Context, cfg *config.Config, version string, client *proxy.Client, mainAddr string, cancel context.CancelFunc, promoted *atomic.Bool) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -309,8 +316,9 @@ func watchMainAndPromote(ctx context.Context, cfg *config.Config, version string
 				lk, err := lock.TryAcquire(cfg.WatchDir, instanceID, "")
 				if err == nil {
 					logx.Info("worker promoted to main")
-					cancel()
 					_ = lk.Release()
+					promoted.Store(true)
+					cancel()
 					return
 				}
 			}
