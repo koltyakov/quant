@@ -562,7 +562,7 @@ func (p *pdfContentParser) readLiteralString() (string, error) {
 				if x > 255 {
 					return "", fmt.Errorf("invalid octal escape \\%03o", x)
 				}
-				out = append(out, byte(x))
+				out = append(out, byte(x&0xFF))
 			default:
 				return "", fmt.Errorf("invalid escape sequence \\%c", c)
 			}
