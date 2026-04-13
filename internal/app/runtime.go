@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,8 +13,10 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/lock"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
+	"github.com/koltyakov/quant/internal/proxy"
 	"github.com/koltyakov/quant/internal/scan"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -26,6 +29,10 @@ type AutoUpdateHooks struct {
 	StartLoop    func(ctx context.Context, currentVersion string, onUpdate func())
 }
 
+func generateInstanceID() string {
+	return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks) error {
 	configureProcessMemory()
 
@@ -33,6 +40,74 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		if hooks.CheckOnStart != nil && hooks.CheckOnStart(ctx, version) {
 			return ErrRestartRequired
 		}
+	}
+
+	if cfg.NoLock {
+		return runMain(ctx, cfg, version, hooks, nil)
+	}
+
+	instanceID := generateInstanceID()
+
+	if cfg.ProxyAddr != "" {
+		return runWorker(ctx, cfg, version, cfg.ProxyAddr)
+	}
+
+	lk, err := lock.TryAcquire(cfg.WatchDir, instanceID, "")
+	if err == nil {
+		return runMain(ctx, cfg, version, hooks, lk)
+	}
+	if !errors.Is(err, lock.ErrLockHeld) {
+		return fmt.Errorf("acquiring lock: %w", err)
+	}
+
+	info, readErr := lock.ReadLock(cfg.WatchDir)
+	if readErr != nil || info.ProxyAddr == "" {
+		logx.Warn("lock held but no proxy address found; waiting and retrying", "err", readErr)
+		return waitForLockAndRun(ctx, cfg, version, hooks, instanceID)
+	}
+
+	if !lock.CheckMainAlive(cfg.WatchDir) {
+		lk, err = lock.TryAcquire(cfg.WatchDir, instanceID, "")
+		if err == nil {
+			return runMain(ctx, cfg, version, hooks, lk)
+		}
+	}
+
+	logx.Info("another instance is main; starting as worker", "main_addr", info.ProxyAddr, "main_pid", info.PID)
+	return runWorker(ctx, cfg, version, info.ProxyAddr)
+}
+
+func waitForLockAndRun(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks, instanceID string) error {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if !lock.CheckMainAlive(cfg.WatchDir) {
+				lk, err := lock.TryAcquire(cfg.WatchDir, instanceID, "")
+				if err == nil {
+					return runMain(ctx, cfg, version, hooks, lk)
+				}
+			}
+			info, readErr := lock.ReadLock(cfg.WatchDir)
+			if readErr == nil && info.ProxyAddr != "" {
+				logx.Info("main instance discovered; starting as worker", "main_addr", info.ProxyAddr)
+				return runWorker(ctx, cfg, version, info.ProxyAddr)
+			}
+		}
+	}
+}
+
+func runMain(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks, lk *lock.Lock) error {
+	if lk != nil {
+		defer func() {
+			if err := lk.Release(); err != nil {
+				logx.Error("releasing lock failed", "err", err)
+			}
+		}()
 	}
 
 	rawEmbedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
@@ -47,8 +122,6 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 
 	logx.Info("connected to embedding backend", "provider", "ollama", "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
 
-	// Wrap the raw embedder with caching, flight dedup, and circuit breaker
-	// for query-time Embed() calls. EmbedBatch (used during indexing) passes through.
 	embedder := embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
 		CacheSize:           128,
 		CircuitFailureLimit: 5,
@@ -84,11 +157,6 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
 	}
 
-	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
-	if err != nil {
-		return fmt.Errorf("error loading gitignore: %w", err)
-	}
-
 	idx := NewIndexer(IndexerConfig{
 		Cfg:       cfg,
 		Store:     store,
@@ -96,6 +164,22 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		Embedder:  rawEmbedder,
 		Extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
 	})
+
+	proxyServer := proxy.NewServer(store, idx.IndexState)
+	proxyAddr, err := proxyServer.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("starting proxy server: %w", err)
+	}
+
+	if lk != nil {
+		lk.UpdateProxyAddr(proxyAddr)
+		lk.StartHeartbeat(ctx)
+	}
+
+	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
+	if err != nil {
+		return fmt.Errorf("error loading gitignore: %w", err)
+	}
 
 	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})
 	if err != nil {
@@ -134,7 +218,7 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
-	logx.Info("starting MCP server", "transport", cfg.Transport)
+	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)
 
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
 		serverCancel()
@@ -151,4 +235,90 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 		return ErrRestartRequired
 	}
 	return nil
+}
+
+func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr string) error {
+	client := proxy.NewClient(mainAddr)
+
+	if !client.Alive(ctx) {
+		logx.Warn("main process not reachable; attempting to become main", "addr", mainAddr)
+		instanceID := generateInstanceID()
+		if !lock.CheckMainAlive(cfg.WatchDir) {
+			lk, err := lock.TryAcquire(cfg.WatchDir, instanceID, "")
+			if err == nil {
+				return runMain(ctx, cfg, version, AutoUpdateHooks{}, lk)
+			}
+		}
+		return fmt.Errorf("main process unreachable at %s and cannot acquire lock", mainAddr)
+	}
+
+	var workerEmbedder embed.Embedder
+	rawEmbedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
+	if err != nil {
+		logx.Warn("worker cannot connect to embedding backend; search will be proxy-only", "err", err)
+	} else {
+		workerEmbedder = rawEmbedder
+		defer func() {
+			if err := rawEmbedder.Close(); err != nil {
+				logx.Error("closing worker embedder failed", "err", err)
+			}
+		}()
+	}
+
+	logx.Info("starting MCP server (worker)", "transport", cfg.Transport, "main_addr", mainAddr)
+
+	var wg sync.WaitGroup
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	defer serverCancel()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		watchMainAndPromote(serverCtx, cfg, version, client, mainAddr, serverCancel)
+	}()
+
+	mcpServer := mcp.NewServer(cfg, client, workerEmbedder, version, nil)
+
+	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
+		serverCancel()
+		wg.Wait()
+		return err
+	}
+
+	serverCancel()
+	wg.Wait()
+	return nil
+}
+
+func watchMainAndPromote(ctx context.Context, cfg *config.Config, version string, client *proxy.Client, mainAddr string, cancel context.CancelFunc) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if client.Alive(ctx) {
+				continue
+			}
+
+			logx.Warn("main process lost; attempting to become main")
+			if !lock.CheckMainAlive(cfg.WatchDir) {
+				instanceID := generateInstanceID()
+				lk, err := lock.TryAcquire(cfg.WatchDir, instanceID, "")
+				if err == nil {
+					logx.Info("worker promoted to main")
+					cancel()
+					_ = lk.Release()
+					return
+				}
+			}
+
+			info, readErr := lock.ReadLock(cfg.WatchDir)
+			if readErr == nil && info.ProxyAddr != "" && info.ProxyAddr != mainAddr {
+				logx.Info("new main detected; current worker should be restarted", "new_addr", info.ProxyAddr)
+			}
+		}
+	}
 }

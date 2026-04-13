@@ -46,6 +46,8 @@ type Config struct {
 	WatchEventBuffer    int           `yaml:"watch_event_buffer"`
 	IncludePatterns     []string      `yaml:"include"`
 	ExcludePatterns     []string      `yaml:"exclude"`
+	ProxyAddr           string        `yaml:"proxy_addr"`
+	NoLock              bool          `yaml:"no_lock"`
 	ConfigFile          string        `yaml:"-"`
 
 	// pathMatcher is lazily initialized from IncludePatterns/ExcludePatterns
@@ -229,6 +231,12 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.KeywordWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.KeywordWeight)
 		case "vector-weight":
 			cfg.VectorWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.VectorWeight)
+		case "proxy-addr":
+			cfg.ProxyAddr = f.Value.String()
+		case "no-lock":
+			if v, err := strconv.ParseBool(f.Value.String()); err == nil {
+				cfg.NoLock = v
+			}
 		}
 	})
 
@@ -285,6 +293,8 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.Float64Var(&cfg.KeywordWeight, "keyword-weight", cfg.KeywordWeight, "Keyword search weight multiplier (0=auto)")
 	flagSet.Float64Var(&cfg.VectorWeight, "vector-weight", cfg.VectorWeight, "Vector search weight multiplier (0=auto)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
+	flagSet.StringVar(&cfg.ProxyAddr, "proxy-addr", "", "Address of main process proxy (worker mode)")
+	flagSet.BoolVar(&cfg.NoLock, "no-lock", false, "Disable multi-instance locking (run standalone)")
 
 	return flagSet, cfg
 }
@@ -321,6 +331,8 @@ func loadYAML(cfg *Config, path string) error {
 		WatchEventBuffer    *int      `yaml:"watch_event_buffer"`
 		IncludePatterns     []string  `yaml:"include"`
 		ExcludePatterns     []string  `yaml:"exclude"`
+		ProxyAddr           string    `yaml:"proxy_addr"`
+		NoLock              *bool     `yaml:"no_lock"`
 	}
 
 	var parsed fileConfig
@@ -390,6 +402,12 @@ func loadYAML(cfg *Config, path string) error {
 	if len(parsed.ExcludePatterns) > 0 {
 		cfg.ExcludePatterns = parsed.ExcludePatterns
 	}
+	if parsed.ProxyAddr != "" {
+		cfg.ProxyAddr = parsed.ProxyAddr
+	}
+	if parsed.NoLock != nil {
+		cfg.NoLock = *parsed.NoLock
+	}
 
 	return nil
 }
@@ -452,6 +470,12 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_VECTOR_WEIGHT"); v != "" {
 		cfg.VectorWeight = mustParseFloatEnv("QUANT_VECTOR_WEIGHT", v, cfg.VectorWeight)
+	}
+	if v := os.Getenv("QUANT_PROXY_ADDR"); v != "" {
+		cfg.ProxyAddr = v
+	}
+	if v := os.Getenv("QUANT_NO_LOCK"); v != "" {
+		cfg.NoLock = v == "1" || strings.EqualFold(v, "true")
 	}
 }
 

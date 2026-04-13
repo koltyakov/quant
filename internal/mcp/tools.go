@@ -476,6 +476,9 @@ func listSourceRows(docs []index.Document) []listSourcesResultRow {
 }
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
+	if s.embedder == nil {
+		return nil, fmt.Errorf("embedding backend unavailable")
+	}
 	return s.embedder.Embed(ctx, text)
 }
 
