@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
@@ -36,7 +35,7 @@ type Lock struct {
 	info       LockInfo
 
 	mu   sync.Mutex
-	fd   int
+	lf   lockFile
 	held bool
 }
 
@@ -51,14 +50,14 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
 	}
 
-	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_RDWR, lockFileMode)
+	lf, err := openLockFile(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("opening lock file: %w", err)
+		return nil, err
 	}
 
-	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lf.tryLock(); err != nil {
 		existing, readErr := readLockInfo(lockPath)
-		_ = syscall.Close(fd)
+		_ = lf.close()
 		if readErr != nil || isStale(existing) {
 			return stealLock(lockPath, dir, instanceID, proxyAddr)
 		}
@@ -71,9 +70,9 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 		ProxyAddr:  proxyAddr,
 	}
 
-	if err := writeLockInfo(fd, info); err != nil {
-		_ = syscall.Flock(fd, syscall.LOCK_UN)
-		_ = syscall.Close(fd)
+	if err := lf.writeInfo(info); err != nil {
+		_ = lf.unlock()
+		_ = lf.close()
 		return nil, fmt.Errorf("writing lock file: %w", err)
 	}
 
@@ -82,7 +81,7 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 		lockPath:   lockPath,
 		instanceID: instanceID,
 		info:       info,
-		fd:         fd,
+		lf:         lf,
 		held:       true,
 	}
 
@@ -92,13 +91,13 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 
 func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
 	_ = os.Remove(lockPath)
-	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_RDWR, lockFileMode)
+	lf, err := openLockFile(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file for steal: %w", err)
 	}
 
-	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = syscall.Close(fd)
+	if err := lf.tryLock(); err != nil {
+		_ = lf.close()
 		return nil, ErrLockHeld
 	}
 
@@ -108,9 +107,9 @@ func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
 		ProxyAddr:  proxyAddr,
 	}
 
-	if err := writeLockInfo(fd, info); err != nil {
-		_ = syscall.Flock(fd, syscall.LOCK_UN)
-		_ = syscall.Close(fd)
+	if err := lf.writeInfo(info); err != nil {
+		_ = lf.unlock()
+		_ = lf.close()
 		return nil, fmt.Errorf("writing lock file: %w", err)
 	}
 
@@ -119,7 +118,7 @@ func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
 		lockPath:   lockPath,
 		instanceID: instanceID,
 		info:       info,
-		fd:         fd,
+		lf:         lf,
 		held:       true,
 	}
 
@@ -152,7 +151,7 @@ func (l *Lock) UpdateProxyAddr(addr string) {
 		return
 	}
 	l.info.ProxyAddr = addr
-	if err := writeLockInfo(l.fd, l.info); err != nil {
+	if err := l.lf.writeInfo(l.info); err != nil {
 		logx.Warn("updating proxy addr in lock failed", "err", err)
 	}
 	logx.Info("updated proxy address in lock", "addr", addr)
@@ -172,8 +171,8 @@ func (l *Lock) Release() error {
 	}
 	l.held = false
 
-	_ = syscall.Flock(l.fd, syscall.LOCK_UN)
-	_ = syscall.Close(l.fd)
+	_ = l.lf.unlock()
+	_ = l.lf.close()
 	_ = os.Remove(l.lockPath)
 
 	logx.Info("released main lock", "instance", l.instanceID)
@@ -190,17 +189,6 @@ func isStale(info LockInfo) bool {
 	return !isProcessAlive(info.PID)
 }
 
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
-}
-
 func readLockInfo(path string) (LockInfo, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // lock file path is constructed from known directory structure
 	if err != nil {
@@ -211,21 +199,4 @@ func readLockInfo(path string) (LockInfo, error) {
 		return LockInfo{}, ErrLockCorrupted
 	}
 	return info, nil
-}
-
-func writeLockInfo(fd int, info LockInfo) error {
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-	if _, err := syscall.Seek(fd, 0, 0); err != nil {
-		return err
-	}
-	if err := syscall.Ftruncate(fd, 0); err != nil {
-		return err
-	}
-	if _, err := syscall.Write(fd, data); err != nil {
-		return err
-	}
-	return nil
 }

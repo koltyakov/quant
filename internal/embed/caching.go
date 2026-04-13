@@ -98,7 +98,7 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		return nil, flight.err
 	}
 
-	//nolint:gosec // G118: intentional background goroutine — must complete embedding even if caller cancels.
+	//nolint:gosec // G118: intentional background goroutine - must complete embedding even if caller cancels.
 	go c.runFlight(cacheKey, text, flight)
 
 	return c.waitForFlight(ctx, flight)
