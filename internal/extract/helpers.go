@@ -11,7 +11,7 @@ import (
 	"os"
 )
 
-const maxExtractorFileSize int64 = 64 << 20
+const maxExtractorFileSize int64 = 100 << 20
 
 var ErrFileTooLarge = errors.New("extractor file exceeds size limit")
 

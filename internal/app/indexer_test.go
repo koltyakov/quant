@@ -14,8 +14,8 @@ func TestShouldRetryIndexError_DoesNotRetryOversizedExtractions(t *testing.T) {
 	if shouldRetryIndexError(err) {
 		t.Fatal("expected oversized extraction errors to skip retries")
 	}
-	if shouldQuarantineIndexError(err) {
-		t.Fatal("expected oversized extraction errors to remain in place")
+	if !shouldQuarantineIndexError(err) {
+		t.Fatal("expected oversized extraction errors to be quarantined")
 	}
 }
 

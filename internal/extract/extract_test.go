@@ -353,6 +353,75 @@ func TestPDFContentStreamEndsMidToken(t *testing.T) {
 	}
 }
 
+func TestInterpretPDFContent_HandlesGraphicsStateOperator(t *testing.T) {
+	content := []byte("/GS0 gs BT (Hello)Tj ET")
+
+	var text strings.Builder
+	var enc pdf.TextEncoding = rawPDFTextEncoding{}
+
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+		n := stk.Len()
+		args := make([]pdfContentValue, n)
+		for i := n - 1; i >= 0; i-- {
+			args[i] = stk.Pop()
+		}
+
+		switch op {
+		case "BT":
+			text.WriteString("\n")
+		case "Tj":
+			if len(args) == 1 {
+				text.WriteString(enc.Decode(args[0].RawString()))
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if got, want := text.String(), "\nHello"; got != want {
+		t.Fatalf("unexpected text: got %q want %q", got, want)
+	}
+}
+
+func TestInterpretPDFContent_HandlesNumericOperands(t *testing.T) {
+	content := []byte("1 0 0 1 50 50 cm BT (World)Tj ET")
+
+	var text strings.Builder
+	var enc pdf.TextEncoding = rawPDFTextEncoding{}
+	var cmArgs []pdfContentValue
+
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+		n := stk.Len()
+		args := make([]pdfContentValue, n)
+		for i := n - 1; i >= 0; i-- {
+			args[i] = stk.Pop()
+		}
+
+		switch op {
+		case "cm":
+			cmArgs = args
+		case "BT":
+			text.WriteString("\n")
+		case "Tj":
+			if len(args) == 1 {
+				text.WriteString(enc.Decode(args[0].RawString()))
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if got, want := text.String(), "\nWorld"; got != want {
+		t.Fatalf("unexpected text: got %q want %q", got, want)
+	}
+	if len(cmArgs) != 6 {
+		t.Fatalf("expected 6 cm operands, got %d", len(cmArgs))
+	}
+	if cmArgs[0].i != 1 {
+		t.Fatalf("expected first cm operand to be 1, got %v", cmArgs[0])
+	}
+}
+
 func TestRouter_SupportsOOXML(t *testing.T) {
 	r := NewRouter()
 	for _, path := range []string{

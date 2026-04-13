@@ -759,6 +759,8 @@ func shouldQuarantineIndexError(err error) bool {
 		return false
 	case errors.Is(err, ErrOCRFailed):
 		return true
+	case errors.Is(err, ErrFileTooLarge):
+		return true
 	case errors.Is(err, embed.ErrPermanent):
 		return true
 	default:

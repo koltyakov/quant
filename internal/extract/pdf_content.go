@@ -365,6 +365,8 @@ func interpretPDFContent(data []byte, do func(stk *pdfContentStack, op string)) 
 				do(&stk, string(kw))
 				continue
 			}
+		} else {
+			parser.unreadToken(tok)
 		}
 		obj, err := parser.readObject()
 		if err != nil {
