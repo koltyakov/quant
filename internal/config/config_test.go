@@ -106,10 +106,33 @@ func TestApplyEnv(t *testing.T) {
 	}
 }
 
-func TestDefaultIndexWorkers_IsConservative(t *testing.T) {
+func TestDefaultIndexWorkers_ScalesWithCPU(t *testing.T) {
 	got := defaultIndexWorkers()
-	if got < 1 || got > 2 {
-		t.Fatalf("expected default index workers in [1,2], got %d", got)
+	if got < 1 {
+		t.Fatalf("expected at least 1 index worker, got %d", got)
+	}
+	if got > 8 {
+		t.Fatalf("expected at most 8 index workers, got %d", got)
+	}
+}
+
+func TestDefaultMaxConcurrentTools(t *testing.T) {
+	got := defaultMaxConcurrentTools()
+	if got < 1 {
+		t.Fatalf("expected at least 1, got %d", got)
+	}
+	if got > 8 {
+		t.Fatalf("expected at most 8, got %d", got)
+	}
+}
+
+func TestDefaultMemoryLimit(t *testing.T) {
+	got := DefaultMemoryLimit()
+	if got < 0 {
+		t.Fatalf("expected non-negative limit, got %d", got)
+	}
+	if got > 4<<30 {
+		t.Fatalf("expected at most 4 GiB, got %d", got)
 	}
 }
 

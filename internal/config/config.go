@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -64,7 +65,7 @@ func Default() *Config {
 		ChunkOverlap:        0.15,
 		IndexWorkers:        defaultIndexWorkers(),
 		MaxVectorCandidates: 20000,
-		MaxConcurrentTools:  4,
+		MaxConcurrentTools:  defaultMaxConcurrentTools(),
 		KeywordWeight:       0,
 		VectorWeight:        0,
 		WatchEventBuffer:    256,
@@ -455,16 +456,56 @@ func applyEnv(cfg *Config) {
 }
 
 func defaultIndexWorkers() int {
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
+	cpus := runtime.GOMAXPROCS(0)
+	if cpus <= 1 {
 		return 1
 	}
-	// PDF extraction and chunk embedding are memory-heavy; keep the default
-	// conservative to avoid large parallel working sets on desktop machines.
-	if workers > 2 {
+	if cpus <= 4 {
 		return 2
 	}
+	workers := cpus / 2
+	if workers > 8 {
+		workers = 8
+	}
 	return workers
+}
+
+func defaultMaxConcurrentTools() int {
+	cpus := runtime.GOMAXPROCS(0)
+	if cpus <= 2 {
+		return 2
+	}
+	tools := cpus / 2
+	if tools > 8 {
+		tools = 8
+	}
+	return tools
+}
+
+// DefaultMemoryLimit returns a suggested Go runtime memory soft limit
+// based on the total physical memory of the system. Returns 0 if the
+// system memory cannot be determined.
+func DefaultMemoryLimit() int64 {
+	const (
+		minLimit int64 = 512 << 20
+		maxLimit int64 = 4 << 30
+		fraction       = 4
+	)
+	total := totalMemory()
+	if total == 0 {
+		return 0
+	}
+	if total > math.MaxInt64 {
+		total = math.MaxInt64
+	}
+	limit := int64(total) / fraction
+	if limit < minLimit {
+		limit = minLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	return limit
 }
 
 func mustParseIntFlag(name, value string, fallback int) int {

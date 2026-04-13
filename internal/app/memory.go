@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/logx"
 )
 
@@ -18,10 +19,15 @@ func configureProcessMemory() {
 		return
 	}
 
-	previous := debug.SetMemoryLimit(defaultGoMemoryLimitBytes)
+	limit := config.DefaultMemoryLimit()
+	if limit <= 0 {
+		limit = defaultGoMemoryLimitBytes
+	}
+
+	previous := debug.SetMemoryLimit(limit)
 	logx.Info(
-		"configured default Go memory limit",
-		"limit", formatMemoryLimit(defaultGoMemoryLimitBytes),
+		"configured Go memory limit",
+		"limit", formatMemoryLimit(limit),
 		"previous", formatMemoryLimit(previous),
 	)
 }
