@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ledongthuc/pdf"
 )
 
 func writeTempFile(t *testing.T, name string, data []byte) string {
@@ -294,6 +296,60 @@ func TestPDFExtractor_ExtractStillUsesOCRForImageOnlyPDF(t *testing.T) {
 	}
 	if text != "[Page 1]\nscanned text" {
 		t.Fatalf("unexpected OCR text: %q", text)
+	}
+}
+
+func TestInterpretPDFContent_JoinsSplitTJArrayAcrossStreams(t *testing.T) {
+	content := []byte("BT [ (Hello)" + "( world)]TJ ET")
+
+	var text strings.Builder
+	var enc pdf.TextEncoding = rawPDFTextEncoding{}
+
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+		n := stk.Len()
+		args := make([]pdfContentValue, n)
+		for i := n - 1; i >= 0; i-- {
+			args[i] = stk.Pop()
+		}
+
+		switch op {
+		case "BT":
+			text.WriteString("\n")
+		case "TJ":
+			for i := 0; i < args[0].Len(); i++ {
+				part := args[0].Index(i)
+				if part.Kind() == pdfContentStringKind {
+					text.WriteString(enc.Decode(part.RawString()))
+				}
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if got, want := text.String(), "\nHello world"; got != want {
+		t.Fatalf("unexpected extracted text: got %q want %q", got, want)
+	}
+}
+
+func TestInterpretPDFContent_RejectsUnterminatedArray(t *testing.T) {
+	content := []byte("[ (Hello)")
+
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {})
+	if err == nil {
+		t.Fatal("expected unterminated array to fail")
+	}
+	if !strings.Contains(err.Error(), "unterminated pdf content array") {
+		t.Fatalf("expected unterminated array error, got %v", err)
+	}
+}
+
+func TestPDFContentStreamEndsMidToken(t *testing.T) {
+	if !pdfContentStreamEndsMidToken([]byte("0 Tw [  ")) {
+		t.Fatal("expected open array at stream boundary to require safe parser")
+	}
+	if pdfContentStreamEndsMidToken([]byte("/GS0 gs\n")) {
+		t.Fatal("expected complete operator sequence to stay on library parser path")
 	}
 }
 
