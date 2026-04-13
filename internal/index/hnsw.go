@@ -1,10 +1,13 @@
 package index
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -12,24 +15,25 @@ import (
 	"github.com/koltyakov/quant/internal/logx"
 )
 
-const (
-	hnswM        = 16  // max neighbors per node
-	hnswEfSearch = 100 // ef during search (>95% recall typical)
-)
-
-// hnswIndex manages an in-memory HNSW approximate nearest-neighbor graph.
-// It is rebuilt from SQLite on startup and updated incrementally on chunk add/delete.
 type hnswIndex struct {
 	mu    sync.RWMutex
 	graph *hnsw.Graph[int]
 	ready atomic.Bool
+	mods  atomic.Int64
 }
 
 func newHNSWIndex() *hnswIndex {
 	return &hnswIndex{}
 }
 
-// Add inserts or replaces a chunk vector in the graph.
+func (h *hnswIndex) modCount() int64 {
+	return h.mods.Load()
+}
+
+func (h *hnswIndex) resetMods() {
+	h.mods.Store(0)
+}
+
 func (h *hnswIndex) Add(id int, vec []float32) {
 	if !h.ready.Load() {
 		return
@@ -37,6 +41,7 @@ func (h *hnswIndex) Add(id int, vec []float32) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.graph.Add(hnsw.MakeNode(id, vec))
+	h.mods.Add(1)
 }
 
 func (h *hnswIndex) Delete(id int) {
@@ -46,6 +51,7 @@ func (h *hnswIndex) Delete(id int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.graph.Delete(id)
+	h.mods.Add(1)
 }
 
 func (h *hnswIndex) BatchDelete(ids []int) {
@@ -57,6 +63,7 @@ func (h *hnswIndex) BatchDelete(ids []int) {
 	for _, id := range ids {
 		h.graph.Delete(id)
 	}
+	h.mods.Add(int64(len(ids)))
 }
 
 func (h *hnswIndex) BatchAdd(nodes []hnsw.Node[int]) {
@@ -68,10 +75,9 @@ func (h *hnswIndex) BatchAdd(nodes []hnsw.Node[int]) {
 	for _, node := range nodes {
 		h.graph.Add(node)
 	}
+	h.mods.Add(int64(len(nodes)))
 }
 
-// Search performs an approximate k-nearest-neighbor query.
-// Returns chunk IDs. Returns nil if the graph is not ready.
 func (h *hnswIndex) Search(query []float32, k int) []int {
 	if !h.ready.Load() {
 		return nil
@@ -86,7 +92,6 @@ func (h *hnswIndex) Search(query []float32, k int) []int {
 	return ids
 }
 
-// Len returns the number of nodes in the graph.
 func (h *hnswIndex) Len() int {
 	if !h.ready.Load() {
 		return 0
@@ -96,8 +101,14 @@ func (h *hnswIndex) Len() int {
 	return h.graph.Len()
 }
 
-// BuildHNSW loads all embeddings from the database and builds the in-memory HNSW graph.
-// Call this after the initial index sync completes.
+func newGraph(m, efSearch int) *hnsw.Graph[int] {
+	g := hnsw.NewGraph[int]()
+	g.M = m
+	g.EfSearch = efSearch
+	g.Distance = hnsw.CosineDistance
+	return g
+}
+
 func (s *Store) BuildHNSW(ctx context.Context) error {
 	if s.hnsw == nil {
 		return nil
@@ -118,10 +129,7 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	}
 	defer func() { _ = rows.Close() }()
 
-	g := hnsw.NewGraph[int]()
-	g.M = hnswM
-	g.EfSearch = hnswEfSearch
-	g.Distance = hnsw.CosineDistance
+	g := newGraph(s.hnswM, s.hnswEfSearch)
 
 	count := 0
 	for rows.Next() {
@@ -145,10 +153,19 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
 	s.hnsw.ready.Store(true)
-	logx.Info("hnsw graph built", "chunks", count)
+	s.hnsw.resetMods()
+	logx.Info("hnsw graph built", "chunks", count, "M", s.hnswM, "EfSearch", s.hnswEfSearch)
 
 	if err := s.saveHNSWState(ctx, count); err != nil {
 		logx.Warn("failed to persist hnsw metadata snapshot", "err", err)
+	}
+
+	if err := s.saveHNSWGraphToFile(); err != nil {
+		logx.Warn("failed to persist hnsw graph file", "err", err)
+	}
+
+	if err := s.LoadDocEmbeddings(ctx); err != nil {
+		logx.Warn("failed to load document embeddings", "err", err)
 	}
 
 	return nil
@@ -168,10 +185,61 @@ func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
 	return err
 }
 
-// LoadHNSWFromState reconstructs the in-memory graph from stored chunk
-// embeddings after validating the recorded metadata snapshot.
-// It does not deserialize a persisted HNSW graph structure.
 func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
+	loaded := s.loadHNSWGraphFromFile()
+	if !loaded {
+		loaded = s.loadHNSWFromSQLite(ctx)
+	}
+
+	if loaded {
+		if err := s.LoadDocEmbeddings(ctx); err != nil {
+			logx.Warn("failed to load document embeddings", "err", err)
+		}
+	}
+	return loaded
+}
+
+func (s *Store) loadHNSWGraphFromFile() bool {
+	if s.hnswGraphPath == "" {
+		return false
+	}
+
+	if _, err := os.Stat(s.hnswGraphPath); err != nil {
+		legacyPath := s.dbPath + ".hnswgraph"
+		if info, err := os.Stat(legacyPath); err == nil && info.Size() > 0 {
+			if err := os.Rename(legacyPath, s.hnswGraphPath); err != nil {
+				logx.Warn("failed to migrate hnsw graph file", "from", legacyPath, "to", s.hnswGraphPath, "err", err)
+			}
+		}
+	}
+
+	info, err := os.Stat(s.hnswGraphPath)
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+
+	f, err := os.Open(s.hnswGraphPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	g := newGraph(s.hnswM, s.hnswEfSearch)
+	if err := g.Import(bufio.NewReader(f)); err != nil {
+		logx.Warn("failed to import hnsw graph file", "path", s.hnswGraphPath, "err", err)
+		return false
+	}
+
+	s.hnsw.mu.Lock()
+	s.hnsw.graph = g
+	s.hnsw.mu.Unlock()
+	s.hnsw.ready.Store(true)
+	s.hnsw.resetMods()
+	logx.Info("hnsw graph loaded from file", "path", s.hnswGraphPath, "nodes", g.Len())
+	return true
+}
+
+func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 	var nodeCount int
 	var storedModel string
 	var storedDims int
@@ -211,10 +279,7 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	}
 	defer func() { _ = rows.Close() }()
 
-	g := hnsw.NewGraph[int]()
-	g.M = hnswM
-	g.EfSearch = hnswEfSearch
-	g.Distance = hnsw.CosineDistance
+	g := newGraph(s.hnswM, s.hnswEfSearch)
 
 	loaded := 0
 	for rows.Next() {
@@ -238,16 +303,103 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
 	s.hnsw.ready.Store(true)
+	s.hnsw.resetMods()
 	logx.Info("hnsw graph reconstructed from chunk embeddings using metadata snapshot", "chunks", loaded)
+
+	if err := s.saveHNSWGraphToFile(); err != nil {
+		logx.Warn("failed to save hnsw graph after reconstruction", "err", err)
+	}
+
 	return true
 }
 
-// HNSWReady reports whether the HNSW graph is built and ready for queries.
+const hnswGraphFileMagic uint32 = 0x514E5347 // "QNSG"
+const hnswGraphFileVersion uint32 = 1
+
+func (s *Store) saveHNSWGraphToFile() error {
+	if s.hnswGraphPath == "" {
+		return nil
+	}
+	s.hnsw.mu.RLock()
+	g := s.hnsw.graph
+	ready := s.hnsw.ready.Load()
+	s.hnsw.mu.RUnlock()
+
+	if !ready || g == nil {
+		return nil
+	}
+
+	f, err := os.CreateTemp(filepath.Dir(s.hnswGraphPath), ".quant-hnsw-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file for hnsw graph: %w", err)
+	}
+	tmpPath := f.Name()
+
+	w := bufio.NewWriter(f)
+	if err := binary.Write(w, binary.LittleEndian, hnswGraphFileMagic); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := binary.Write(w, binary.LittleEndian, hnswGraphFileVersion); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := g.Export(w); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("exporting hnsw graph: %w", err)
+	}
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, s.hnswGraphPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) loadHNSWGraphWithMagic() (*hnsw.Graph[int], error) {
+	f, err := os.Open(s.hnswGraphPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	r := bufio.NewReader(f)
+	var magic, version uint32
+	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
+		return nil, err
+	}
+	if magic != hnswGraphFileMagic {
+		return nil, fmt.Errorf("invalid hnsw graph file magic: %x", magic)
+	}
+	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
+		return nil, err
+	}
+	if version != hnswGraphFileVersion {
+		return nil, fmt.Errorf("unsupported hnsw graph file version: %d", version)
+	}
+
+	g := newGraph(s.hnswM, s.hnswEfSearch)
+	if err := g.Import(r); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
 func (s *Store) HNSWReady() bool {
 	return s.hnsw != nil && s.hnsw.ready.Load()
 }
 
-// HNSWLen returns the number of nodes in the HNSW graph, or 0 if not ready.
 func (s *Store) HNSWLen() int {
 	if s.hnsw == nil {
 		return 0
@@ -255,8 +407,6 @@ func (s *Store) HNSWLen() int {
 	return s.hnsw.Len()
 }
 
-// decodeEmbeddingForHNSW converts a stored embedding blob to []float32 for use in HNSW.
-// Supports both float32 (dims*4 bytes) and int8 quantized (8+dims bytes) formats.
 func decodeEmbeddingForHNSW(data []byte, dims int) []float32 {
 	switch len(data) {
 	case dims * 4:

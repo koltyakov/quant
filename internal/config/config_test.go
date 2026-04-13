@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -81,8 +82,6 @@ func TestApplyEnv(t *testing.T) {
 	t.Setenv("QUANT_PDF_OCR_LANG", "rus+eng")
 	t.Setenv("QUANT_CHUNK_SIZE", "256")
 	t.Setenv("QUANT_INDEX_WORKERS", "6")
-	t.Setenv("QUANT_MAX_VECTOR_CANDIDATES", "321")
-	t.Setenv("QUANT_WATCH_EVENT_BUFFER", "123")
 
 	applyEnv(cfg)
 
@@ -97,12 +96,6 @@ func TestApplyEnv(t *testing.T) {
 	}
 	if cfg.IndexWorkers != 6 {
 		t.Errorf("expected index workers 6, got %d", cfg.IndexWorkers)
-	}
-	if cfg.MaxVectorCandidates != 321 {
-		t.Errorf("expected max vector candidates 321, got %d", cfg.MaxVectorCandidates)
-	}
-	if cfg.WatchEventBuffer != 123 {
-		t.Errorf("expected watch event buffer 123, got %d", cfg.WatchEventBuffer)
 	}
 }
 
@@ -139,7 +132,7 @@ func TestDefaultMemoryLimit(t *testing.T) {
 func TestLoadYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
-	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\npdf_ocr_lang: rus+eng\nchunk_size: 1024\nindex_workers: 5\nmax_vector_candidates: 123\nwatch_event_buffer: 321\n"), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("embed_model: all-minilm\npdf_ocr_lang: rus+eng\nchunk_size: 1024\nindex_workers: 5\n"), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
 
@@ -159,12 +152,6 @@ func TestLoadYAML(t *testing.T) {
 	}
 	if cfg.IndexWorkers != 5 {
 		t.Errorf("expected index workers 5, got %d", cfg.IndexWorkers)
-	}
-	if cfg.MaxVectorCandidates != 123 {
-		t.Errorf("expected max vector candidates 123, got %d", cfg.MaxVectorCandidates)
-	}
-	if cfg.WatchEventBuffer != 321 {
-		t.Errorf("expected watch event buffer 321, got %d", cfg.WatchEventBuffer)
 	}
 }
 
@@ -245,33 +232,25 @@ func TestParseArgs_RejectsUnexpectedPositionalArgs(t *testing.T) {
 
 func TestParseArgs_AcceptsPDFOCRTimeoutFlag(t *testing.T) {
 	dir := t.TempDir()
-	cfg, err := ParseArgs([]string{"--dir", dir, "--pdf-ocr-timeout", "45s"})
+	cfg, err := ParseArgs([]string{"--dir", dir})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-	if cfg.PDFOCRTimeout.Seconds() != 45 {
-		t.Fatalf("expected OCR timeout 45s, got %s", cfg.PDFOCRTimeout)
+	if cfg.PDFOCRTimeout != 2*time.Minute {
+		t.Fatalf("expected OCR timeout 2m (internal default), got %s", cfg.PDFOCRTimeout)
 	}
 }
 
-func TestParseArgs_AcceptsMaxVectorCandidatesFlag(t *testing.T) {
+func TestParseArgs_InternalDefaults(t *testing.T) {
 	dir := t.TempDir()
-	cfg, err := ParseArgs([]string{"--dir", dir, "--max-vector-candidates", "77"})
+	cfg, err := ParseArgs([]string{"--dir", dir})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-	if cfg.MaxVectorCandidates != 77 {
-		t.Fatalf("expected max vector candidates 77, got %d", cfg.MaxVectorCandidates)
+	if cfg.MaxVectorCandidates != 20000 {
+		t.Fatalf("expected max vector candidates 20000, got %d", cfg.MaxVectorCandidates)
 	}
-}
-
-func TestParseArgs_AcceptsWatchEventBufferFlag(t *testing.T) {
-	dir := t.TempDir()
-	cfg, err := ParseArgs([]string{"--dir", dir, "--watch-event-buffer", "512"})
-	if err != nil {
-		t.Fatalf("unexpected parse error: %v", err)
-	}
-	if cfg.WatchEventBuffer != 512 {
-		t.Fatalf("expected watch event buffer 512, got %d", cfg.WatchEventBuffer)
+	if cfg.WatchEventBuffer != 256 {
+		t.Fatalf("expected watch event buffer 256, got %d", cfg.WatchEventBuffer)
 	}
 }

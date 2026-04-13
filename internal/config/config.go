@@ -27,50 +27,57 @@ const (
 )
 
 type Config struct {
-	WatchDir            string        `yaml:"dir"`
-	DBPath              string        `yaml:"db"`
-	Transport           Transport     `yaml:"transport"`
-	ListenAddr          string        `yaml:"listen"`
-	EmbedURL            string        `yaml:"embed_url"`
-	EmbedModel          string        `yaml:"embed_model"`
-	EmbedBatchSize      int           `yaml:"embed_batch_size"`
-	PDFOCRLang          string        `yaml:"pdf_ocr_lang"`
-	PDFOCRTimeout       time.Duration `yaml:"pdf_ocr_timeout"`
-	ChunkSize           int           `yaml:"chunk_size"`
-	ChunkOverlap        float64       `yaml:"chunk_overlap"`
-	IndexWorkers        int           `yaml:"index_workers"`
-	MaxVectorCandidates int           `yaml:"max_vector_candidates"`
-	MaxConcurrentTools  int           `yaml:"max_concurrent_tools"`
-	KeywordWeight       float64       `yaml:"keyword_weight"`
-	VectorWeight        float64       `yaml:"vector_weight"`
-	WatchEventBuffer    int           `yaml:"watch_event_buffer"`
-	IncludePatterns     []string      `yaml:"include"`
-	ExcludePatterns     []string      `yaml:"exclude"`
-	ProxyAddr           string        `yaml:"proxy_addr"`
-	NoLock              bool          `yaml:"no_lock"`
-	ConfigFile          string        `yaml:"-"`
+	WatchDir        string    `yaml:"dir"`
+	DBPath          string    `yaml:"db"`
+	Transport       Transport `yaml:"transport"`
+	ListenAddr      string    `yaml:"listen"`
+	EmbedURL        string    `yaml:"embed_url"`
+	EmbedModel      string    `yaml:"embed_model"`
+	EmbedBatchSize  int       `yaml:"embed_batch_size"`
+	PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
+	ChunkSize       int       `yaml:"chunk_size"`
+	ChunkOverlap    float64   `yaml:"chunk_overlap"`
+	IndexWorkers    int       `yaml:"index_workers"`
+	IncludePatterns []string  `yaml:"include"`
+	ExcludePatterns []string  `yaml:"exclude"`
+	ConfigFile      string    `yaml:"-"`
 
-	// pathMatcher is lazily initialized from IncludePatterns/ExcludePatterns
+	PDFOCRTimeout           time.Duration `yaml:"-"`
+	MaxVectorCandidates     int           `yaml:"-"`
+	MaxConcurrentTools      int           `yaml:"-"`
+	KeywordWeight           float64       `yaml:"-"`
+	VectorWeight            float64       `yaml:"-"`
+	WatchEventBuffer        int           `yaml:"-"`
+	HNSWM                   int           `yaml:"-"`
+	HNSWEfSearch            int           `yaml:"-"`
+	HNSWReoptimizeThreshold float64       `yaml:"-"`
+	ProxyAddr               string        `yaml:"-"`
+	NoLock                  bool          `yaml:"-"`
+
 	pathMatcher *PathMatcher
 }
 
 func Default() *Config {
 	return &Config{
-		Transport:           TransportStdio,
-		ListenAddr:          ":8080",
-		EmbedURL:            "http://localhost:11434",
-		EmbedModel:          "nomic-embed-text",
-		EmbedBatchSize:      16,
-		PDFOCRLang:          "eng",
-		PDFOCRTimeout:       2 * time.Minute,
-		ChunkSize:           512,
-		ChunkOverlap:        0.15,
-		IndexWorkers:        defaultIndexWorkers(),
-		MaxVectorCandidates: 20000,
-		MaxConcurrentTools:  defaultMaxConcurrentTools(),
-		KeywordWeight:       0,
-		VectorWeight:        0,
-		WatchEventBuffer:    256,
+		Transport:      TransportStdio,
+		ListenAddr:     ":8080",
+		EmbedURL:       "http://localhost:11434",
+		EmbedModel:     "nomic-embed-text",
+		EmbedBatchSize: 16,
+		PDFOCRLang:     "eng",
+		PDFOCRTimeout:  2 * time.Minute,
+		ChunkSize:      512,
+		ChunkOverlap:   0.15,
+		IndexWorkers:   defaultIndexWorkers(),
+
+		MaxVectorCandidates:     defaultMaxVectorCandidates(),
+		MaxConcurrentTools:      defaultMaxConcurrentTools(),
+		KeywordWeight:           0,
+		VectorWeight:            0,
+		WatchEventBuffer:        256,
+		HNSWM:                   defaultHNSWM(),
+		HNSWEfSearch:            defaultHNSWEfSearch(),
+		HNSWReoptimizeThreshold: 0.2,
 	}
 }
 
@@ -103,23 +110,8 @@ func (c *Config) Validate() error {
 	if c.IndexWorkers < 1 || c.IndexWorkers > 64 {
 		return fmt.Errorf("index_workers must be between 1 and 64")
 	}
-	if c.MaxVectorCandidates < 0 {
-		return fmt.Errorf("max_vector_candidates must be >= 0")
-	}
-	if c.WatchEventBuffer < 1 || c.WatchEventBuffer > 4096 {
-		return fmt.Errorf("watch_event_buffer must be between 1 and 4096")
-	}
 	if c.EmbedBatchSize < 1 || c.EmbedBatchSize > 128 {
 		return fmt.Errorf("embed_batch_size must be between 1 and 128")
-	}
-	if c.MaxConcurrentTools < 1 || c.MaxConcurrentTools > 32 {
-		return fmt.Errorf("max_concurrent_tools must be between 1 and 32")
-	}
-	if c.KeywordWeight < 0 || c.KeywordWeight > 10 {
-		return fmt.Errorf("keyword_weight must be between 0 and 10")
-	}
-	if c.VectorWeight < 0 || c.VectorWeight > 10 {
-		return fmt.Errorf("vector_weight must be between 0 and 10")
 	}
 	return nil
 }
@@ -211,32 +203,14 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.EmbedModel = f.Value.String()
 		case "pdf-ocr-lang":
 			cfg.PDFOCRLang = f.Value.String()
-		case "pdf-ocr-timeout":
-			cfg.PDFOCRTimeout = mustParseDurationFlag(f.Name, f.Value.String(), cfg.PDFOCRTimeout)
 		case "chunk-size":
 			cfg.ChunkSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.ChunkSize)
 		case "chunk-overlap":
 			cfg.ChunkOverlap = mustParseFloatFlag(f.Name, f.Value.String(), cfg.ChunkOverlap)
 		case "index-workers":
 			cfg.IndexWorkers = mustParseIntFlag(f.Name, f.Value.String(), cfg.IndexWorkers)
-		case "max-vector-candidates":
-			cfg.MaxVectorCandidates = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxVectorCandidates)
-		case "watch-event-buffer":
-			cfg.WatchEventBuffer = mustParseIntFlag(f.Name, f.Value.String(), cfg.WatchEventBuffer)
 		case "embed-batch-size":
 			cfg.EmbedBatchSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.EmbedBatchSize)
-		case "max-concurrent-tools":
-			cfg.MaxConcurrentTools = mustParseIntFlag(f.Name, f.Value.String(), cfg.MaxConcurrentTools)
-		case "keyword-weight":
-			cfg.KeywordWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.KeywordWeight)
-		case "vector-weight":
-			cfg.VectorWeight = mustParseFloatFlag(f.Name, f.Value.String(), cfg.VectorWeight)
-		case "proxy-addr":
-			cfg.ProxyAddr = f.Value.String()
-		case "no-lock":
-			if v, err := strconv.ParseBool(f.Value.String()); err == nil {
-				cfg.NoLock = v
-			}
 		}
 	})
 
@@ -282,19 +256,11 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
-	flagSet.DurationVar(&cfg.PDFOCRTimeout, "pdf-ocr-timeout", cfg.PDFOCRTimeout, "Timeout for scanned PDF OCR fallback")
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
-	flagSet.IntVar(&cfg.MaxVectorCandidates, "max-vector-candidates", cfg.MaxVectorCandidates, "Maximum chunks eligible for brute-force vector fallback (0 disables it)")
-	flagSet.IntVar(&cfg.WatchEventBuffer, "watch-event-buffer", cfg.WatchEventBuffer, "Watcher event channel buffer size")
 	flagSet.IntVar(&cfg.EmbedBatchSize, "embed-batch-size", cfg.EmbedBatchSize, "Number of chunks to embed per batch")
-	flagSet.IntVar(&cfg.MaxConcurrentTools, "max-concurrent-tools", cfg.MaxConcurrentTools, "Maximum concurrent MCP tool calls")
-	flagSet.Float64Var(&cfg.KeywordWeight, "keyword-weight", cfg.KeywordWeight, "Keyword search weight multiplier (0=auto)")
-	flagSet.Float64Var(&cfg.VectorWeight, "vector-weight", cfg.VectorWeight, "Vector search weight multiplier (0=auto)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
-	flagSet.StringVar(&cfg.ProxyAddr, "proxy-addr", "", "Address of main process proxy (worker mode)")
-	flagSet.BoolVar(&cfg.NoLock, "no-lock", false, "Disable multi-instance locking (run standalone)")
 
 	return flagSet, cfg
 }
@@ -312,27 +278,19 @@ func loadYAML(cfg *Config, path string) error {
 	baseDir := filepath.Dir(path)
 
 	type fileConfig struct {
-		WatchDir            string    `yaml:"dir"`
-		DBPath              string    `yaml:"db"`
-		Transport           Transport `yaml:"transport"`
-		ListenAddr          string    `yaml:"listen"`
-		EmbedURL            string    `yaml:"embed_url"`
-		EmbedModel          string    `yaml:"embed_model"`
-		EmbedBatchSize      *int      `yaml:"embed_batch_size"`
-		PDFOCRLang          string    `yaml:"pdf_ocr_lang"`
-		PDFOCRTimeout       *string   `yaml:"pdf_ocr_timeout"`
-		ChunkSize           *int      `yaml:"chunk_size"`
-		ChunkOverlap        *float64  `yaml:"chunk_overlap"`
-		IndexWorkers        *int      `yaml:"index_workers"`
-		MaxVectorCandidates *int      `yaml:"max_vector_candidates"`
-		MaxConcurrentTools  *int      `yaml:"max_concurrent_tools"`
-		KeywordWeight       *float64  `yaml:"keyword_weight"`
-		VectorWeight        *float64  `yaml:"vector_weight"`
-		WatchEventBuffer    *int      `yaml:"watch_event_buffer"`
-		IncludePatterns     []string  `yaml:"include"`
-		ExcludePatterns     []string  `yaml:"exclude"`
-		ProxyAddr           string    `yaml:"proxy_addr"`
-		NoLock              *bool     `yaml:"no_lock"`
+		WatchDir        string    `yaml:"dir"`
+		DBPath          string    `yaml:"db"`
+		Transport       Transport `yaml:"transport"`
+		ListenAddr      string    `yaml:"listen"`
+		EmbedURL        string    `yaml:"embed_url"`
+		EmbedModel      string    `yaml:"embed_model"`
+		EmbedBatchSize  *int      `yaml:"embed_batch_size"`
+		PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
+		ChunkSize       *int      `yaml:"chunk_size"`
+		ChunkOverlap    *float64  `yaml:"chunk_overlap"`
+		IndexWorkers    *int      `yaml:"index_workers"`
+		IncludePatterns []string  `yaml:"include"`
+		ExcludePatterns []string  `yaml:"exclude"`
 	}
 
 	var parsed fileConfig
@@ -361,14 +319,6 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.PDFOCRLang != "" {
 		cfg.PDFOCRLang = parsed.PDFOCRLang
 	}
-	if parsed.PDFOCRTimeout != nil {
-		d, err := time.ParseDuration(*parsed.PDFOCRTimeout)
-		if err != nil {
-			logx.Warn("ignoring invalid pdf_ocr_timeout value", "value", *parsed.PDFOCRTimeout, "err", err)
-		} else {
-			cfg.PDFOCRTimeout = d
-		}
-	}
 	if parsed.ChunkSize != nil {
 		cfg.ChunkSize = *parsed.ChunkSize
 	}
@@ -378,35 +328,14 @@ func loadYAML(cfg *Config, path string) error {
 	if parsed.IndexWorkers != nil {
 		cfg.IndexWorkers = *parsed.IndexWorkers
 	}
-	if parsed.MaxVectorCandidates != nil {
-		cfg.MaxVectorCandidates = *parsed.MaxVectorCandidates
-	}
-	if parsed.WatchEventBuffer != nil {
-		cfg.WatchEventBuffer = *parsed.WatchEventBuffer
-	}
 	if parsed.EmbedBatchSize != nil {
 		cfg.EmbedBatchSize = *parsed.EmbedBatchSize
-	}
-	if parsed.MaxConcurrentTools != nil {
-		cfg.MaxConcurrentTools = *parsed.MaxConcurrentTools
-	}
-	if parsed.KeywordWeight != nil {
-		cfg.KeywordWeight = *parsed.KeywordWeight
-	}
-	if parsed.VectorWeight != nil {
-		cfg.VectorWeight = *parsed.VectorWeight
 	}
 	if len(parsed.IncludePatterns) > 0 {
 		cfg.IncludePatterns = parsed.IncludePatterns
 	}
 	if len(parsed.ExcludePatterns) > 0 {
 		cfg.ExcludePatterns = parsed.ExcludePatterns
-	}
-	if parsed.ProxyAddr != "" {
-		cfg.ProxyAddr = parsed.ProxyAddr
-	}
-	if parsed.NoLock != nil {
-		cfg.NoLock = *parsed.NoLock
 	}
 
 	return nil
@@ -441,9 +370,6 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
 		cfg.PDFOCRLang = v
 	}
-	if v := os.Getenv("QUANT_PDF_OCR_TIMEOUT"); v != "" {
-		cfg.PDFOCRTimeout = mustParseDurationEnv("QUANT_PDF_OCR_TIMEOUT", v, cfg.PDFOCRTimeout)
-	}
 	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" {
 		cfg.ChunkSize = mustParseIntEnv("QUANT_CHUNK_SIZE", v, cfg.ChunkSize)
 	}
@@ -453,29 +379,8 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" {
 		cfg.IndexWorkers = mustParseIntEnv("QUANT_INDEX_WORKERS", v, cfg.IndexWorkers)
 	}
-	if v := os.Getenv("QUANT_MAX_VECTOR_CANDIDATES"); v != "" {
-		cfg.MaxVectorCandidates = mustParseIntEnv("QUANT_MAX_VECTOR_CANDIDATES", v, cfg.MaxVectorCandidates)
-	}
-	if v := os.Getenv("QUANT_WATCH_EVENT_BUFFER"); v != "" {
-		cfg.WatchEventBuffer = mustParseIntEnv("QUANT_WATCH_EVENT_BUFFER", v, cfg.WatchEventBuffer)
-	}
 	if v := os.Getenv("QUANT_EMBED_BATCH_SIZE"); v != "" {
 		cfg.EmbedBatchSize = mustParseIntEnv("QUANT_EMBED_BATCH_SIZE", v, cfg.EmbedBatchSize)
-	}
-	if v := os.Getenv("QUANT_MAX_CONCURRENT_TOOLS"); v != "" {
-		cfg.MaxConcurrentTools = mustParseIntEnv("QUANT_MAX_CONCURRENT_TOOLS", v, cfg.MaxConcurrentTools)
-	}
-	if v := os.Getenv("QUANT_KEYWORD_WEIGHT"); v != "" {
-		cfg.KeywordWeight = mustParseFloatEnv("QUANT_KEYWORD_WEIGHT", v, cfg.KeywordWeight)
-	}
-	if v := os.Getenv("QUANT_VECTOR_WEIGHT"); v != "" {
-		cfg.VectorWeight = mustParseFloatEnv("QUANT_VECTOR_WEIGHT", v, cfg.VectorWeight)
-	}
-	if v := os.Getenv("QUANT_PROXY_ADDR"); v != "" {
-		cfg.ProxyAddr = v
-	}
-	if v := os.Getenv("QUANT_NO_LOCK"); v != "" {
-		cfg.NoLock = v == "1" || strings.EqualFold(v, "true")
 	}
 }
 
@@ -504,6 +409,18 @@ func defaultMaxConcurrentTools() int {
 		tools = 8
 	}
 	return tools
+}
+
+func defaultMaxVectorCandidates() int {
+	return 20000
+}
+
+func defaultHNSWM() int {
+	return 16
+}
+
+func defaultHNSWEfSearch() int {
+	return 100
 }
 
 // DefaultMemoryLimit returns a suggested Go runtime memory soft limit
@@ -550,15 +467,6 @@ func mustParseFloatFlag(name, value string, fallback float64) float64 {
 	return parsed
 }
 
-func mustParseDurationFlag(name, value string, fallback time.Duration) time.Duration {
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		logx.Warn("ignoring invalid flag value", "flag", "--"+name, "value", value, "err", err)
-		return fallback
-	}
-	return parsed
-}
-
 func mustParseIntEnv(name, value string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
@@ -570,15 +478,6 @@ func mustParseIntEnv(name, value string, fallback int) int {
 
 func mustParseFloatEnv(name, value string, fallback float64) float64 {
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		logx.Warn("ignoring invalid env value", "name", name, "value", value, "err", err)
-		return fallback
-	}
-	return parsed
-}
-
-func mustParseDurationEnv(name, value string, fallback time.Duration) time.Duration {
-	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		logx.Warn("ignoring invalid env value", "name", name, "value", value, "err", err)
 		return fallback

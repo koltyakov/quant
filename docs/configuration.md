@@ -24,39 +24,14 @@ All flags apply to `quant mcp`.
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0--0.99) |
 | `--embed-batch-size` | `16` | Number of chunks sent to the embedding backend per batch (1--128) |
 | `--index-workers` | auto (2--8) | Parallel workers for startup and live indexing (1--64) |
-| `--max-vector-candidates` | `20000` | Max chunks eligible for brute-force vector fallback when HNSW is not available; `0` disables the fallback entirely |
-
-### Search tuning flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--keyword-weight` | `0` (auto) | Keyword search signal multiplier (0--10). When `0`, `quant` chooses weights automatically based on query shape |
-| `--vector-weight` | `0` (auto) | Vector search signal multiplier (0--10). When `0`, `quant` chooses weights automatically based on query shape |
-| `--max-concurrent-tools` | `4` | Maximum concurrent MCP tool calls (1--32) |
-
-### Multi-instance flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--proxy-addr` | - | Address of the main-process proxy; when set, this instance runs in worker mode and delegates locking to the proxy |
-| `--no-lock` | `false` | Disable multi-instance locking and run fully standalone |
-
-### Watcher flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--watch-event-buffer` | `256` | Watcher event channel buffer size (1--4096) |
 
 ### PDF flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pdf-ocr-lang` | `eng` | Tesseract language(s) for scanned PDF OCR, e.g. `eng`, `spa`, `eng+spa` |
-| `--pdf-ocr-timeout` | `2m` | Timeout for the scanned PDF OCR fallback |
 
 ## Environment variables
-
-All flags can be set via environment variables. The mapping is:
 
 | Environment variable | Corresponding flag |
 |---|---|
@@ -70,15 +45,7 @@ All flags can be set via environment variables. The mapping is:
 | `QUANT_CHUNK_OVERLAP` | `--chunk-overlap` |
 | `QUANT_EMBED_BATCH_SIZE` | `--embed-batch-size` |
 | `QUANT_INDEX_WORKERS` | `--index-workers` |
-| `QUANT_MAX_VECTOR_CANDIDATES` | `--max-vector-candidates` |
-| `QUANT_KEYWORD_WEIGHT` | `--keyword-weight` |
-| `QUANT_VECTOR_WEIGHT` | `--vector-weight` |
-| `QUANT_MAX_CONCURRENT_TOOLS` | `--max-concurrent-tools` |
-| `QUANT_WATCH_EVENT_BUFFER` | `--watch-event-buffer` |
 | `QUANT_PDF_OCR_LANG` | `--pdf-ocr-lang` |
-| `QUANT_PDF_OCR_TIMEOUT` | `--pdf-ocr-timeout` |
-| `QUANT_PROXY_ADDR` | `--proxy-addr` |
-| `QUANT_NO_LOCK` | `--no-lock` |
 
 Auto-update is controlled separately:
 
@@ -110,15 +77,7 @@ chunk_size: 512
 chunk_overlap: 0.15
 embed_batch_size: 16
 index_workers: 4
-max_vector_candidates: 20000
-keyword_weight: 0
-vector_weight: 0
-max_concurrent_tools: 4
-watch_event_buffer: 256
 pdf_ocr_lang: eng
-pdf_ocr_timeout: 2m
-proxy_addr: ""
-no_lock: false
 include:
   - "**/*.go"
   - "**/*.md"
@@ -144,6 +103,18 @@ exclude:
   - "**/*_test.go"
   - "dist/**"
 ```
+
+## Auto-tuned internals
+
+The following parameters are automatically configured based on system resources and do not need manual tuning:
+
+- **HNSW graph** (M, efSearch, reoptimization threshold) — tuned for recall/memory balance
+- **Vector search candidates** — max chunks for brute-force fallback
+- **Search weights** — keyword/vector signal weights auto-selected per query
+- **Concurrent tool calls** — scaled to available CPUs
+- **Watcher event buffer** — internal channel sizing
+- **PDF OCR timeout** — internal timeout for OCR fallback
+- **Multi-instance locking** — automatic detection and coordination
 
 ## Auto-update
 

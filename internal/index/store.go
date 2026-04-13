@@ -22,11 +22,20 @@ type Store struct {
 	backup                    string
 	maxVectorSearchCandidates int
 	hnsw                      *hnswIndex
+	hnswM                     int
+	hnswEfSearch              int
+	hnswGraphPath             string
 	keywordWeightOverride     float32
 	vectorWeightOverride      float32
+	docEmbeds                 *docEmbeddingIndex
 }
 
 const defaultMaxVectorSearchCandidates = 20000
+
+const (
+	defaultHNSWM        = 16
+	defaultHNSWEfSearch = 100
+)
 
 const (
 	defaultSQLiteConnMaxLifetime = time.Hour
@@ -103,6 +112,10 @@ func openStore(dbPath string) (*Store, error) {
 		dbPath:                    dbPath,
 		maxVectorSearchCandidates: defaultMaxVectorSearchCandidates,
 		hnsw:                      newHNSWIndex(),
+		hnswM:                     defaultHNSWM,
+		hnswEfSearch:              defaultHNSWEfSearch,
+		hnswGraphPath:             dbPath + ".hnsw",
+		docEmbeds:                 newDocEmbeddingIndex(),
 	}
 	for _, pragma := range []string{
 		`PRAGMA journal_mode = WAL`,
@@ -147,6 +160,26 @@ func (s *Store) PingContext(ctx context.Context) error {
 
 func (s *Store) SetMaxVectorSearchCandidates(max int) {
 	s.maxVectorSearchCandidates = max
+}
+
+func (s *Store) SetHNSWParams(m, efSearch int) {
+	if m > 0 {
+		s.hnswM = m
+	}
+	if efSearch > 0 {
+		s.hnswEfSearch = efSearch
+	}
+}
+
+func (s *Store) HNSWReoptimizationNeeded(threshold float64) bool {
+	if s.hnsw == nil || !s.hnsw.ready.Load() {
+		return false
+	}
+	total := s.hnsw.Len()
+	if total == 0 {
+		return false
+	}
+	return float64(s.hnsw.modCount())/float64(total) > threshold
 }
 
 func (s *Store) SetWeightOverrides(keyword, vector float32) {
@@ -204,7 +237,10 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return err
 	}
-	return s.migrateHNSWStateColumns()
+	if err := s.migrateHNSWStateColumns(); err != nil {
+		return err
+	}
+	return s.migrateDocEmbeddingColumn()
 }
 
 func (s *Store) migrateHNSWStateColumns() error {
@@ -294,6 +330,12 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		s.hnsw.BatchDelete(hnswDeleteIDs)
 	}
 
+	meta, _ := s.embeddingMetadata(ctx)
+	dims := 0
+	if meta != nil {
+		dims = meta.Dimensions
+	}
+
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?) RETURNING id`)
 	if err != nil {
 		return fmt.Errorf("preparing chunk insert: %w", err)
@@ -316,6 +358,15 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		inserted = append(inserted, insertedChunk{id: newID, embedding: chunk.Embedding})
 	}
 
+	if dims > 0 && len(chunks) > 0 {
+		docEmb := computeDocEmbedding(chunks, dims)
+		if docEmb != nil {
+			if err := s.updateDocEmbeddingTx(ctx, tx, docID, docEmb); err != nil {
+				logx.Warn("failed to store document embedding", "doc_id", docID, "err", err)
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
@@ -325,18 +376,28 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 	}
 
 	if s.hnsw != nil && s.hnsw.ready.Load() {
-		meta, metaErr := s.embeddingMetadata(ctx)
+		meta2, metaErr := s.embeddingMetadata(ctx)
 		if metaErr != nil {
 			logx.Warn("failed to read embedding metadata for HNSW update", "err", metaErr)
-		} else if meta != nil && meta.Dimensions > 0 {
+		} else if meta2 != nil && meta2.Dimensions > 0 {
 			var nodes []hnsw.Node[int]
 			for _, ic := range inserted {
-				vec := decodeEmbeddingForHNSW(ic.embedding, meta.Dimensions)
+				vec := decodeEmbeddingForHNSW(ic.embedding, meta2.Dimensions)
 				if len(vec) > 0 {
 					nodes = append(nodes, hnsw.MakeNode(ic.id, vec))
 				}
 			}
 			s.hnsw.BatchAdd(nodes)
+		}
+	}
+
+	if dims > 0 && len(chunks) > 0 {
+		docEmb := computeDocEmbedding(chunks, dims)
+		if docEmb != nil {
+			vec := decodeEmbeddingForHNSW(docEmb, dims)
+			if len(vec) > 0 {
+				s.docEmbeds.Set(docID, doc.Path, NormalizeFloat32(vec))
+			}
 		}
 	}
 
@@ -436,6 +497,8 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 		s.hnsw.BatchDelete(hnswDeleteIDs)
 	}
 
+	s.docEmbeds.Remove(docID, path)
+
 	return nil
 }
 
@@ -466,9 +529,7 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 
 		if s.hnsw != nil && s.hnsw.ready.Load() {
 			s.hnsw.mu.Lock()
-			s.hnsw.graph = hnsw.NewGraph[int]()
-			s.hnsw.graph.M = hnswM
-			s.hnsw.graph.EfSearch = hnswEfSearch
+			s.hnsw.graph = newGraph(s.hnswM, s.hnswEfSearch)
 			s.hnsw.mu.Unlock()
 		}
 		return nil

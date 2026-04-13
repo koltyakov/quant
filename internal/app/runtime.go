@@ -141,6 +141,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 
 	logx.Info("database opened", "path", cfg.DBPath)
 	store.SetMaxVectorSearchCandidates(cfg.MaxVectorCandidates)
+	store.SetHNSWParams(cfg.HNSWM, cfg.HNSWEfSearch)
 	if cfg.KeywordWeight > 0 || cfg.VectorWeight > 0 {
 		store.SetWeightOverrides(float32(cfg.KeywordWeight), float32(cfg.VectorWeight))
 	}
@@ -215,6 +216,14 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		defer wg.Done()
 		idx.RunInitialSync(serverCtx)
 	}()
+
+	if cfg.HNSWReoptimizeThreshold > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			idx.RunHNSWReoptimizer(serverCtx, store, cfg.HNSWReoptimizeThreshold)
+		}()
+	}
 
 	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
 	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)

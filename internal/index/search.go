@@ -49,10 +49,15 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 		}
 	}
 
+	var docFilter map[string]float32
+	if queryEmbedding != nil {
+		docFilter = s.docEmbeds.topDocPaths(queryEmbedding, docFilterTopK)
+	}
+
 	var vectorOnlyCandidates map[int]*searchCandidate
 	if queryEmbedding != nil {
 		var err error
-		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates)
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +125,7 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 			}
 		}
 		if len(filtered) > 0 {
-			s.loadHNSWChunkRows(ctx, filtered, queryEmbed, limit, nil, vectorOnly)
+			s.loadHNSWChunkRows(ctx, filtered, queryEmbed, limit, nil, vectorOnly, nil)
 		}
 	}
 
@@ -248,14 +253,14 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bo
 
 // collectVectorCandidates gathers vector-only candidates (not already in keywordCandidates)
 // and returns them keyed by chunk ID for unified RRF fusion.
-func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate) (map[int]*searchCandidate, error) {
+func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, docFilter map[string]float32) (map[int]*searchCandidate, error) {
 	vectorOnly := make(map[int]*searchCandidate)
 
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		if pathPrefix == "" {
-			s.collectHNSWCandidates(ctx, queryEmbedding, limit, keywordCandidates, vectorOnly)
+			s.collectHNSWCandidates(ctx, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 		} else {
-			s.collectHNSWCandidatesWithPrefix(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, vectorOnly)
+			s.collectHNSWCandidatesWithPrefix(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, vectorOnly, docFilter)
 		}
 		return vectorOnly, nil
 	}
@@ -277,6 +282,8 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 			 WHERE d.path LIKE ? ESCAPE '\'`,
 			pathPattern,
 		)
+	} else if len(docFilter) > 0 {
+		rows, err = s.queryChunksByDocPaths(ctx, docFilter)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
@@ -345,17 +352,17 @@ func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit i
 	return vectorOnly, nil
 }
 
-func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
 	fetchK := limit*3 + len(keywordCandidates) + 10
 	ids := s.hnsw.Search(queryEmbedding, fetchK)
 	if len(ids) == 0 {
 		return
 	}
 
-	s.loadHNSWChunkRows(ctx, ids, queryEmbedding, limit, keywordCandidates, vectorOnly)
+	s.loadHNSWChunkRows(ctx, ids, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 }
 
-func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
 	// Get chunk IDs matching the prefix from SQLite (cheap index scan).
 	pathPattern := sqlLikePrefixPattern(pathPrefix)
 	prefixRows, err := s.db.QueryContext(ctx,
@@ -390,11 +397,10 @@ func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedd
 
 	// If HNSW intersection yielded enough results, load their full rows.
 	if len(filtered) >= limit {
-		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly)
+		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 		return
 	}
 
-	// Otherwise brute-force score all prefix chunks (bounded by prefix size and maxVectorSearchCandidates).
 	if s.maxVectorSearchCandidates > 0 && len(prefixSet) > s.maxVectorSearchCandidates {
 		logx.Info("skipping brute-force prefix vector fallback", "prefix_chunks", len(prefixSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return
@@ -403,10 +409,10 @@ func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedd
 	for id := range prefixSet {
 		allPrefixIDs = append(allPrefixIDs, id)
 	}
-	s.loadHNSWChunkRows(ctx, allPrefixIDs, queryEmbedding, limit, keywordCandidates, vectorOnly)
+	s.loadHNSWChunkRows(ctx, allPrefixIDs, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 }
 
-func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -423,7 +429,82 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 	}
 	defer func() { _ = rows.Close() }()
 
-	if _, err := s.scanVectorRows(rows, queryEmbedding, limit, keywordCandidates, vectorOnly); err != nil {
+	if _, err := s.scanVectorRowsWithDocFilter(rows, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter); err != nil {
 		return
 	}
+}
+
+func (s *Store) queryChunksByDocPaths(ctx context.Context, docPaths map[string]float32) (*sql.Rows, error) {
+	paths := make([]string, 0, len(docPaths))
+	for p := range docPaths {
+		paths = append(paths, p)
+	}
+	placeholders := make([]string, len(paths))
+	args := make([]any, len(paths))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args[i] = p
+	}
+	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at
+	          FROM chunks c JOIN documents d ON c.document_id = d.id
+	          WHERE d.path IN (` + strings.Join(placeholders, ",") + `)`
+	return s.db.QueryContext(ctx, query, args...)
+}
+
+func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) (map[int]*searchCandidate, error) {
+	top := make(candidateHeap, 0, limit)
+	for rows.Next() {
+		var id int
+		var content string
+		var chunkIndex int
+		var embeddingBytes []byte
+		var docPath string
+		var modifiedAt time.Time
+		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt); err != nil {
+			return nil, err
+		}
+		if _, ok := keywordCandidates[id]; ok {
+			continue
+		}
+		if len(docFilter) > 0 {
+			if _, ok := docFilter[docPath]; !ok {
+				continue
+			}
+		}
+
+		score := dotProductEncoded(queryEmbedding, embeddingBytes)
+		candidate := scoredResult{
+			id:         id,
+			path:       docPath,
+			score:      score,
+			content:    content,
+			chunkIndex: chunkIndex,
+			modifiedAt: modifiedAt,
+		}
+
+		if len(top) < limit {
+			heap.Push(&top, candidate)
+		} else if candidate.score > top[0].score {
+			top[0] = candidate
+			heap.Fix(&top, 0)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, sr := range top {
+		vectorOnly[sr.id] = &searchCandidate{
+			id: sr.id,
+			result: SearchResult{
+				DocumentPath: sr.path,
+				ChunkContent: sr.content,
+				ChunkIndex:   sr.chunkIndex,
+				ScoreKind:    "rrf",
+			},
+			vectorScore: sr.score,
+			modifiedAt:  sr.modifiedAt,
+		}
+	}
+	return vectorOnly, nil
 }

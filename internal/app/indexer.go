@@ -457,6 +457,37 @@ func (idx *Indexer) SetIndexState(state runtimestate.IndexState, message string)
 // LiveQueue returns the live index queue for testing.
 func (idx *Indexer) LiveQueue() *LiveIndexQueue { return idx.live }
 
+func (idx *Indexer) RunHNSWReoptimizer(ctx context.Context, store reoptimizeStore, threshold float64) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !store.HNSWReady() {
+				continue
+			}
+			if !store.HNSWReoptimizationNeeded(threshold) {
+				continue
+			}
+			logx.Info("hnsw re-optimization triggered", "threshold", threshold)
+			if err := store.BuildHNSW(ctx); err != nil {
+				logx.Warn("hnsw re-optimization failed", "err", err)
+			} else {
+				logx.Info("hnsw re-optimization complete")
+			}
+		}
+	}
+}
+
+type reoptimizeStore interface {
+	HNSWReady() bool
+	HNSWReoptimizationNeeded(threshold float64) bool
+	BuildHNSW(ctx context.Context) error
+}
+
 func (idx *Indexer) setIndexState(state runtimestate.IndexState, message string) {
 	if idx == nil || idx.IndexState == nil {
 		return
