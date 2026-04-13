@@ -14,6 +14,9 @@ install: build
 	mkdir -p $$HOME/.local/bin
 	install -m 0755 bin/$(APP) $$HOME/.local/bin/$(APP)
 
+tidy:
+	go mod tidy
+
 test:
 	go test ./...
 
