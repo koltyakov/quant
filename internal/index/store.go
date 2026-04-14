@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/coder/hnsw"
@@ -31,6 +32,8 @@ type Store struct {
 	docEmbeds                 *docEmbeddingIndex
 	reranker                  Reranker
 	colbert                   *ColBERTIndex
+
+	writeMu sync.Mutex
 }
 
 const defaultMaxVectorSearchCandidates = 20000
@@ -344,6 +347,9 @@ func (s *Store) migrateHNSWStateColumns() error {
 }
 
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	tagsJSON := ""
 	if doc.Tags != nil {
 		tj, _ := json.Marshal(doc.Tags)
@@ -380,6 +386,8 @@ func (s *Store) InsertChunk(ctx context.Context, chunk *ChunkRecord) error {
 }
 
 func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return s.ReindexDocumentWithDeferredHNSW(ctx, doc, chunks, nil)
 }
 
@@ -532,6 +540,9 @@ func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
 }
 
 func (s *Store) DeleteDocument(ctx context.Context, path string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var hnswDeleteIDs []int
 	var docID int64
 	if s.hnsw != nil && s.hnsw.ready.Load() {
@@ -596,6 +607,9 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 }
 
 func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	prefix = filepath.Clean(prefix)
 	if prefix == "." || prefix == "" {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -690,11 +704,16 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 }
 
 func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `UPDATE documents SET path = ? WHERE path = ?`, newPath, oldPath)
 	return err
 }
 
 func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	current, err := s.embeddingMetadata(ctx)
 	if err != nil {
 		return false, err
@@ -813,6 +832,8 @@ func (s *Store) FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error) {
 }
 
 func (s *Store) AddToQuarantine(ctx context.Context, path, errMsg string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO quarantine (path, error_msg, created_at, attempts)
 		 VALUES (?, ?, CURRENT_TIMESTAMP, 1)
@@ -823,6 +844,8 @@ func (s *Store) AddToQuarantine(ctx context.Context, path, errMsg string) error 
 }
 
 func (s *Store) RemoveFromQuarantine(ctx context.Context, path string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM quarantine WHERE path = ?`, path)
 	return err
 }
@@ -855,6 +878,8 @@ func (s *Store) ListQuarantined(ctx context.Context) ([]QuarantineEntry, error) 
 }
 
 func (s *Store) ClearQuarantine(ctx context.Context) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM quarantine`)
 	return err
 }
@@ -871,6 +896,8 @@ func (s *Store) LookupContentDedup(ctx context.Context, contentHash string) ([]b
 }
 
 func (s *Store) StoreContentDedup(ctx context.Context, contentHash string, embedding []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO content_dedup (content_hash, embedding) VALUES (?, ?)
 		 ON CONFLICT(content_hash) DO UPDATE SET embedding = excluded.embedding`,
@@ -913,6 +940,8 @@ func (s *Store) migrateDocumentMetadata() error {
 }
 
 func (s *Store) RemoveContentDedup(ctx context.Context, contentHash string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM content_dedup WHERE content_hash = ?`, contentHash)
 	return err
 }
@@ -951,6 +980,9 @@ func (s *Store) CollectionStats(ctx context.Context, collection string) (docCoun
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		rows, err := s.db.QueryContext(ctx,

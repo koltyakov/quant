@@ -186,6 +186,9 @@ func DecodeTokenEmbeddings(data []byte) [][]float32 {
 }
 
 func (s *Store) MigrateColBERTColumn() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	var colCount int
 	err := s.db.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='token_embeddings'`,

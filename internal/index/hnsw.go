@@ -110,6 +110,9 @@ func newGraph(m, efSearch int) *hnsw.Graph[int] {
 }
 
 func (s *Store) BuildHNSW(ctx context.Context) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	if s.hnsw == nil {
 		return nil
 	}

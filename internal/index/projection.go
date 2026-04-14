@@ -98,6 +98,9 @@ type chunkUpdate struct {
 }
 
 func (s *Store) MigrateEmbeddingsWithProjection(ctx context.Context, proj *ProjectionLayer) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	meta, err := s.embeddingMetadata(ctx)
 	if err != nil || meta == nil {
 		return fmt.Errorf("reading embedding metadata for projection migration: %w", err)
@@ -178,6 +181,8 @@ func (s *Store) applyProjectionBatch(ctx context.Context, updates []chunkUpdate)
 }
 
 func (s *Store) SaveProjection(ctx context.Context, proj *ProjectionLayer) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	data := proj.Encode()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO embedding_metadata (key, value) VALUES ('projection', ?)
