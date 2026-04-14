@@ -11,11 +11,17 @@ import (
 	"github.com/koltyakov/quant/internal/index"
 )
 
+type ContentDedupStore interface {
+	LookupContentDedup(ctx context.Context, contentHash string) ([]byte, bool)
+	StoreContentDedup(ctx context.Context, contentHash string, embedding []byte) error
+}
+
 type Pipeline struct {
-	Embedder  embed.Embedder
-	ChunkSize int
-	Overlap   float64
-	BatchSize int
+	Embedder   embed.Embedder
+	ChunkSize  int
+	Overlap    float64
+	BatchSize  int
+	DedupStore ContentDedupStore
 }
 
 type PendingEmbed struct {
@@ -23,19 +29,31 @@ type PendingEmbed struct {
 	BatchPos int
 }
 
-func (p *Pipeline) DiffChunks(chunks []chunk.Chunk, existing map[string]index.ChunkRecord) ([]index.ChunkRecord, []chunk.Chunk, []PendingEmbed, error) {
+func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existing map[string]index.ChunkRecord) ([]index.ChunkRecord, []chunk.Chunk, []PendingEmbed, error) {
 	records := make([]index.ChunkRecord, 0, len(chunks))
 	var toEmbed []chunk.Chunk
 	var positions []PendingEmbed
 
 	for i, c := range chunks {
 		key := index.ChunkDiffKey(c.Content)
-		if existing, ok := existing[key]; ok {
+		if existingRecord, ok := existing[key]; ok {
 			records = append(records, index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
-				Embedding:  existing.Embedding,
+				Embedding:  existingRecord.Embedding,
 			})
+		} else if p.DedupStore != nil {
+			if embedding, found := p.DedupStore.LookupContentDedup(ctx, key); found {
+				records = append(records, index.ChunkRecord{
+					Content:    c.Content,
+					ChunkIndex: c.Index,
+					Embedding:  embedding,
+				})
+			} else {
+				positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
+				toEmbed = append(toEmbed, c)
+				records = append(records, index.ChunkRecord{})
+			}
 		} else {
 			positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
 			toEmbed = append(toEmbed, c)
@@ -99,10 +117,15 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 		}
 		for i, c := range batch {
 			globalIdx := positions[result.batchStart+i].ChunkIdx
+			emb := index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i]))
 			records[globalIdx] = index.ChunkRecord{
 				Content:    c.Content,
 				ChunkIndex: c.Index,
-				Embedding:  index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i])),
+				Embedding:  emb,
+			}
+			if p.DedupStore != nil {
+				key := index.ChunkDiffKey(c.Content)
+				_ = p.DedupStore.StoreContentDedup(ctx, key, emb)
 			}
 		}
 	}

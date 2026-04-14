@@ -367,35 +367,6 @@ func (s *Store) saveHNSWGraphToFile() error {
 	return nil
 }
 
-func (s *Store) loadHNSWGraphWithMagic() (*hnsw.Graph[int], error) {
-	f, err := os.Open(s.hnswGraphPath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	r := bufio.NewReader(f)
-	var magic, version uint32
-	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
-		return nil, err
-	}
-	if magic != hnswGraphFileMagic {
-		return nil, fmt.Errorf("invalid hnsw graph file magic: %x", magic)
-	}
-	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
-		return nil, err
-	}
-	if version != hnswGraphFileVersion {
-		return nil, fmt.Errorf("unsupported hnsw graph file version: %d", version)
-	}
-
-	g := newGraph(s.hnswM, s.hnswEfSearch)
-	if err := g.Import(r); err != nil {
-		return nil, err
-	}
-	return g, nil
-}
-
 func (s *Store) HNSWReady() bool {
 	return s.hnsw != nil && s.hnsw.ready.Load()
 }

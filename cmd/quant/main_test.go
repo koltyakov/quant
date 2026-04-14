@@ -845,10 +845,11 @@ func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
 	})
 
 	idx := &indexer{
-		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:     store,
-		embedder:  &permanentFailingEmbedder{},
-		extractor: &countingExtractor{text: "hello world"},
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   &permanentFailingEmbedder{},
+		extractor:  &countingExtractor{text: "hello world"},
+		quarantine: store,
 	}
 
 	report, err := idx.initialSyncWithReport(context.Background())
@@ -859,28 +860,31 @@ func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
 		t.Fatal("expected initial sync report to record indexing failures")
 	}
 
-	quarantinePath := filepath.Join(dir, ".quarantine", "books", "sample.txt")
-	data, err := os.ReadFile(quarantinePath)
+	docKey := filepath.ToSlash(filepath.Join("books", "sample.txt"))
+	quarantined, err := store.IsQuarantined(context.Background(), docKey)
 	if err != nil {
-		t.Fatalf("expected quarantined file, got %v", err)
+		t.Fatalf("unexpected error checking quarantine: %v", err)
 	}
-	if string(data) != "hello world" {
-		t.Fatalf("expected quarantined file contents to match source, got %q", string(data))
+	if !quarantined {
+		t.Fatal("expected path to be quarantined in skip list")
 	}
 
-	logData, err := os.ReadFile(quarantinePath + ".log")
+	entries, err := store.ListQuarantined(context.Background())
 	if err != nil {
-		t.Fatalf("expected quarantine log, got %v", err)
+		t.Fatalf("unexpected error listing quarantined: %v", err)
 	}
-	if !strings.Contains(string(logData), embed.ErrPermanent.Error()) {
-		t.Fatalf("expected quarantine log to contain permanent error, got %q", string(logData))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 quarantine entry, got %d", len(entries))
+	}
+	if !strings.Contains(entries[0].ErrorMsg, embed.ErrPermanent.Error()) {
+		t.Fatalf("expected quarantine error to contain permanent error, got %q", entries[0].ErrorMsg)
 	}
 
-	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
-		t.Fatalf("expected source file to be moved, stat err=%v", err)
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Fatalf("expected source file to still exist (non-destructive quarantine), stat err=%v", err)
 	}
 
-	doc, err := store.GetDocumentByPath(context.Background(), filepath.ToSlash(filepath.Join("books", "sample.txt")))
+	doc, err := store.GetDocumentByPath(context.Background(), docKey)
 	if err != nil {
 		t.Fatalf("unexpected load error: %v", err)
 	}
@@ -891,11 +895,11 @@ func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
 
 func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
 	dir := t.TempDir()
-	quarantinePath := filepath.Join(dir, ".quarantine", "books", "sample.txt")
-	if err := os.MkdirAll(filepath.Dir(quarantinePath), 0750); err != nil {
+	sourcePath := filepath.Join(dir, "books", "sample.txt")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0750); err != nil {
 		t.Fatalf("unexpected mkdir error: %v", err)
 	}
-	if err := os.WriteFile(quarantinePath, []byte("hello world"), 0644); err != nil {
+	if err := os.WriteFile(sourcePath, []byte("hello world"), 0644); err != nil {
 		t.Fatalf("unexpected error writing file: %v", err)
 	}
 
@@ -909,11 +913,17 @@ func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
 		}
 	})
 
+	docKey := filepath.ToSlash(filepath.Join("books", "sample.txt"))
+	if err := store.AddToQuarantine(context.Background(), docKey, "previously failed"); err != nil {
+		t.Fatalf("unexpected error adding to quarantine: %v", err)
+	}
+
 	idx := &indexer{
-		cfg:       &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
-		store:     store,
-		embedder:  testutil.StaticEmbedder{},
-		extractor: fakeExtractor{text: "hello world"},
+		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
+		store:      store,
+		embedder:   testutil.StaticEmbedder{},
+		extractor:  fakeExtractor{text: "hello world"},
+		quarantine: store,
 	}
 
 	if err := idx.initialSync(context.Background()); err != nil {
@@ -925,7 +935,7 @@ func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
 		t.Fatalf("unexpected list error: %v", err)
 	}
 	if len(docs) != 0 {
-		t.Fatalf("expected quarantine tree to be ignored, got %d docs", len(docs))
+		t.Fatalf("expected quarantined path to be skipped, got %d docs", len(docs))
 	}
 }
 

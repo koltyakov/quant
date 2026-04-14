@@ -52,7 +52,7 @@ func TestDiffChunks_AllNew(t *testing.T) {
 		{Content: "alpha", Index: 0},
 		{Content: "beta", Index: 1},
 	}
-	records, toEmbed, positions, err := p.DiffChunks(chunks, nil)
+	records, toEmbed, positions, err := p.DiffChunks(context.Background(), chunks, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDiffChunks_ReusesExisting(t *testing.T) {
 	existing := map[string]index.ChunkRecord{
 		index.ChunkDiffKey("alpha"): {Content: "alpha", Embedding: []byte{1, 2, 3}},
 	}
-	records, toEmbed, _, err := p.DiffChunks(chunks, existing)
+	records, toEmbed, _, err := p.DiffChunks(context.Background(), chunks, existing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

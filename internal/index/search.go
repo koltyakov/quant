@@ -64,7 +64,16 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 	}
 
 	weights := classifyQueryWeights(query, s.keywordWeightOverride, s.vectorWeightOverride)
-	return unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights), nil
+	results := unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights)
+
+	if s.reranker != nil {
+		reranked, err := s.reranker.Rerank(ctx, query, queryEmbedding, results)
+		if err == nil && len(reranked) > 0 {
+			results = reranked
+		}
+	}
+
+	return results, nil
 }
 
 func (s *Store) GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult, error) {

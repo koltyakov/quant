@@ -28,6 +28,7 @@ type Store struct {
 	keywordWeightOverride     float32
 	vectorWeightOverride      float32
 	docEmbeds                 *docEmbeddingIndex
+	reranker                  Reranker
 }
 
 const defaultMaxVectorSearchCandidates = 20000
@@ -187,6 +188,10 @@ func (s *Store) SetWeightOverrides(keyword, vector float32) {
 	s.vectorWeightOverride = vector
 }
 
+func (s *Store) SetReranker(r Reranker) {
+	s.reranker = r
+}
+
 func (s *Store) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS documents (
@@ -215,6 +220,17 @@ func (s *Store) migrate() error {
 		node_count  INTEGER NOT NULL,
 		model       TEXT NOT NULL DEFAULT '',
 		dimensions  INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS quarantine (
+		path        TEXT PRIMARY KEY,
+		error_msg   TEXT NOT NULL,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		attempts    INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS content_dedup (
+		content_hash TEXT PRIMARY KEY,
+		embedding    BLOB NOT NULL,
+		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 		content,
@@ -706,4 +722,76 @@ func (s *Store) FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error) {
 
 	diag.Empty = diag.LogicalRows == 0
 	return diag, nil
+}
+
+func (s *Store) AddToQuarantine(ctx context.Context, path, errMsg string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO quarantine (path, error_msg, created_at, attempts)
+		 VALUES (?, ?, CURRENT_TIMESTAMP, 1)
+		 ON CONFLICT(path) DO UPDATE SET error_msg = excluded.error_msg, created_at = CURRENT_TIMESTAMP, attempts = attempts + 1`,
+		path, errMsg,
+	)
+	return err
+}
+
+func (s *Store) RemoveFromQuarantine(ctx context.Context, path string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM quarantine WHERE path = ?`, path)
+	return err
+}
+
+func (s *Store) IsQuarantined(ctx context.Context, path string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM quarantine WHERE path = ?`, path).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Store) ListQuarantined(ctx context.Context) ([]QuarantineEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path, error_msg, created_at, attempts FROM quarantine ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []QuarantineEntry
+	for rows.Next() {
+		var e QuarantineEntry
+		if err := rows.Scan(&e.Path, &e.ErrorMsg, &e.CreatedAt, &e.Attempts); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func (s *Store) ClearQuarantine(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM quarantine`)
+	return err
+}
+
+func (s *Store) LookupContentDedup(ctx context.Context, contentHash string) ([]byte, bool) {
+	var embedding []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT embedding FROM content_dedup WHERE content_hash = ?`, contentHash,
+	).Scan(&embedding)
+	if err != nil {
+		return nil, false
+	}
+	return embedding, true
+}
+
+func (s *Store) StoreContentDedup(ctx context.Context, contentHash string, embedding []byte) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO content_dedup (content_hash, embedding) VALUES (?, ?)
+		 ON CONFLICT(content_hash) DO UPDATE SET embedding = excluded.embedding`,
+		contentHash, embedding,
+	)
+	return err
+}
+
+func (s *Store) RemoveContentDedup(ctx context.Context, contentHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM content_dedup WHERE content_hash = ?`, contentHash)
+	return err
 }

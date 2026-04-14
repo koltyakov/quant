@@ -75,6 +75,23 @@ type StatsProvider interface {
 	Stats(ctx context.Context) (docCount int, chunkCount int, err error)
 }
 
+// QuarantineEntry represents a quarantined path in the skip list.
+type QuarantineEntry struct {
+	Path      string
+	ErrorMsg  string
+	CreatedAt time.Time
+	Attempts  int
+}
+
+// QuarantineRepository manages the non-destructive skip list.
+type QuarantineRepository interface {
+	AddToQuarantine(ctx context.Context, path, errMsg string) error
+	RemoveFromQuarantine(ctx context.Context, path string) error
+	IsQuarantined(ctx context.Context, path string) (bool, error)
+	ListQuarantined(ctx context.Context) ([]QuarantineEntry, error)
+	ClearQuarantine(ctx context.Context) error
+}
+
 // FTSDiagnosticsProvider exposes FTS logical/physical diagnostics.
 type FTSDiagnosticsProvider interface {
 	FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error)

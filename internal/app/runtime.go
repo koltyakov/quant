@@ -110,9 +110,9 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		}()
 	}
 
-	rawEmbedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
+	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
-		return fmt.Errorf("error connecting to ollama: %w", err)
+		return fmt.Errorf("error connecting to embedding backend: %w", err)
 	}
 	defer func() {
 		if err := rawEmbedder.Close(); err != nil {
@@ -120,7 +120,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		}
 	}()
 
-	logx.Info("connected to embedding backend", "provider", "ollama", "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
+	logx.Info("connected to embedding backend", "provider", cfg.EmbedProvider, "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
 
 	embedder := embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
 		CacheSize:           128,
@@ -159,11 +159,13 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	}
 
 	idx := NewIndexer(IndexerConfig{
-		Cfg:       cfg,
-		Store:     store,
-		HNSWStore: store,
-		Embedder:  rawEmbedder,
-		Extractor: extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
+		Cfg:        cfg,
+		Store:      store,
+		HNSWStore:  store,
+		Embedder:   rawEmbedder,
+		Extractor:  extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
+		Quarantine: store,
+		DedupStore: store,
 	})
 
 	proxyServer := proxy.NewServer(store, idx.IndexState)
@@ -261,7 +263,7 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	}
 
 	var workerEmbedder embed.Embedder
-	rawEmbedder, err := embed.NewOllama(ctx, cfg.EmbedURL, cfg.EmbedModel)
+	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
 	if err != nil {
 		logx.Warn("worker cannot connect to embedding backend; search will be proxy-only", "err", err)
 	} else {

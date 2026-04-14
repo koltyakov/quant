@@ -111,8 +111,9 @@ func (s *Store) migrateDocEmbeddingColumn() error {
 
 func computeDocEmbedding(chunkRecords []ChunkRecord, dims int) []byte {
 	var sum []float32
-	count := 0
-	for _, cr := range chunkRecords {
+	totalWeight := float32(0)
+
+	for i, cr := range chunkRecords {
 		vec := decodeEmbeddingForHNSW(cr.Embedding, dims)
 		if len(vec) == 0 {
 			continue
@@ -120,18 +121,42 @@ func computeDocEmbedding(chunkRecords []ChunkRecord, dims int) []byte {
 		if sum == nil {
 			sum = make([]float32, len(vec))
 		}
-		for i := range vec {
-			sum[i] += vec[i]
+		weight := docEmbeddingWeight(i, len(chunkRecords))
+		for j := range vec {
+			sum[j] += vec[j] * weight
 		}
-		count++
+		totalWeight += weight
 	}
-	if count == 0 {
+	if totalWeight == 0 {
 		return nil
 	}
 	for i := range sum {
-		sum[i] /= float32(count)
+		sum[i] /= totalWeight
 	}
 	return EncodeInt8(NormalizeFloat32(sum))
+}
+
+func docEmbeddingWeight(chunkIndex, totalChunks int) float32 {
+	positionWeight := float32(1.0)
+	if totalChunks > 1 && chunkIndex == 0 {
+		positionWeight = 1.5
+	}
+	if totalChunks > 2 && chunkIndex == totalChunks-1 {
+		positionWeight = 1.2
+	}
+	middleWeight := float32(1.0)
+	if totalChunks > 4 {
+		fraction := float32(chunkIndex) / float32(totalChunks-1)
+		middleWeight = 1.0 + 0.3*(1.0-2.0*abs32(fraction-0.5))
+	}
+	return positionWeight * middleWeight
+}
+
+func abs32(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func (s *Store) LoadDocEmbeddings(ctx context.Context) error {

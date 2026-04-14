@@ -24,8 +24,6 @@ import (
 var ErrOCRFailed = extract.ErrOCRFailed
 var ErrFileTooLarge = extract.ErrFileTooLarge
 
-const quarantineDirName = ".quarantine"
-
 type IndexAction string
 
 const (
@@ -35,20 +33,24 @@ const (
 )
 
 type IndexerConfig struct {
-	Cfg       *config.Config
-	Store     index.DocumentWriter
-	HNSWStore index.HNSWBuilder
-	Embedder  embed.Embedder
-	Extractor extract.Extractor
+	Cfg        *config.Config
+	Store      index.DocumentWriter
+	HNSWStore  index.HNSWBuilder
+	Embedder   embed.Embedder
+	Extractor  extract.Extractor
+	Quarantine index.QuarantineRepository
+	DedupStore ingest.ContentDedupStore
 }
 
 type Indexer struct {
-	cfg       *config.Config
-	store     index.DocumentWriter
-	hnswStore index.HNSWBuilder
-	embedder  embed.Embedder
-	extractor extract.Extractor
-	pipeline  *ingest.Pipeline
+	cfg        *config.Config
+	store      index.DocumentWriter
+	hnswStore  index.HNSWBuilder
+	embedder   embed.Embedder
+	extractor  extract.Extractor
+	pipeline   *ingest.Pipeline
+	quarantine index.QuarantineRepository
+	dedupStore ingest.ContentDedupStore
 
 	paths   *PathSyncTracker
 	live    *LiveIndexQueue
@@ -61,16 +63,19 @@ type Indexer struct {
 func NewIndexer(ic IndexerConfig) *Indexer {
 	cfg := ic.Cfg
 	return &Indexer{
-		cfg:       cfg,
-		store:     ic.Store,
-		hnswStore: ic.HNSWStore,
-		embedder:  ic.Embedder,
-		extractor: ic.Extractor,
+		cfg:        cfg,
+		store:      ic.Store,
+		hnswStore:  ic.HNSWStore,
+		embedder:   ic.Embedder,
+		extractor:  ic.Extractor,
+		quarantine: ic.Quarantine,
+		dedupStore: ic.DedupStore,
 		pipeline: &ingest.Pipeline{
-			Embedder:  ic.Embedder,
-			ChunkSize: cfg.ChunkSize,
-			Overlap:   cfg.ChunkOverlap,
-			BatchSize: cfg.EmbedBatchSize,
+			Embedder:   ic.Embedder,
+			ChunkSize:  cfg.ChunkSize,
+			Overlap:    cfg.ChunkOverlap,
+			BatchSize:  cfg.EmbedBatchSize,
+			DedupStore: ic.DedupStore,
 		},
 		paths:      NewPathSyncTracker(),
 		live:       NewLiveIndexQueue(LiveQueueSizeForWorkers(cfg.IndexWorkers)),
@@ -189,6 +194,9 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 		go func() {
 			defer wg.Done()
 			for item := range jobs {
+				if idx.isQuarantined(ctx, item.key) {
+					continue
+				}
 				modTime := item.result.ModifiedAt
 				action, err := idx.SyncDocument(ctx, item.key, item.result.Path, &modTime, item.doc)
 				indexResults <- indexResult{path: item.result.Path, modTime: modTime, action: action, err: err}
@@ -406,6 +414,10 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 		return
 	}
 
+	if idx.isQuarantined(ctx, event.Path) {
+		return
+	}
+
 	switch event.Op {
 	case watch.Resync:
 		idx.RequestResync(ctx)
@@ -619,10 +631,11 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 			batchSize = 16
 		}
 		idx.pipeline = &ingest.Pipeline{
-			Embedder:  idx.embedder,
-			ChunkSize: idx.cfg.ChunkSize,
-			Overlap:   idx.cfg.ChunkOverlap,
-			BatchSize: batchSize,
+			Embedder:   idx.embedder,
+			ChunkSize:  idx.cfg.ChunkSize,
+			Overlap:    idx.cfg.ChunkOverlap,
+			BatchSize:  batchSize,
+			DedupStore: idx.dedupStore,
 		}
 	}
 	return idx.pipeline
@@ -664,7 +677,7 @@ func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime
 
 	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
 
-	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(chunks, existingByContent)
+	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(ctx, chunks, existingByContent)
 	if err != nil {
 		return IndexNoop, err
 	}
@@ -691,10 +704,6 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 		return false
 	}
 
-	if isQuarantinePath(idx.cfg.WatchDir, path) {
-		return true
-	}
-
 	if idx.cfg.DBPath != "" && IsCompanionLogPathForDB(idx.cfg.DBPath, path) {
 		return true
 	}
@@ -710,6 +719,18 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 	}
 
 	return !matcher.ShouldIndex(relPath)
+}
+
+func (idx *Indexer) isQuarantined(ctx context.Context, path string) bool {
+	if idx.quarantine == nil {
+		return false
+	}
+	quarantined, err := idx.quarantine.IsQuarantined(ctx, path)
+	if err != nil {
+		logx.Warn("failed to check quarantine status", "path", path, "err", err)
+		return false
+	}
+	return quarantined
 }
 
 func DocumentKey(root, path string) (string, error) {
@@ -799,68 +820,31 @@ func shouldQuarantineIndexError(err error) bool {
 	}
 }
 
-func isQuarantinePath(root, path string) bool {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	rel = filepath.Clean(rel)
-	return rel == quarantineDirName || strings.HasPrefix(rel, quarantineDirName+string(filepath.Separator))
-}
-
-func quarantineDestination(root, path string) (string, error) {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return "", err
-	}
-	rel = filepath.Clean(rel)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
-	}
-	if rel == quarantineDirName || strings.HasPrefix(rel, quarantineDirName+string(filepath.Separator)) {
-		return filepath.Join(root, rel), nil
-	}
-	return filepath.Join(root, quarantineDirName, rel), nil
-}
-
 func (idx *Indexer) quarantineFailedPath(ctx context.Context, path string, failure error) {
 	if idx == nil || idx.cfg == nil || path == "" || failure == nil {
 		return
 	}
-
-	dst, err := quarantineDestination(idx.cfg.WatchDir, path)
-	if err != nil {
-		logx.Warn("quarantining failed path failed", "path", path, "err", err)
+	if idx.quarantine == nil {
+		logx.Warn("no quarantine store available; skipping quarantine", "path", path)
 		return
-	}
-	if path == dst {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
-		logx.Warn("quarantining failed path failed", "path", path, "dst", dst, "err", err)
-		return
-	}
-	_ = os.Remove(dst)
-	if err := os.Rename(path, dst); err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
-		logx.Warn("quarantining failed path failed", "path", path, "dst", dst, "err", err)
-		return
-	}
-	logPath := dst + ".log"
-	if writeErr := os.WriteFile(logPath, []byte(failure.Error()+"\n"), 0600); writeErr != nil {
-		logx.Warn("writing quarantine log failed", "path", path, "log", logPath, "err", writeErr)
 	}
 
 	key, keyErr := DocumentKey(idx.cfg.WatchDir, path)
 	if keyErr != nil {
-		logx.Warn("removing quarantined document from index failed", "path", path, "err", keyErr)
-	} else if delErr := idx.store.DeleteDocument(ctx, key); delErr != nil {
+		logx.Warn("computing key for quarantine failed", "path", path, "err", keyErr)
+		return
+	}
+
+	if err := idx.quarantine.AddToQuarantine(ctx, key, failure.Error()); err != nil {
+		logx.Warn("adding path to quarantine failed", "path", path, "err", err)
+		return
+	}
+
+	if delErr := idx.store.DeleteDocument(ctx, key); delErr != nil {
 		logx.Warn("removing quarantined document from index failed", "path", path, "err", delErr)
 	}
 
-	logx.Warn("quarantined path", "path", path, "dst", dst, "log", logPath)
+	logx.Warn("quarantined path in skip list", "path", path, "error", failure.Error())
 }
 
 func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (IndexAction, error) {

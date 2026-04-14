@@ -10,6 +10,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/ingest"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/watch"
 )
@@ -44,15 +45,16 @@ func syncRetrySettings() {
 }
 
 type indexer struct {
-	cfg       *config.Config
-	store     index.DocumentWriter
-	hnswStore index.HNSWBuilder
-	embedder  embed.Embedder
-	extractor extract.Extractor
+	cfg        *config.Config
+	store      index.DocumentWriter
+	hnswStore  index.HNSWBuilder
+	embedder   embed.Embedder
+	extractor  extract.Extractor
+	quarantine index.QuarantineRepository
+	dedupStore ingest.ContentDedupStore
 
 	indexState *runtimestate.IndexStateTracker
 
-	// inner holds the real app.Indexer once built.
 	inner *app.Indexer
 }
 
@@ -60,11 +62,13 @@ func (idx *indexer) ensureInner() *app.Indexer {
 	if idx.inner == nil {
 		syncRetrySettings()
 		idx.inner = app.NewIndexer(app.IndexerConfig{
-			Cfg:       idx.cfg,
-			Store:     idx.store,
-			HNSWStore: idx.hnswStore,
-			Embedder:  idx.embedder,
-			Extractor: idx.extractor,
+			Cfg:        idx.cfg,
+			Store:      idx.store,
+			HNSWStore:  idx.hnswStore,
+			Embedder:   idx.embedder,
+			Extractor:  idx.extractor,
+			Quarantine: idx.quarantine,
+			DedupStore: idx.dedupStore,
 		})
 		if idx.indexState != nil {
 			idx.inner.IndexState = idx.indexState

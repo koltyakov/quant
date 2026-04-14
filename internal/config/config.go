@@ -33,6 +33,7 @@ type Config struct {
 	ListenAddr      string    `yaml:"listen"`
 	EmbedURL        string    `yaml:"embed_url"`
 	EmbedModel      string    `yaml:"embed_model"`
+	EmbedProvider   string    `yaml:"embed_provider"`
 	EmbedBatchSize  int       `yaml:"embed_batch_size"`
 	PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
 	ChunkSize       int       `yaml:"chunk_size"`
@@ -366,6 +367,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_EMBED_MODEL"); v != "" {
 		cfg.EmbedModel = v
+	}
+	if v := os.Getenv("QUANT_EMBED_PROVIDER"); v != "" {
+		cfg.EmbedProvider = v
 	}
 	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
 		cfg.PDFOCRLang = v
