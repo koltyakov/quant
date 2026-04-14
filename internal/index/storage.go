@@ -148,6 +148,19 @@ func clearHNSWStateTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		logx.Warn("wal checkpoint before vacuum failed", "err", err)
+	}
+
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return fmt.Errorf("vacuuming database: %w", err)
+	}
+
+	logx.Info("database vacuum completed")
+	return nil
+}
+
 func (s *Store) cleanupOrphanedChunks(ctx context.Context) error {
 	var orphanCount int
 	if err := s.db.QueryRowContext(ctx,

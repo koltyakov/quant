@@ -289,6 +289,12 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		idx.RunHNSWPeriodicFlush(serverCtx, store)
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idx.RunPeriodicVacuum(serverCtx, store)
+	}()
+
 	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
 	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)
 

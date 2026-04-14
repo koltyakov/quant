@@ -502,6 +502,26 @@ type reoptimizeStore interface {
 	BuildHNSW(ctx context.Context) error
 }
 
+func (idx *Indexer) RunPeriodicVacuum(ctx context.Context, store vacuumStore) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := store.Vacuum(ctx); err != nil {
+				logx.Warn("periodic vacuum failed", "err", err)
+			}
+		}
+	}
+}
+
+type vacuumStore interface {
+	Vacuum(ctx context.Context) error
+}
+
 func (idx *Indexer) RunHNSWPeriodicFlush(ctx context.Context, store hnswFlushStore) {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
