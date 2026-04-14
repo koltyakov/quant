@@ -54,6 +54,10 @@ type Config struct {
 	HNSWReoptimizeThreshold float64       `yaml:"-"`
 	ProxyAddr               string        `yaml:"-"`
 	NoLock                  bool          `yaml:"-"`
+	RerankerType            string        `yaml:"-"`
+	RerankerModel           string        `yaml:"-"`
+	SummarizerEnabled       bool          `yaml:"-"`
+	SummarizerModel         string        `yaml:"-"`
 
 	pathMatcher *PathMatcher
 }
@@ -79,6 +83,10 @@ func Default() *Config {
 		HNSWM:                   defaultHNSWM(),
 		HNSWEfSearch:            defaultHNSWEfSearch(),
 		HNSWReoptimizeThreshold: 0.2,
+		RerankerType:            "",
+		RerankerModel:           "",
+		SummarizerEnabled:       false,
+		SummarizerModel:         "",
 	}
 }
 
@@ -261,6 +269,10 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
 	flagSet.IntVar(&cfg.EmbedBatchSize, "embed-batch-size", cfg.EmbedBatchSize, "Number of chunks to embed per batch")
+	flagSet.StringVar(&cfg.RerankerType, "reranker", cfg.RerankerType, "Reranker type: cross-encoder (requires --reranker-model)")
+	flagSet.StringVar(&cfg.RerankerModel, "reranker-model", cfg.RerankerModel, "Model for cross-encoder reranking (e.g. llama3.2)")
+	flagSet.BoolVar(&cfg.SummarizerEnabled, "summarizer", cfg.SummarizerEnabled, "Enable LLM-powered chunk summarization at index time")
+	flagSet.StringVar(&cfg.SummarizerModel, "summarizer-model", cfg.SummarizerModel, "Model for chunk summarization (default: same as embed model)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg

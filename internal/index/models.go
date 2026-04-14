@@ -12,15 +12,24 @@ type Document struct {
 	Hash       string
 	ModifiedAt time.Time
 	IndexedAt  time.Time
+	FileType   string            `json:"file_type"`
+	Language   string            `json:"language"`
+	Title      string            `json:"title"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	Collection string            `json:"collection,omitempty"`
 }
 
 // ChunkRecord represents a chunk of content with its embedding.
 type ChunkRecord struct {
-	ID         int64
-	DocumentID int64
-	Content    string
-	ChunkIndex int
-	Embedding  []byte
+	ID           int64  `json:"id"`
+	DocumentID   int64  `json:"document_id"`
+	Content      string `json:"content"`
+	ChunkIndex   int    `json:"chunk_index"`
+	Embedding    []byte `json:"-"`
+	ParentID     *int64 `json:"parent_id,omitempty"`
+	Depth        int    `json:"depth"`
+	SectionTitle string `json:"section_title,omitempty"`
+	Summary      string `json:"summary,omitempty"`
 }
 
 // EmbeddingMetadata stores information about the embedding model configuration.
@@ -40,12 +49,16 @@ type FTSDiagnostics struct {
 
 // SearchResult represents a search result with scoring information.
 type SearchResult struct {
-	DocumentPath string
-	ChunkContent string
-	ChunkIndex   int
-	Score        float32
-	ScoreKind    string
-	ChunkID      int64
+	DocumentPath  string
+	ChunkContent  string
+	ChunkIndex    int
+	Score         float32
+	ScoreKind     string
+	ChunkID       int64
+	ParentID      *int64 `json:"parent_id,omitempty"`
+	Depth         int    `json:"depth"`
+	SectionTitle  string `json:"section_title,omitempty"`
+	ParentContext string `json:"parent_context,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -97,6 +110,13 @@ type FTSDiagnosticsProvider interface {
 	FTSDiagnostics(ctx context.Context) (FTSDiagnostics, error)
 }
 
+// CollectionRepository provides collection management operations.
+type CollectionRepository interface {
+	ListCollections(ctx context.Context) ([]string, error)
+	CollectionStats(ctx context.Context, collection string) (docCount int, chunkCount int, err error)
+	DeleteCollection(ctx context.Context, collection string) error
+}
+
 // HealthProvider provides health check capabilities.
 type HealthProvider interface {
 	PingContext(ctx context.Context) error
@@ -107,13 +127,22 @@ type HealthProvider interface {
 // -----------------------------------------------------------------------------
 
 // Searcher provides search capabilities over the index.
+type SearchFilter struct {
+	FileTypes  []string
+	Languages  []string
+	Tags       map[string]string
+	Collection string
+}
+
 type Searcher interface {
 	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
+	SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter SearchFilter) ([]SearchResult, error)
 	FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error)
 	ChunkRepository
 	DocumentRepository
 	StatsProvider
 	HealthProvider
+	CollectionRepository
 }
 
 // DocumentWriter provides write operations for documents and chunks.
@@ -133,6 +162,7 @@ type HNSWBuilder interface {
 	BuildHNSW(ctx context.Context) error
 	RemoveBackup()
 	LoadHNSWFromState(ctx context.Context) bool
+	FlushHNSW() error
 }
 
 // Store combines all repository interfaces for a complete index store.

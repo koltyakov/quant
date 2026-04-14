@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/logx"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/testutil"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -77,16 +78,9 @@ func TestHandleSearch_LogsRequestAndSpotlight(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	oldWriter := log.Writer()
-	oldFlags := log.Flags()
-	oldPrefix := log.Prefix()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
+	logx.SetOutput(&buf)
 	t.Cleanup(func() {
-		log.SetOutput(oldWriter)
-		log.SetFlags(oldFlags)
-		log.SetPrefix(oldPrefix)
+		logx.SetOutput(io.Discard)
 	})
 
 	_, err = s.handleSearch(context.Background(), mcplib.CallToolRequest{
@@ -802,16 +796,9 @@ func newTestServer(dir, dbPath string, store *index.Store) *Server {
 
 func suppressLogs(t *testing.T) {
 	t.Helper()
-	oldWriter := log.Writer()
-	oldFlags := log.Flags()
-	oldPrefix := log.Prefix()
-	log.SetOutput(&bytes.Buffer{})
-	log.SetFlags(0)
-	log.SetPrefix("")
+	logx.SetOutput(io.Discard)
 	t.Cleanup(func() {
-		log.SetOutput(oldWriter)
-		log.SetFlags(oldFlags)
-		log.SetPrefix(oldPrefix)
+		logx.SetOutput(io.Discard)
 	})
 }
 

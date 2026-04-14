@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ type Store struct {
 	vectorWeightOverride      float32
 	docEmbeds                 *docEmbeddingIndex
 	reranker                  Reranker
+	colbert                   *ColBERTIndex
 }
 
 const defaultMaxVectorSearchCandidates = 20000
@@ -147,6 +149,9 @@ func openStore(dbPath string) (*Store, error) {
 func (s *Store) Close() error {
 	var err error
 	if s != nil && s.db != nil {
+		if flushErr := s.saveHNSWGraphToFile(); flushErr != nil {
+			logx.Warn("failed to flush hnsw graph on close", "err", flushErr)
+		}
 		if _, checkpointErr := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); checkpointErr != nil {
 			err = errors.Join(err, fmt.Errorf("checkpointing sqlite wal: %w", checkpointErr))
 		}
@@ -256,7 +261,63 @@ func (s *Store) migrate() error {
 	if err := s.migrateHNSWStateColumns(); err != nil {
 		return err
 	}
-	return s.migrateDocEmbeddingColumn()
+	if err := s.migrateDocEmbeddingColumn(); err != nil {
+		return err
+	}
+	if err := s.migrateHierarchicalChunks(); err != nil {
+		return err
+	}
+	if err := s.migrateSummaryColumn(); err != nil {
+		return err
+	}
+	if err := s.migrateDocumentMetadata(); err != nil {
+		return err
+	}
+	if err := s.migrateCollectionColumn(); err != nil {
+		return err
+	}
+	return s.MigrateColBERTColumn()
+}
+
+func (s *Store) migrateCollectionColumn() error {
+	var colCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name='collection'`,
+	).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("checking documents schema for collection column: %w", err)
+	}
+	if colCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN collection TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding documents.collection column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection)`,
+		); err != nil {
+			return fmt.Errorf("creating collection index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateSummaryColumn() error {
+	var colCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='summary'`,
+	).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("checking chunks schema for summary column: %w", err)
+	}
+	if colCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE chunks ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding chunks.summary column: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) migrateHNSWStateColumns() error {
@@ -283,16 +344,26 @@ func (s *Store) migrateHNSWStateColumns() error {
 }
 
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
+	tagsJSON := ""
+	if doc.Tags != nil {
+		tj, _ := json.Marshal(doc.Tags)
+		tagsJSON = string(tj)
+	}
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO documents (path, hash, modified_at, indexed_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_type, language, title, tags, collection)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path) DO UPDATE SET
 			hash = excluded.hash,
 			modified_at = excluded.modified_at,
-			indexed_at = CURRENT_TIMESTAMP
+			indexed_at = CURRENT_TIMESTAMP,
+			file_type = excluded.file_type,
+			language = excluded.language,
+			title = excluded.title,
+			tags = excluded.tags,
+			collection = excluded.collection
 		 RETURNING id`,
-		doc.Path, doc.Hash, doc.ModifiedAt,
+		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upserting document: %w", err)
@@ -302,8 +373,8 @@ func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error
 
 func (s *Store) InsertChunk(ctx context.Context, chunk *ChunkRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?)`,
-		chunk.DocumentID, chunk.Content, chunk.ChunkIndex, chunk.Embedding,
+		`INSERT INTO chunks (document_id, content, chunk_index, embedding, parent_id, depth, section_title, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		chunk.DocumentID, chunk.Content, chunk.ChunkIndex, chunk.Embedding, chunk.ParentID, chunk.Depth, chunk.SectionTitle, chunk.Summary,
 	)
 	return err
 }
@@ -352,7 +423,7 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		dims = meta.Dimensions
 	}
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?) RETURNING id`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO chunks (document_id, content, chunk_index, embedding, parent_id, depth, section_title, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
 	if err != nil {
 		return fmt.Errorf("preparing chunk insert: %w", err)
 	}
@@ -367,7 +438,7 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 	for _, chunk := range chunks {
 		var newID int
 		if err := stmt.QueryRowContext(ctx,
-			docID, chunk.Content, chunk.ChunkIndex, chunk.Embedding,
+			docID, chunk.Content, chunk.ChunkIndex, chunk.Embedding, chunk.ParentID, chunk.Depth, chunk.SectionTitle, chunk.Summary,
 		).Scan(&newID); err != nil {
 			return fmt.Errorf("inserting chunk %d: %w", chunk.ChunkIndex, err)
 		}
@@ -424,7 +495,7 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 // keyed by a compound of content and chunk index. Used for incremental reindex diffing.
 func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[string]ChunkRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.chunk_index, c.content, c.embedding
+		`SELECT c.id, c.chunk_index, c.content, c.embedding, c.parent_id, c.depth, c.section_title
 		 FROM chunks c
 		 JOIN documents d ON c.document_id = d.id
 		 WHERE d.path = ?`,
@@ -438,7 +509,7 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 	result := make(map[string]ChunkRecord)
 	for rows.Next() {
 		var cr ChunkRecord
-		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding); err != nil {
+		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding, &cr.ParentID, &cr.Depth, &cr.SectionTitle); err != nil {
 			return nil, err
 		}
 		key := ChunkDiffKey(cr.Content)
@@ -652,15 +723,19 @@ func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetad
 
 func (s *Store) GetDocumentByPath(ctx context.Context, path string) (*Document, error) {
 	doc := &Document{}
+	var tagsJSON string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, path, hash, modified_at, indexed_at FROM documents WHERE path = ?`,
+		`SELECT id, path, hash, modified_at, indexed_at, file_type, language, title, tags, collection FROM documents WHERE path = ?`,
 		path,
-	).Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt)
+	).Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if tagsJSON != "" && tagsJSON != "{}" {
+		_ = json.Unmarshal([]byte(tagsJSON), &doc.Tags)
 	}
 	return doc, nil
 }
@@ -674,7 +749,7 @@ func (s *Store) ListDocumentsLimit(ctx context.Context, limit int) ([]Document, 
 }
 
 func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error) {
-	query := `SELECT id, path, hash, modified_at, indexed_at FROM documents ORDER BY path`
+	query := `SELECT id, path, hash, modified_at, indexed_at, file_type, language, title, tags, collection FROM documents ORDER BY path`
 	args := []any{}
 	if limit > 0 {
 		query += ` LIMIT ?`
@@ -690,8 +765,12 @@ func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error
 	docs := make([]Document, 0, min(limit, 256))
 	for rows.Next() {
 		var doc Document
-		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt); err != nil {
+		var tagsJSON string
+		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection); err != nil {
 			return nil, err
+		}
+		if tagsJSON != "" && tagsJSON != "{}" {
+			_ = json.Unmarshal([]byte(tagsJSON), &doc.Tags)
 		}
 		docs = append(docs, doc)
 	}
@@ -791,7 +870,185 @@ func (s *Store) StoreContentDedup(ctx context.Context, contentHash string, embed
 	return err
 }
 
+func (s *Store) migrateDocumentMetadata() error {
+	var colCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name='file_type'`,
+	).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("checking documents schema for metadata columns: %w", err)
+	}
+	if colCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN file_type TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding documents.file_type column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN language TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding documents.language column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding documents.title column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding documents.tags column: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) RemoveContentDedup(ctx context.Context, contentHash string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM content_dedup WHERE content_hash = ?`, contentHash)
 	return err
+}
+
+func (s *Store) ListCollections(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT collection FROM documents WHERE collection != '' ORDER BY collection`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var collections []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		collections = append(collections, name)
+	}
+	return collections, rows.Err()
+}
+
+func (s *Store) CollectionStats(ctx context.Context, collection string) (docCount int, chunkCount int, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM documents WHERE collection = ?`, collection,
+	).Scan(&docCount)
+	if err != nil {
+		return 0, 0, err
+	}
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE collection = ?)`, collection,
+	).Scan(&chunkCount)
+	return
+}
+
+func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
+	var hnswDeleteIDs []int
+	if s.hnsw != nil && s.hnsw.ready.Load() {
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.collection = ?`,
+			collection,
+		)
+		if err == nil {
+			for rows.Next() {
+				var id int
+				if rows.Scan(&id) == nil {
+					hnswDeleteIDs = append(hnswDeleteIDs, id)
+				}
+			}
+			_ = rows.Close()
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning delete-collection transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE collection = ?)`, collection,
+	); err != nil {
+		return fmt.Errorf("deleting chunks for collection %s: %w", collection, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM documents WHERE collection = ?`, collection,
+	); err != nil {
+		return fmt.Errorf("deleting collection %s: %w", collection, err)
+	}
+	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing delete-collection transaction: %w", err)
+	}
+
+	if len(hnswDeleteIDs) > 0 {
+		s.hnsw.BatchDelete(hnswDeleteIDs)
+	}
+	return nil
+}
+
+func (s *Store) migrateHierarchicalChunks() error {
+	var colCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='parent_id'`,
+	).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("checking chunks schema for hierarchical columns: %w", err)
+	}
+	if colCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE chunks ADD COLUMN parent_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL`,
+		); err != nil {
+			return fmt.Errorf("adding chunks.parent_id column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE chunks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("adding chunks.depth column: %w", err)
+		}
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE chunks ADD COLUMN section_title TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adding chunks.section_title column: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) GetParentChunk(ctx context.Context, chunkID int64) (*SearchResult, error) {
+	var parentID *int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT parent_id FROM chunks WHERE id = ?`, chunkID,
+	).Scan(&parentID); err != nil {
+		return nil, err
+	}
+	if parentID == nil {
+		return nil, nil
+	}
+	return s.GetChunkByID(ctx, *parentID)
+}
+
+func (s *Store) EnrichWithParentContext(ctx context.Context, results []SearchResult) []SearchResult {
+	needsParent := make(map[int64]int)
+	for i, r := range results {
+		if r.ParentID != nil && r.ParentContext == "" {
+			needsParent[*r.ParentID] = i
+		}
+	}
+	if len(needsParent) == 0 {
+		return results
+	}
+
+	for parentID, resultIdx := range needsParent {
+		parent, err := s.GetChunkByID(ctx, parentID)
+		if err == nil && parent != nil {
+			content := parent.ChunkContent
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			results[resultIdx].ParentContext = content
+		}
+	}
+	return results
 }

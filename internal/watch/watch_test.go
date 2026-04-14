@@ -3,7 +3,7 @@ package watch
 import (
 	"bytes"
 	"errors"
-	"log"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/scan"
 )
 
@@ -226,16 +227,9 @@ func TestWatcher_BackendErrorRequestsResync(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	oldWriter := log.Writer()
-	oldFlags := log.Flags()
-	oldPrefix := log.Prefix()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
+	logx.SetOutput(&buf)
 	t.Cleanup(func() {
-		log.SetOutput(oldWriter)
-		log.SetFlags(oldFlags)
-		log.SetPrefix(oldPrefix)
+		logx.SetOutput(io.Discard)
 	})
 
 	watcher.handleBackendError(errors.New("backend failed"))
@@ -275,16 +269,9 @@ func TestWatcher_DirectoryAddFailureRequestsResync(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	oldWriter := log.Writer()
-	oldFlags := log.Flags()
-	oldPrefix := log.Prefix()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	log.SetPrefix("")
+	logx.SetOutput(&buf)
 	t.Cleanup(func() {
-		log.SetOutput(oldWriter)
-		log.SetFlags(oldFlags)
-		log.SetPrefix(oldPrefix)
+		logx.SetOutput(io.Discard)
 	})
 
 	watcher.handleEvent(fsnotify.Event{Name: subdir, Op: fsnotify.Create})

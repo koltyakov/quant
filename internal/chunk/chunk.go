@@ -17,9 +17,12 @@ func SplitWithPath(text string, path string, chunkSize int, overlapFraction floa
 }
 
 type Chunk struct {
-	Content string
-	Index   int
-	Heading string // most-recent heading active when this chunk was created (may be empty)
+	Content      string
+	Index        int
+	Heading      string
+	ParentIndex  int
+	Depth        int
+	SectionTitle string
 }
 
 func Split(text string, chunkSize int, overlapFraction float64) []Chunk {

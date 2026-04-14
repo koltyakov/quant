@@ -224,6 +224,22 @@ func (s *Store) loadHNSWGraphFromFile() bool {
 	}
 	defer func() { _ = f.Close() }()
 
+	var magic, version uint32
+	if err := binary.Read(f, binary.LittleEndian, &magic); err != nil {
+		return false
+	}
+	if magic != hnswGraphFileMagic {
+		logx.Warn("hnsw graph file has bad magic", "expected", hnswGraphFileMagic, "got", magic)
+		return false
+	}
+	if err := binary.Read(f, binary.LittleEndian, &version); err != nil {
+		return false
+	}
+	if version != hnswGraphFileVersion {
+		logx.Warn("hnsw graph file has incompatible version", "expected", hnswGraphFileVersion, "got", version)
+		return false
+	}
+
 	g := newGraph(s.hnswM, s.hnswEfSearch)
 	if err := g.Import(bufio.NewReader(f)); err != nil {
 		logx.Warn("failed to import hnsw graph file", "path", s.hnswGraphPath, "err", err)
@@ -376,6 +392,10 @@ func (s *Store) HNSWLen() int {
 		return 0
 	}
 	return s.hnsw.Len()
+}
+
+func (s *Store) FlushHNSW() error {
+	return s.saveHNSWGraphToFile()
 }
 
 func decodeEmbeddingForHNSW(data []byte, dims int) []float32 {

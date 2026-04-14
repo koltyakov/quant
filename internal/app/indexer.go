@@ -40,6 +40,7 @@ type IndexerConfig struct {
 	Extractor  extract.Extractor
 	Quarantine index.QuarantineRepository
 	DedupStore ingest.ContentDedupStore
+	Summarizer ingest.ChunkSummarizer
 }
 
 type Indexer struct {
@@ -76,6 +77,7 @@ func NewIndexer(ic IndexerConfig) *Indexer {
 			Overlap:    cfg.ChunkOverlap,
 			BatchSize:  cfg.EmbedBatchSize,
 			DedupStore: ic.DedupStore,
+			Summarizer: ic.Summarizer,
 		},
 		paths:      NewPathSyncTracker(),
 		live:       NewLiveIndexQueue(LiveQueueSizeForWorkers(cfg.IndexWorkers)),
@@ -498,6 +500,35 @@ type reoptimizeStore interface {
 	HNSWReady() bool
 	HNSWReoptimizationNeeded(threshold float64) bool
 	BuildHNSW(ctx context.Context) error
+}
+
+func (idx *Indexer) RunHNSWPeriodicFlush(ctx context.Context, store hnswFlushStore) {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if store.HNSWReady() {
+				if err := store.FlushHNSW(); err != nil {
+					logx.Warn("hnsw final flush failed", "err", err)
+				}
+			}
+			return
+		case <-ticker.C:
+			if !store.HNSWReady() {
+				continue
+			}
+			if err := store.FlushHNSW(); err != nil {
+				logx.Warn("hnsw periodic flush failed", "err", err)
+			}
+		}
+	}
+}
+
+type hnswFlushStore interface {
+	HNSWReady() bool
+	FlushHNSW() error
 }
 
 func (idx *Indexer) setIndexState(state runtimestate.IndexState, message string) {

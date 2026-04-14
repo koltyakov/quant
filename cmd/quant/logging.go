@@ -3,12 +3,12 @@ package main
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/koltyakov/quant/internal/app"
+	"github.com/koltyakov/quant/internal/logx"
 )
 
 const (
@@ -32,13 +32,13 @@ func logPathForDB(dbPath string) string {
 	return app.LogPathForDB(dbPath)
 }
 
-func configureLogging(dbPath string) (io.WriteCloser, error) {
+func configureLogging(dbPath string, watchDir string) (io.WriteCloser, error) {
 	logPath := logPathForDB(dbPath)
 	logWriter, err := newRotatingLogWriter(logPath, logRotateMaxSize, logRotateMaxBackups)
 	if err != nil {
 		return nil, err
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, logWriter))
+	logx.Configure(watchDir, os.Stderr, logWriter)
 	return logWriter, nil
 }
 

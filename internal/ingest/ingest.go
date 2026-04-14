@@ -22,6 +22,16 @@ type Pipeline struct {
 	Overlap    float64
 	BatchSize  int
 	DedupStore ContentDedupStore
+	Summarizer ChunkSummarizer
+}
+
+type ChunkSummarizer interface {
+	SummarizeBatch(ctx context.Context, contents []string) ([]*ChunkSummary, error)
+}
+
+type ChunkSummary struct {
+	Summary string
+	Topics  []string
 }
 
 type PendingEmbed struct {
@@ -115,13 +125,35 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 				result.batchStart, result.batchStart+len(batch)-1, len(result.embeddings), len(batch),
 			)
 		}
+
+		var summaries []*ChunkSummary
+		if p.Summarizer != nil {
+			contents := make([]string, len(batch))
+			for i, c := range batch {
+				contents[i] = c.Content
+			}
+			var sumErr error
+			summaries, sumErr = p.Summarizer.SummarizeBatch(ctx, contents)
+			if sumErr != nil {
+				// Log but don't fail indexing on summary errors
+				summaries = nil
+			}
+		}
+
 		for i, c := range batch {
 			globalIdx := positions[result.batchStart+i].ChunkIdx
 			emb := index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i]))
+			summary := ""
+			if summaries != nil && i < len(summaries) && summaries[i] != nil {
+				summary = summaries[i].Summary
+			}
 			records[globalIdx] = index.ChunkRecord{
-				Content:    c.Content,
-				ChunkIndex: c.Index,
-				Embedding:  emb,
+				Content:      c.Content,
+				ChunkIndex:   c.Index,
+				Embedding:    emb,
+				Depth:        c.Depth,
+				SectionTitle: c.SectionTitle,
+				Summary:      summary,
 			}
 			if p.DedupStore != nil {
 				key := index.ChunkDiffKey(c.Content)

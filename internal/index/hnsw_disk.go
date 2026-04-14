@@ -1,7 +1,9 @@
 package index
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/coder/hnsw"
@@ -9,10 +11,12 @@ import (
 )
 
 type DiskBackedHNSW struct {
-	inner       *hnswIndex
-	graphPath   string
-	flushThresh int
-	pendingAdds int64
+	inner        *hnswIndex
+	graphPath    string
+	flushThresh  int
+	pendingAdds  int64
+	hnswM        int
+	hnswEfSearch int
 }
 
 func NewDiskBackedHNSW(graphPath string, m, efSearch, flushThreshold int) *DiskBackedHNSW {
@@ -20,9 +24,11 @@ func NewDiskBackedHNSW(graphPath string, m, efSearch, flushThreshold int) *DiskB
 		flushThreshold = 5000
 	}
 	return &DiskBackedHNSW{
-		inner:       newHNSWIndex(),
-		graphPath:   graphPath,
-		flushThresh: flushThreshold,
+		inner:        newHNSWIndex(),
+		graphPath:    graphPath,
+		flushThresh:  flushThreshold,
+		hnswM:        m,
+		hnswEfSearch: efSearch,
 	}
 }
 
@@ -120,6 +126,24 @@ func (d *DiskBackedHNSW) LoadFromDisk(ctx context.Context) error {
 		return nil
 	}
 
+	f, err := os.Open(d.graphPath)
+	if err != nil {
+		return fmt.Errorf("opening hnsw graph file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	g := newGraph(d.hnswM, d.hnswEfSearch)
+	if err := g.Import(bufio.NewReader(f)); err != nil {
+		return fmt.Errorf("importing hnsw graph: %w", err)
+	}
+
+	d.inner.mu.Lock()
+	d.inner.graph = g
+	d.inner.mu.Unlock()
+	d.inner.ready.Store(true)
+	d.inner.resetMods()
+	d.pendingAdds = 0
+	logx.Info("disk-backed hnsw graph loaded from file", "path", d.graphPath, "nodes", g.Len())
 	return nil
 }
 

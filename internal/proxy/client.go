@@ -60,6 +60,10 @@ func (c *Client) Search(ctx context.Context, query string, queryEmbedding []floa
 	return resp.Results, nil
 }
 
+func (c *Client) SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter index.SearchFilter) ([]index.SearchResult, error) {
+	return c.Search(ctx, query, queryEmbedding, limit, pathPrefix)
+}
+
 func (c *Client) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]index.SearchResult, error) {
 	body := FindSimilarRequest{ChunkID: chunkID, Limit: limit}
 	var resp FindSimilarResponse
@@ -108,6 +112,18 @@ func (c *Client) Stats(ctx context.Context) (int, int, error) {
 		return 0, 0, err
 	}
 	return resp.DocCount, resp.ChunkCount, nil
+}
+
+func (c *Client) ListCollections(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (c *Client) CollectionStats(_ context.Context, _ string) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (c *Client) DeleteCollection(_ context.Context, _ string) error {
+	return fmt.Errorf("collections not available in proxy mode")
 }
 
 func (c *Client) PingContext(ctx context.Context) error {

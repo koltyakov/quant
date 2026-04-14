@@ -30,6 +30,12 @@ func (s *Server) registerTools() {
 		mcplib.WithString("path",
 			mcplib.Description("Filter results to documents whose path starts with this prefix"),
 		),
+		mcplib.WithString("file_type",
+			mcplib.Description("Filter by file type (e.g. pdf, go, python, markdown)"),
+		),
+		mcplib.WithString("language",
+			mcplib.Description("Filter by programming language (e.g. go, python, javascript)"),
+		),
 	), s.handleSearch)
 
 	s.mcp.AddTool(mcplib.NewTool("list_sources",
@@ -53,6 +59,40 @@ func (s *Server) registerTools() {
 			mcplib.Description("Maximum number of results (default: 5)"),
 		),
 	), s.handleFindSimilar)
+
+	s.mcp.AddTool(mcplib.NewTool("list_collections",
+		mcplib.WithDescription("List all named collections in the index with their document and chunk counts"),
+	), s.handleListCollections)
+
+	s.mcp.AddTool(mcplib.NewTool("delete_collection",
+		mcplib.WithDescription("Delete all documents and chunks in a named collection"),
+		mcplib.WithString("collection",
+			mcplib.Required(),
+			mcplib.Description("Name of the collection to delete"),
+		),
+	), s.handleDeleteCollection)
+
+	s.mcp.AddTool(mcplib.NewTool("drill_down",
+		mcplib.WithDescription("Drill into a topic by finding related chunks that expand on a seed chunk from a previous search result"),
+		mcplib.WithNumber("chunk_id",
+			mcplib.Required(),
+			mcplib.Description("The chunk ID to use as a seed for drilling deeper"),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Maximum number of results (default: 10)"),
+		),
+	), s.handleDrillDown)
+
+	s.mcp.AddTool(mcplib.NewTool("summarize_matches",
+		mcplib.WithDescription("Summarize all matching documents for a query, returning a concise overview of what the index contains on a topic"),
+		mcplib.WithString("query",
+			mcplib.Required(),
+			mcplib.Description("The topic or query to summarize across the index"),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Maximum number of source documents to consider (default: 20)"),
+		),
+	), s.handleSummarizeMatches)
 }
 
 // maxQueryLength is the maximum number of characters accepted in a search query.
@@ -79,12 +119,16 @@ type searchToolResponse struct {
 }
 
 type searchToolResultRow struct {
-	ChunkID      int64   `json:"chunk_id"`
-	Path         string  `json:"path"`
-	ChunkIndex   int     `json:"chunk_index"`
-	Score        float32 `json:"score"`
-	ScoreKind    string  `json:"score_kind"`
-	ChunkContent string  `json:"chunk_content"`
+	ChunkID       int64   `json:"chunk_id"`
+	Path          string  `json:"path"`
+	ChunkIndex    int     `json:"chunk_index"`
+	Score         float32 `json:"score"`
+	ScoreKind     string  `json:"score_kind"`
+	ChunkContent  string  `json:"chunk_content"`
+	ParentID      *int64  `json:"parent_id,omitempty"`
+	Depth         int     `json:"depth"`
+	SectionTitle  string  `json:"section_title,omitempty"`
+	ParentContext string  `json:"parent_context,omitempty"`
 }
 
 type listSourcesToolResponse struct {
@@ -167,18 +211,40 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		pathPrefix = normalizedPath
 	}
 
+	var filter index.SearchFilter
+	if v, ok := args["file_type"].(string); ok && v != "" {
+		filter.FileTypes = []string{v}
+	}
+	if v, ok := args["language"].(string); ok && v != "" {
+		filter.Languages = []string{v}
+	}
+
 	startedAt := time.Now()
-	logx.Info("MCP search request", "query", summarizeLogText(query, 120), "limit", limit, "threshold", threshold, "path", pathPrefix)
+	logx.Info("MCP search request", "query", summarizeLogText(query, 120), "limit", limit, "threshold", threshold, "path", pathPrefix, "filter", filter)
 
 	queryEmbedding, embedErr := s.cachedEmbed(ctx, query)
 	if embedErr != nil {
 		logx.Warn("MCP search embedding failed; falling back to keyword-only", "query", summarizeLogText(query, 120), "err", embedErr, "duration", time.Since(startedAt).Round(time.Millisecond))
 	}
 
-	results, err := s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
+	var results []index.SearchResult
+	var err error
+	if filtered, ok := s.store.(interface {
+		SearchFiltered(context.Context, string, []float32, int, string, index.SearchFilter) ([]index.SearchResult, error)
+	}); ok && (len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0) {
+		results, err = filtered.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, filter)
+	} else {
+		results, err = s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
+	}
 	if err != nil {
 		logx.Error("MCP search error", "query", summarizeLogText(query, 120), "stage", "search", "path", pathPrefix, "err", err, "duration", time.Since(startedAt).Round(time.Millisecond))
 		return nil, fmt.Errorf("searching: %w", err)
+	}
+
+	if enricher, ok := s.store.(interface {
+		EnrichWithParentContext(context.Context, []index.SearchResult) []index.SearchResult
+	}); ok && len(results) > 0 {
+		results = enricher.EnrichWithParentContext(ctx, results)
 	}
 
 	var filtered []index.SearchResult
@@ -431,11 +497,219 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 	return mcplib.NewToolResultStructured(structured, output), nil
 }
 
+type collectionInfo struct {
+	Name      string `json:"name"`
+	Documents int    `json:"documents"`
+	Chunks    int    `json:"chunks"`
+}
+
+type listCollectionsResponse struct {
+	Collections []collectionInfo `json:"collections"`
+}
+
+func (s *Server) handleListCollections(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	collections, err := s.store.ListCollections(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing collections: %w", err)
+	}
+
+	infos := make([]collectionInfo, 0, len(collections))
+	var output strings.Builder
+	output.WriteString("Collections:\n")
+
+	for _, name := range collections {
+		docs, chunks, _ := s.store.CollectionStats(ctx, name)
+		infos = append(infos, collectionInfo{Name: name, Documents: docs, Chunks: chunks})
+		fmt.Fprintf(&output, "  %s (%d docs, %d chunks)\n", name, docs, chunks)
+	}
+
+	if len(collections) == 0 {
+		output.WriteString("  (none)\n")
+	}
+
+	structured := listCollectionsResponse{Collections: infos}
+	return mcplib.NewToolResultStructured(structured, output.String()), nil
+}
+
+func (s *Server) handleDeleteCollection(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	args := request.GetArguments()
+	collection, ok := args["collection"].(string)
+	if !ok || collection == "" {
+		return nil, fmt.Errorf("collection is required")
+	}
+
+	if err := s.store.DeleteCollection(ctx, collection); err != nil {
+		return nil, fmt.Errorf("deleting collection: %w", err)
+	}
+
+	output := fmt.Sprintf("Collection %q deleted.", collection)
+	return mcplib.NewToolResultStructured(map[string]string{"collection": collection, "status": "deleted"}, output), nil
+}
+
 func embeddingStatus(err error) string {
 	if err != nil {
 		return "keyword_only"
 	}
 	return "hybrid"
+}
+
+type drillDownResponse struct {
+	SeedChunkID int64                 `json:"seed_chunk_id"`
+	Results     []searchToolResultRow `json:"results"`
+}
+
+func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	args := request.GetArguments()
+	chunkID, ok := args["chunk_id"].(float64)
+	if !ok {
+		return nil, fmt.Errorf("chunk_id is required")
+	}
+	if math.IsNaN(chunkID) || math.IsInf(chunkID, 0) || chunkID <= 0 {
+		return nil, fmt.Errorf("chunk_id must be a positive number")
+	}
+
+	limit := 10
+	if v, ok := args["limit"].(float64); ok {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
+			limit = int(v)
+			if limit > 50 {
+				limit = 50
+			}
+		}
+	}
+
+	source, err := s.store.GetChunkByID(ctx, int64(chunkID))
+	if err != nil {
+		return nil, fmt.Errorf("chunk %d not found: %w", int64(chunkID), err)
+	}
+
+	results, err := s.store.FindSimilar(ctx, int64(chunkID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("finding related chunks: %w", err)
+	}
+
+	seen := map[string]bool{source.DocumentPath: true}
+	var diverse []index.SearchResult
+	for _, r := range results {
+		if !seen[r.DocumentPath] || len(diverse) < limit/2 {
+			diverse = append(diverse, r)
+			seen[r.DocumentPath] = true
+		}
+	}
+	if len(diverse) == 0 {
+		diverse = results
+	}
+
+	output := fmt.Sprintf("Drill-down from chunk %d (%s):\n\n", int64(chunkID), source.DocumentPath)
+	output += formatSearchResults(diverse)
+
+	structured := drillDownResponse{
+		SeedChunkID: int64(chunkID),
+		Results:     searchRows(diverse),
+	}
+	return mcplib.NewToolResultStructured(structured, output), nil
+}
+
+type summarizeMatchesResponse struct {
+	Query         string   `json:"query"`
+	DocumentCount int      `json:"document_count"`
+	Documents     []string `json:"documents"`
+	Overview      string   `json:"overview"`
+}
+
+func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	args := request.GetArguments()
+	query, ok := args["query"].(string)
+	if !ok || query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	query = strings.TrimSpace(query)
+	if len([]rune(query)) > maxQueryLength {
+		query = string([]rune(query)[:maxQueryLength])
+	}
+
+	limit := 20
+	if v, ok := args["limit"].(float64); ok {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
+			limit = int(v)
+			if limit > 50 {
+				limit = 50
+			}
+		}
+	}
+
+	queryEmbedding, embedErr := s.cachedEmbed(ctx, query)
+	if embedErr != nil {
+		logx.Warn("summarize_matches embedding failed", "err", embedErr)
+	}
+
+	results, err := s.store.Search(ctx, query, queryEmbedding, limit, "")
+	if err != nil {
+		return nil, fmt.Errorf("searching: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var uniqueDocs []string
+	for _, r := range results {
+		if !seen[r.DocumentPath] {
+			seen[r.DocumentPath] = true
+			uniqueDocs = append(uniqueDocs, r.DocumentPath)
+		}
+	}
+
+	var overview strings.Builder
+	fmt.Fprintf(&overview, "Found %d matching chunks across %d documents for query: %q\n\n",
+		len(results), len(uniqueDocs), query)
+
+	if len(uniqueDocs) > 0 {
+		overview.WriteString("Matching documents:\n")
+		for _, doc := range uniqueDocs {
+			fmt.Fprintf(&overview, "  - %s\n", doc)
+		}
+		overview.WriteString("\n")
+	}
+
+	if len(results) > 0 {
+		overview.WriteString("Key excerpts:\n")
+		for i, r := range results {
+			if i >= 5 {
+				break
+			}
+			snippet := strings.TrimSpace(r.ChunkContent)
+			if len([]rune(snippet)) > 200 {
+				snippet = string([]rune(snippet)[:200]) + "..."
+			}
+			fmt.Fprintf(&overview, "  [%s] %s\n", r.DocumentPath, snippet)
+		}
+	}
+
+	structured := summarizeMatchesResponse{
+		Query:         query,
+		DocumentCount: len(uniqueDocs),
+		Documents:     uniqueDocs,
+		Overview:      overview.String(),
+	}
+	return mcplib.NewToolResultStructured(structured, overview.String()), nil
 }
 
 func embeddingNote(err error) string {
@@ -455,12 +729,16 @@ func searchRows(results []index.SearchResult) []searchToolResultRow {
 
 func searchRow(result index.SearchResult) searchToolResultRow {
 	return searchToolResultRow{
-		ChunkID:      result.ChunkID,
-		Path:         result.DocumentPath,
-		ChunkIndex:   result.ChunkIndex,
-		Score:        result.Score,
-		ScoreKind:    result.ScoreKind,
-		ChunkContent: result.ChunkContent,
+		ChunkID:       result.ChunkID,
+		Path:          result.DocumentPath,
+		ChunkIndex:    result.ChunkIndex,
+		Score:         result.Score,
+		ScoreKind:     result.ScoreKind,
+		ChunkContent:  result.ChunkContent,
+		ParentID:      result.ParentID,
+		Depth:         result.Depth,
+		SectionTitle:  result.SectionTitle,
+		ParentContext: result.ParentContext,
 	}
 }
 

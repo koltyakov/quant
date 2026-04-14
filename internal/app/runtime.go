@@ -146,6 +146,17 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		store.SetWeightOverrides(float32(cfg.KeywordWeight), float32(cfg.VectorWeight))
 	}
 
+	if cfg.RerankerType == "cross-encoder" && cfg.RerankerModel != "" {
+		reranker := index.NewCrossEncoderReranker(index.CrossEncoderConfig{
+			BaseURL:     cfg.EmbedURL,
+			Model:       cfg.RerankerModel,
+			TopK:        20,
+			ScoreWeight: 0.5,
+		})
+		store.SetReranker(reranker)
+		logx.Info("cross-encoder reranker enabled", "model", cfg.RerankerModel)
+	}
+
 	rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
 		Model:      cfg.EmbedModel,
 		Dimensions: embedder.Dimensions(),
@@ -167,6 +178,19 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		Quarantine: store,
 		DedupStore: store,
 	})
+
+	if cfg.SummarizerEnabled {
+		summModel := cfg.SummarizerModel
+		if summModel == "" {
+			summModel = cfg.EmbedModel
+		}
+		summarizer := index.NewChunkSummarizer(index.SummarizerConfig{
+			BaseURL: cfg.EmbedURL,
+			Model:   summModel,
+		})
+		idx.pipeline.Summarizer = newSummarizerAdapter(summarizer)
+		logx.Info("chunk summarizer enabled", "model", summModel)
+	}
 
 	proxyServer := proxy.NewServer(store, idx.IndexState)
 	proxyAddr, err := proxyServer.Start(ctx)
@@ -226,6 +250,12 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 			idx.RunHNSWReoptimizer(serverCtx, store, cfg.HNSWReoptimizeThreshold)
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idx.RunHNSWPeriodicFlush(serverCtx, store)
+	}()
 
 	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
 	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)

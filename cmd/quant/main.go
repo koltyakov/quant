@@ -15,7 +15,7 @@ func main() {
 }
 
 func runMCP(cfg *config.Config) error {
-	logFile, err := configureLogging(cfg.DBPath)
+	logFile, err := configureLogging(cfg.DBPath, cfg.WatchDir)
 	if err != nil {
 		return err
 	}
