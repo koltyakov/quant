@@ -77,6 +77,10 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 	if len(toEmbed) == 0 {
 		return nil
 	}
+	if p.Embedder == nil {
+		// No embedding backend available; chunks are stored keyword-searchable only.
+		return nil
+	}
 
 	batchSize := p.BatchSize
 	if batchSize < 1 {

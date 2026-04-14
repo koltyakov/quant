@@ -144,16 +144,17 @@ type listSourcesResultRow struct {
 }
 
 type indexStatusToolResponse struct {
-	Documents      int                   `json:"documents"`
-	Chunks         int                   `json:"chunks"`
-	DBSizeBytes    int64                 `json:"db_size_bytes"`
-	DBSize         string                `json:"db_size"`
-	WatchDir       string                `json:"watch_dir"`
-	Model          string                `json:"model"`
-	FTS            *index.FTSDiagnostics `json:"fts,omitempty"`
-	State          string                `json:"state,omitempty"`
-	StateMessage   string                `json:"state_message,omitempty"`
-	StateUpdatedAt time.Time             `json:"state_updated_at,omitempty"`
+	Documents       int                   `json:"documents"`
+	Chunks          int                   `json:"chunks"`
+	DBSizeBytes     int64                 `json:"db_size_bytes"`
+	DBSize          string                `json:"db_size"`
+	WatchDir        string                `json:"watch_dir"`
+	Model           string                `json:"model"`
+	EmbeddingStatus string                `json:"embedding_status"`
+	FTS             *index.FTSDiagnostics `json:"fts,omitempty"`
+	State           string                `json:"state,omitempty"`
+	StateMessage    string                `json:"state_message,omitempty"`
+	StateUpdatedAt  time.Time             `json:"state_updated_at,omitempty"`
 }
 
 type findSimilarToolResponse struct {
@@ -387,13 +388,18 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	}
 
 	dbSize := sqliteDiskUsage(s.cfg.DBPath)
+	embedStatus := "available"
+	if s.embedder == nil {
+		embedStatus = "unavailable (keyword-only mode) — start Ollama with: ollama serve"
+	}
 	structured := indexStatusToolResponse{
-		Documents:   docCount,
-		Chunks:      chunkCount,
-		DBSizeBytes: dbSize,
-		DBSize:      formatBytes(dbSize),
-		WatchDir:    s.cfg.WatchDir,
-		Model:       s.cfg.EmbedModel,
+		Documents:       docCount,
+		Chunks:          chunkCount,
+		DBSizeBytes:     dbSize,
+		DBSize:          formatBytes(dbSize),
+		WatchDir:        s.cfg.WatchDir,
+		Model:           s.cfg.EmbedModel,
+		EmbeddingStatus: embedStatus,
 	}
 	if provider, ok := s.store.(index.FTSDiagnosticsProvider); ok {
 		diag, diagErr := provider.FTSDiagnostics(ctx)
@@ -411,8 +417,8 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	}
 
 	output := fmt.Sprintf(
-		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s",
-		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel,
+		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s\n  Embedding: %s",
+		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel, embedStatus,
 	)
 	if structured.FTS != nil {
 		output += fmt.Sprintf(

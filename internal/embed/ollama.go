@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,6 +34,9 @@ type ollamaEmbedResponse struct {
 }
 
 var ErrPermanent = errors.New("embed: permanent error")
+
+// ErrOllamaUnavailable is returned when the Ollama server cannot be reached.
+var ErrOllamaUnavailable = errors.New("embed: ollama server not reachable")
 
 const MaxInputRunes = 4000
 const minReducedInputRunes = 64
@@ -111,12 +115,18 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 	//nolint:gosec // Ollama endpoint is validated to an absolute http(s) URL before use.
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
+		if isOllamaConnectionError(err) {
+			return nil, fmt.Errorf("%w at %s — is Ollama running? Start it with: ollama serve", ErrOllamaUnavailable, o.baseURL)
+		}
 		return nil, fmt.Errorf("sending request to ollama: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: model %q not found on Ollama — pull it with: ollama pull %s", ErrPermanent, o.model, o.model)
+		}
 		if resp.StatusCode == http.StatusBadRequest && shouldReduceInput(body) {
 			// Batch splitting is structural recovery, not a transient retry. Keep the
 			// retry budget available for server errors and singleton shrink attempts.
@@ -218,6 +228,17 @@ func ollamaEmbedURL(raw string) (string, error) {
 	embedURL.RawPath = ""
 	embedURL.Fragment = ""
 	return embedURL.String(), nil
+}
+
+// isOllamaConnectionError reports whether err indicates that the Ollama server
+// could not be reached at all (dial failure or DNS resolution failure).
+func isOllamaConnectionError(err error) bool {
+	var netErr *net.OpError
+	if errors.As(err, &netErr) && netErr.Op == "dial" {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
 }
 
 func ollamaStatusError(statusCode int, body []byte) error {

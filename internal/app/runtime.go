@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -111,23 +114,38 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	}
 
 	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
-	if err != nil {
-		return fmt.Errorf("error connecting to embedding backend: %w", err)
-	}
-	defer func() {
-		if err := rawEmbedder.Close(); err != nil {
-			logx.Error("closing embedder failed", "err", err)
+	if err != nil && errors.Is(err, embed.ErrOllamaUnavailable) && isLocalURL(cfg.EmbedURL) {
+		if ollamaPath, lookErr := exec.LookPath("ollama"); lookErr == nil {
+			logx.Info("Ollama not running; attempting to start it automatically", "binary", ollamaPath)
+			if startErr := autoStartOllama(ctx); startErr != nil {
+				logx.Warn("auto-start Ollama failed", "err", startErr)
+			} else {
+				rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+			}
 		}
-	}()
+	}
+	if err != nil {
+		if !errors.Is(err, embed.ErrOllamaUnavailable) {
+			return fmt.Errorf("error connecting to embedding backend: %w", err)
+		}
+		logx.Warn("embedding backend unavailable; MCP will start in keyword-only mode — run 'ollama serve' to enable vector search", "err", err)
+	}
 
-	logx.Info("connected to embedding backend", "provider", cfg.EmbedProvider, "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
-
-	embedder := embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
-		CacheSize:           128,
-		CircuitFailureLimit: 5,
-		CircuitResetTimeout: 30 * time.Second,
-		NormalizeFunc:       index.NormalizeFloat32,
-	})
+	var embedder embed.Embedder
+	if rawEmbedder != nil {
+		defer func() {
+			if err := rawEmbedder.Close(); err != nil {
+				logx.Error("closing embedder failed", "err", err)
+			}
+		}()
+		logx.Info("connected to embedding backend", "provider", cfg.EmbedProvider, "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
+		embedder = embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
+			CacheSize:           128,
+			CircuitFailureLimit: 5,
+			CircuitResetTimeout: 30 * time.Second,
+			NormalizeFunc:       index.NormalizeFloat32,
+		})
+	}
 
 	store, err := index.NewStore(cfg.DBPath)
 	if err != nil {
@@ -157,16 +175,18 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		logx.Info("cross-encoder reranker enabled", "model", cfg.RerankerModel)
 	}
 
-	rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
-		Model:      cfg.EmbedModel,
-		Dimensions: embedder.Dimensions(),
-		Normalized: true,
-	})
-	if err != nil {
-		return fmt.Errorf("error configuring embedding metadata: %w", err)
-	}
-	if rebuild {
-		logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
+	if rawEmbedder != nil {
+		rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
+			Model:      cfg.EmbedModel,
+			Dimensions: rawEmbedder.Dimensions(),
+			Normalized: true,
+		})
+		if err != nil {
+			return fmt.Errorf("error configuring embedding metadata: %w", err)
+		}
+		if rebuild {
+			logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
+		}
 	}
 
 	idx := NewIndexer(IndexerConfig{
@@ -335,6 +355,58 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	if promoted.Load() {
 		return ErrRestartRequired
 	}
+	return nil
+}
+
+// isLocalURL reports whether rawURL targets a loopback address (localhost or 127.x or ::1).
+// Used to decide whether auto-starting a local Ollama instance makes sense.
+func isLocalURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// autoStartOllama runs "ollama serve" in the background and waits up to ~7 s for
+// the process to become reachable. The subprocess is intentionally not tracked —
+// it continues running after the caller exits, just like a user-launched instance.
+func autoStartOllama(ctx context.Context) error {
+	cmd := exec.Command("ollama", "serve") //nolint:gosec
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	detachProcess(cmd) // own process group — survives Ctrl+C on the quant terminal
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("launching ollama serve: %w", err)
+	}
+
+	// Poll until the process answers or the budget expires.
+	for range 5 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
+		// A HEAD request to /api/tags is the lightest possible liveness check.
+		if err := ollamaLive(ctx, "http://localhost:11434"); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("ollama did not become ready after 7.5 s")
+}
+
+func ollamaLive(ctx context.Context, baseURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
 	return nil
 }
 
