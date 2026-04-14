@@ -38,6 +38,9 @@ var ErrPermanent = errors.New("embed: permanent error")
 // ErrOllamaUnavailable is returned when the Ollama server cannot be reached.
 var ErrOllamaUnavailable = errors.New("embed: ollama server not reachable")
 
+// ErrModelNotFound is returned when the requested model is not present on the Ollama server.
+var ErrModelNotFound = errors.New("embed: model not found")
+
 const MaxInputRunes = 4000
 const minReducedInputRunes = 64
 
@@ -125,7 +128,7 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("%w: model %q not found on Ollama — pull it with: ollama pull %s", ErrPermanent, o.model, o.model)
+			return nil, fmt.Errorf("%w: %w: model %q not found on Ollama — pull it with: ollama pull %s", ErrPermanent, ErrModelNotFound, o.model, o.model)
 		}
 		if resp.StatusCode == http.StatusBadRequest && shouldReduceInput(body) {
 			// Batch splitting is structural recovery, not a transient retry. Keep the

@@ -114,18 +114,30 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	}
 
 	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
-	if err != nil && errors.Is(err, embed.ErrOllamaUnavailable) && isLocalURL(cfg.EmbedURL) {
+	if err != nil && isLocalURL(cfg.EmbedURL) {
 		if ollamaPath, lookErr := exec.LookPath("ollama"); lookErr == nil {
-			logx.Info("Ollama not running; attempting to start it automatically", "binary", ollamaPath)
-			if startErr := autoStartOllama(ctx); startErr != nil {
-				logx.Warn("auto-start Ollama failed", "err", startErr)
-			} else {
-				rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+			// Step 1: start Ollama if it isn't running.
+			if errors.Is(err, embed.ErrOllamaUnavailable) {
+				logx.Info("Ollama not running; attempting to start it automatically", "binary", ollamaPath)
+				if startErr := autoStartOllama(ctx); startErr != nil {
+					logx.Warn("auto-start Ollama failed", "err", startErr)
+				} else {
+					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+				}
+			}
+			// Step 2: pull the model if Ollama is running but the model isn't present.
+			if errors.Is(err, embed.ErrModelNotFound) {
+				logx.Info("embedding model not found; pulling from Ollama (this may take a while)", "model", cfg.EmbedModel)
+				if pullErr := pullOllamaModel(ctx, cfg.EmbedModel); pullErr != nil {
+					logx.Warn("auto-pull model failed", "model", cfg.EmbedModel, "err", pullErr)
+				} else {
+					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+				}
 			}
 		}
 	}
 	if err != nil {
-		if !errors.Is(err, embed.ErrOllamaUnavailable) {
+		if !errors.Is(err, embed.ErrOllamaUnavailable) && !errors.Is(err, embed.ErrModelNotFound) {
 			return fmt.Errorf("error connecting to embedding backend: %w", err)
 		}
 		logx.Warn("embedding backend unavailable; MCP will start in keyword-only mode — run 'ollama serve' to enable vector search", "err", err)
@@ -394,6 +406,18 @@ func autoStartOllama(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("ollama did not become ready after 7.5 s")
+}
+
+// pullOllamaModel runs "ollama pull <model>" to completion, streaming its
+// progress output to stderr so the user can follow the download.
+func pullOllamaModel(ctx context.Context, model string) error {
+	cmd := exec.CommandContext(ctx, "ollama", "pull", model) //nolint:gosec
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ollama pull %s: %w", model, err)
+	}
+	return nil
 }
 
 func ollamaLive(ctx context.Context, baseURL string) error {
