@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.9.0 (2026-04-13)
+
+### Features
+
+- **Ollama auto-start and auto-pull** - When the embedding backend is unavailable at startup, `quant` automatically starts Ollama (`ollama serve`) if it is installed locally and the embed URL points to localhost, then pulls the configured model if it is missing. Both recovery steps happen before the MCP server opens, so clients connect to a fully operational server without manual setup.
+- **Keyword-only degraded mode** - If embedding recovery fails (Ollama not installed, remote URL unreachable, or network error), `quant` starts without an embedding backend. The MCP server is fully operational; search falls back to FTS5 keyword results and `index_status` reports the embedding status and the fix needed.
+- **OpenAI-compatible embedding provider** - A new `openai` provider supports any API that follows the OpenAI embeddings contract. Select it via `--embed-provider openai` (or `QUANT_EMBED_PROVIDER=openai`); auto-detected when `embed_url` contains `openai.com`.
+- **Embedding API key support** - New `--embed-api-key` flag and `QUANT_EMBED_API_KEY` environment variable pass a Bearer token to the embedding backend, enabling authenticated providers such as OpenAI.
+- **`drill_down` MCP tool** - Explores a topic by finding diverse chunks related to a seed chunk, spreading results across different source files rather than staying within one document.
+- **`summarize_matches` MCP tool** - Returns a high-level overview of which documents match a query and what they contain, without returning individual chunks.
+- **`list_collections` and `delete_collection` MCP tools** - List named collections with document and chunk counts; delete all content in a named collection.
+- **Embedding status in `index_status`** - The `index_status` tool now reports whether the embedding backend is available or the server is running in keyword-only mode.
+- **Chunk summarization** - New `--summarizer` flag enables LLM-powered summarization of indexed chunks at ingest time. The summarization model is configurable via `--summarizer-model`.
+- **Cross-encoder reranking** - New `--reranker cross-encoder` flag adds a cross-encoder reranking pass after hybrid retrieval. The reranker model is configurable via `--reranker-model`.
+
+### Improvements
+
+- **Actionable Ollama error messages** - Connection errors and 404 model-not-found responses now carry human-readable messages with the exact `ollama serve` / `ollama pull` commands to run.
+- **Ollama process isolation** - When `quant` starts Ollama automatically, the child process is placed in its own process group (`Setpgid: true` on Linux/macOS) so Ctrl+C in the terminal does not kill Ollama along with `quant`.
+
 ## v0.8.0 (2026-04-12)
 
 ### Features
