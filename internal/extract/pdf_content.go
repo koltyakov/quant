@@ -99,12 +99,12 @@ type pdfContentParser struct {
 	unread []any
 }
 
-func extractPDFPlainText(page pdf.Page) (string, error) {
-	if !needsSafePDFTextExtraction(page.V.Key("Contents")) {
+func extractPDFPlainText(ctx context.Context, page pdf.Page) (string, error) {
+	if !needsSafePDFTextExtraction(ctx, page.V.Key("Contents")) {
 		return page.GetPlainText(nil)
 	}
 
-	content, err := readPDFPageContent(page.V.Key("Contents"))
+	content, err := readPDFPageContent(ctx, page.V.Key("Contents"))
 	if err != nil {
 		return "", err
 	}
@@ -126,13 +126,11 @@ func extractPDFPlainText(page pdf.Page) (string, error) {
 	}
 	showEncodedText := func(s string) {
 		for _, ch := range enc.Decode(s) {
-			if _, err := textBuilder.WriteRune(ch); err != nil {
-				panic(err)
-			}
+			textBuilder.WriteRune(ch)
 		}
 	}
 
-	if err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+	if err := interpretPDFContent(content, func(stk *pdfContentStack, op string) error {
 		n := stk.Len()
 		args := make([]pdfContentValue, n)
 		for i := n - 1; i >= 0; i-- {
@@ -141,14 +139,14 @@ func extractPDFPlainText(page pdf.Page) (string, error) {
 
 		switch op {
 		default:
-			return
+			return nil
 		case "BT":
 			showText("\n")
 		case "T*":
 			showEncodedText("\n")
 		case "Tf":
 			if len(args) != 2 {
-				panic("bad Tf")
+				return fmt.Errorf("bad Tf operator: expected 2 args, got %d", len(args))
 			}
 			if font, ok := fonts[args[0].Name()]; ok {
 				enc = font.Encoder()
@@ -157,22 +155,22 @@ func extractPDFPlainText(page pdf.Page) (string, error) {
 			}
 		case "\"":
 			if len(args) != 3 {
-				panic("bad \" operator")
+				return fmt.Errorf("bad \" operator: expected 3 args, got %d", len(args))
 			}
 			showEncodedText(args[2].RawString())
 		case "'":
 			if len(args) != 1 {
-				panic("bad ' operator")
+				return fmt.Errorf("bad ' operator: expected 1 arg, got %d", len(args))
 			}
 			showEncodedText(args[0].RawString())
 		case "Tj":
 			if len(args) != 1 {
-				panic("bad Tj operator")
+				return fmt.Errorf("bad Tj operator: expected 1 arg, got %d", len(args))
 			}
 			showEncodedText(args[0].RawString())
 		case "TJ":
 			if len(args) != 1 {
-				panic("bad TJ operator")
+				return fmt.Errorf("bad TJ operator: expected 1 arg, got %d", len(args))
 			}
 			v := args[0]
 			for i := 0; i < v.Len(); i++ {
@@ -182,6 +180,7 @@ func extractPDFPlainText(page pdf.Page) (string, error) {
 				}
 			}
 		}
+		return nil
 	}); err != nil {
 		return "", err
 	}
@@ -195,17 +194,17 @@ func (rawPDFTextEncoding) Decode(raw string) string {
 	return raw
 }
 
-func readPDFPageContent(contents pdf.Value) ([]byte, error) {
+func readPDFPageContent(ctx context.Context, contents pdf.Value) ([]byte, error) {
 	switch contents.Kind() {
 	case pdf.Null:
 		return nil, nil
 	case pdf.Stream:
-		return readPDFContentStream(contents, maxPDFPageContentBytes, "pdf page content")
+		return readPDFContentStream(ctx, contents, maxPDFPageContentBytes, "pdf page content")
 	case pdf.Array:
 		var joined bytes.Buffer
 		remaining := maxPDFPageContentBytes
 		for i := 0; i < contents.Len(); i++ {
-			part, err := readPDFContentStream(contents.Index(i), remaining, fmt.Sprintf("pdf page content stream %d", i))
+			part, err := readPDFContentStream(ctx, contents.Index(i), remaining, fmt.Sprintf("pdf page content stream %d", i))
 			if err != nil {
 				return nil, err
 			}
@@ -221,13 +220,13 @@ func readPDFPageContent(contents pdf.Value) ([]byte, error) {
 	}
 }
 
-func needsSafePDFTextExtraction(contents pdf.Value) bool {
+func needsSafePDFTextExtraction(ctx context.Context, contents pdf.Value) bool {
 	if contents.Kind() != pdf.Array {
 		return false
 	}
 
 	for i := 0; i < contents.Len()-1; i++ {
-		stream, err := readPDFContentStream(contents.Index(i), maxPDFPageContentBytes, fmt.Sprintf("pdf page content stream %d", i))
+		stream, err := readPDFContentStream(ctx, contents.Index(i), maxPDFPageContentBytes, fmt.Sprintf("pdf page content stream %d", i))
 		if err != nil {
 			return false
 		}
@@ -238,14 +237,14 @@ func needsSafePDFTextExtraction(contents pdf.Value) bool {
 	return false
 }
 
-func readPDFContentStream(stream pdf.Value, limit int64, name string) ([]byte, error) {
+func readPDFContentStream(ctx context.Context, stream pdf.Value, limit int64, name string) ([]byte, error) {
 	if stream.Kind() != pdf.Stream {
 		return nil, fmt.Errorf("pdf page content stream missing: %s", name)
 	}
 	rc := stream.Reader()
 	defer func() { _ = rc.Close() }()
 
-	return readAllLimited(context.TODO(), rc, limit, name)
+	return readAllLimited(ctx, rc, limit, name)
 }
 
 func pdfContentStreamEndsMidToken(data []byte) bool {
@@ -338,15 +337,9 @@ func pdfContentStreamEndsMidToken(data []byte) bool {
 	return literalDepth > 0 || inHex || inComment || tokenOpen || arrayDepth > 0 || dictDepth > 0
 }
 
-func interpretPDFContent(data []byte, do func(stk *pdfContentStack, op string)) (err error) {
+func interpretPDFContent(data []byte, do func(stk *pdfContentStack, op string) error) error {
 	parser := &pdfContentParser{data: data}
 	var stk pdfContentStack
-
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%v", r)
-		}
-	}()
 
 	for {
 		tok, err := parser.readToken()
@@ -363,7 +356,9 @@ func interpretPDFContent(data []byte, do func(stk *pdfContentStack, op string)) 
 			case "]", ">>":
 				return fmt.Errorf("unexpected content keyword %q", string(kw))
 			default:
-				do(&stk, string(kw))
+				if err := do(&stk, string(kw)); err != nil {
+					return err
+				}
 				continue
 			}
 		} else {

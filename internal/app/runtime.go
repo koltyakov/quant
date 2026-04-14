@@ -156,6 +156,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 			CircuitFailureLimit: 5,
 			CircuitResetTimeout: 30 * time.Second,
 			NormalizeFunc:       index.NormalizeFloat32,
+			ModelID:             cfg.EmbedModel,
 		})
 	}
 

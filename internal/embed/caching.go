@@ -22,6 +22,10 @@ type CachingConfig struct {
 
 	// NormalizeFunc, if set, is applied to every embedding before caching.
 	NormalizeFunc func([]float32) []float32
+
+	// ModelID, if set, is included in cache keys so that switching models
+	// invalidates cached embeddings rather than returning stale vectors.
+	ModelID string
 }
 
 // CachingEmbedder wraps an Embedder with an LRU cache, in-flight request
@@ -31,6 +35,7 @@ type CachingConfig struct {
 type CachingEmbedder struct {
 	inner     Embedder
 	normalize func([]float32) []float32
+	modelID   string
 
 	mu      sync.Mutex
 	cache   *embeddingLRU
@@ -56,6 +61,7 @@ func NewCachingEmbedder(inner Embedder, cfg CachingConfig) *CachingEmbedder {
 	return &CachingEmbedder{
 		inner:          inner,
 		normalize:      cfg.NormalizeFunc,
+		modelID:        cfg.ModelID,
 		cache:          newEmbeddingLRU(cacheSize),
 		flights:        make(map[string]*embeddingFlight),
 		circuitBreaker: newEmbedCircuitBreaker(failureLimit, resetTimeout),
@@ -65,7 +71,7 @@ func NewCachingEmbedder(inner Embedder, cfg CachingConfig) *CachingEmbedder {
 // Embed returns a cached (or freshly computed) embedding for text.
 // Concurrent calls for the same text share a single backend request.
 func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	cacheKey := normalizeCacheKey(text)
+	cacheKey := c.cacheKey(text)
 
 	c.mu.Lock()
 	if vec, ok := c.cache.Get(cacheKey); ok {
@@ -303,10 +309,13 @@ func (cb *embedCircuitBreaker) RecordSuccess() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func normalizeCacheKey(text string) string {
+func (c *CachingEmbedder) cacheKey(text string) string {
 	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 	if normalized == "" {
-		return text
+		normalized = text
+	}
+	if c.modelID != "" {
+		return c.modelID + "\x00" + normalized
 	}
 	return normalized
 }

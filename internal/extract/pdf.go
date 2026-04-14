@@ -105,7 +105,7 @@ func inspectPDF(ctx context.Context, path string) (pdfInspection, error) {
 		if pageHasIllustrations(page) {
 			result.HasIllustrations = true
 		}
-		content, err := extractPDFPlainText(page)
+		content, err := extractPDFPlainText(ctx, page)
 		if err != nil {
 			logx.Warn("pdf text extraction skipped page", "page", i, "path", path, "err", err)
 			continue

@@ -305,7 +305,7 @@ func TestInterpretPDFContent_JoinsSplitTJArrayAcrossStreams(t *testing.T) {
 	var text strings.Builder
 	var enc pdf.TextEncoding = rawPDFTextEncoding{}
 
-	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) error {
 		n := stk.Len()
 		args := make([]pdfContentValue, n)
 		for i := n - 1; i >= 0; i-- {
@@ -323,6 +323,7 @@ func TestInterpretPDFContent_JoinsSplitTJArrayAcrossStreams(t *testing.T) {
 				}
 			}
 		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
@@ -335,7 +336,7 @@ func TestInterpretPDFContent_JoinsSplitTJArrayAcrossStreams(t *testing.T) {
 func TestInterpretPDFContent_RejectsUnterminatedArray(t *testing.T) {
 	content := []byte("[ (Hello)")
 
-	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {})
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) error { return nil })
 	if err == nil {
 		t.Fatal("expected unterminated array to fail")
 	}
@@ -359,7 +360,7 @@ func TestInterpretPDFContent_HandlesGraphicsStateOperator(t *testing.T) {
 	var text strings.Builder
 	var enc pdf.TextEncoding = rawPDFTextEncoding{}
 
-	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) error {
 		n := stk.Len()
 		args := make([]pdfContentValue, n)
 		for i := n - 1; i >= 0; i-- {
@@ -374,6 +375,7 @@ func TestInterpretPDFContent_HandlesGraphicsStateOperator(t *testing.T) {
 				text.WriteString(enc.Decode(args[0].RawString()))
 			}
 		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
@@ -390,7 +392,7 @@ func TestInterpretPDFContent_HandlesNumericOperands(t *testing.T) {
 	var enc pdf.TextEncoding = rawPDFTextEncoding{}
 	var cmArgs []pdfContentValue
 
-	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) {
+	err := interpretPDFContent(content, func(stk *pdfContentStack, op string) error {
 		n := stk.Len()
 		args := make([]pdfContentValue, n)
 		for i := n - 1; i >= 0; i-- {
@@ -407,6 +409,7 @@ func TestInterpretPDFContent_HandlesNumericOperands(t *testing.T) {
 				text.WriteString(enc.Decode(args[0].RawString()))
 			}
 		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
