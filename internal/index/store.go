@@ -406,6 +406,9 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 				}
 			}
 			_ = rows.Close()
+			if rows.Err() != nil {
+				hnswDeleteIDs = nil
+			}
 		}
 	}
 
@@ -544,6 +547,9 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 					}
 				}
 				_ = rows.Close()
+				if rows.Err() != nil {
+					hnswDeleteIDs = nil
+				}
 			}
 		}
 	}
@@ -639,6 +645,9 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 				}
 			}
 			_ = rows.Close()
+			if rows.Err() != nil {
+				hnswDeleteIDs = nil
+			}
 		}
 	}
 
@@ -956,6 +965,9 @@ func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 				}
 			}
 			_ = rows.Close()
+			if rows.Err() != nil {
+				hnswDeleteIDs = nil
+			}
 		}
 	}
 

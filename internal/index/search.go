@@ -454,6 +454,9 @@ func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedd
 		}
 	}
 	_ = prefixRows.Close()
+	if prefixRows.Err() != nil {
+		return
+	}
 	if len(prefixSet) == 0 {
 		return
 	}
