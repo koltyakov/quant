@@ -3,6 +3,8 @@ PKG := github.com/koltyakov/quant
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_LDFLAGS := -s -w -X main.Version=$(VERSION)
 BUILD_FLAGS := -trimpath -ldflags "$(BUILD_LDFLAGS)"
+COVER_PROFILE ?= tmp/coverage.out
+COVER_HTML ?= tmp/coverage.html
 
 .PHONY: build test cov fmt lint clean install
 
@@ -21,8 +23,7 @@ test:
 	go test ./...
 
 cov:
-	go test -coverprofile=coverage.out ./...
-	@go tool cover -func=coverage.out | tail -1
+	@COVER_PROFILE=$(COVER_PROFILE) COVER_HTML=$(COVER_HTML) bash scripts/coverage.sh
 
 fmt:
 	gofmt -s -w .

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,9 @@ func newProxyTestHarness(t *testing.T, keywordOnly ...bool) (*index.Store, *Clie
 	server := NewServer(store, nil, proxyEmbedder)
 	addr, err := server.Start(ctx)
 	if err != nil {
+		if strings.Contains(err.Error(), "bind: operation not permitted") || strings.Contains(err.Error(), "bind: permission denied") {
+			t.Skipf("proxy listener unavailable in this environment: %v", err)
+		}
 		t.Fatalf("unexpected proxy start error: %v", err)
 	}
 
