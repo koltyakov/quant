@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/coder/hnsw"
 	"github.com/koltyakov/quant/internal/logx"
@@ -14,6 +16,7 @@ type DiskBackedHNSW struct {
 	inner        *hnswIndex
 	graphPath    string
 	flushThresh  int
+	mu           sync.Mutex
 	pendingAdds  int64
 	hnswM        int
 	hnswEfSearch int
@@ -34,10 +37,15 @@ func NewDiskBackedHNSW(graphPath string, m, efSearch, flushThreshold int) *DiskB
 
 func (d *DiskBackedHNSW) Add(id int, vec []float32) {
 	d.inner.Add(id, vec)
+	d.mu.Lock()
 	d.pendingAdds++
-	if d.pendingAdds >= int64(d.flushThresh) {
-		d.flushToDisk()
+	flush := d.pendingAdds >= int64(d.flushThresh)
+	if flush {
 		d.pendingAdds = 0
+	}
+	d.mu.Unlock()
+	if flush {
+		d.flushToDisk()
 	}
 }
 
@@ -51,10 +59,15 @@ func (d *DiskBackedHNSW) BatchDelete(ids []int) {
 
 func (d *DiskBackedHNSW) BatchAdd(nodes []hnsw.Node[int]) {
 	d.inner.BatchAdd(nodes)
+	d.mu.Lock()
 	d.pendingAdds += int64(len(nodes))
-	if d.pendingAdds >= int64(d.flushThresh) {
-		d.flushToDisk()
+	flush := d.pendingAdds >= int64(d.flushThresh)
+	if flush {
 		d.pendingAdds = 0
+	}
+	d.mu.Unlock()
+	if flush {
+		d.flushToDisk()
 	}
 }
 
@@ -91,7 +104,7 @@ func (d *DiskBackedHNSW) flushToDisk() {
 		return
 	}
 
-	f, err := os.CreateTemp(".", ".quant-hnsw-disk-*")
+	f, err := os.CreateTemp(filepath.Dir(d.graphPath), ".quant-hnsw-disk-*")
 	if err != nil {
 		logx.Warn("disk-backed hnsw flush: temp file creation failed", "err", err)
 		return
@@ -142,7 +155,9 @@ func (d *DiskBackedHNSW) LoadFromDisk(ctx context.Context) error {
 	d.inner.mu.Unlock()
 	d.inner.ready.Store(true)
 	d.inner.resetMods()
+	d.mu.Lock()
 	d.pendingAdds = 0
+	d.mu.Unlock()
 	logx.Info("disk-backed hnsw graph loaded from file", "path", d.graphPath, "nodes", g.Len())
 	return nil
 }
