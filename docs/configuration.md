@@ -14,6 +14,8 @@ All flags apply to `quant mcp`.
 | `--listen` | `:8080` | Listen address for SSE/HTTP transport |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
 | `--embed-model` | `nomic-embed-text` | Embedding model name |
+| `--embed-provider` | auto-detected | Embedding backend: `ollama` or `openai`. Auto-detected from URL when not set. |
+| `--embed-api-key` | - | API key for the embedding backend. Required for OpenAI and other authenticated providers. |
 | `--config` | - | Path to a YAML config file |
 
 ### Indexing flags
@@ -24,6 +26,20 @@ All flags apply to `quant mcp`.
 | `--chunk-overlap` | `0.15` | Chunk overlap fraction (0--0.99) |
 | `--embed-batch-size` | `16` | Number of chunks sent to the embedding backend per batch (1--128) |
 | `--index-workers` | auto (2--8) | Parallel workers for startup and live indexing (1--64) |
+
+### Reranker flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--reranker` | - | Reranker type. Only accepted value: `cross-encoder` (requires `--reranker-model`). |
+| `--reranker-model` | - | Model used for cross-encoder reranking (e.g. `llama3.2`). Requires Ollama. |
+
+### Summarizer flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--summarizer` | `false` | Enable LLM-powered chunk summarization at index time. |
+| `--summarizer-model` | same as `--embed-model` | Model used for chunk summarization. Requires Ollama. |
 
 ### PDF flags
 
@@ -41,6 +57,8 @@ All flags apply to `quant mcp`.
 | `QUANT_LISTEN` | `--listen` |
 | `QUANT_EMBED_URL` | `--embed-url` |
 | `QUANT_EMBED_MODEL` | `--embed-model` |
+| `QUANT_EMBED_PROVIDER` | `--embed-provider` |
+| `QUANT_EMBED_API_KEY` | `--embed-api-key` |
 | `QUANT_CHUNK_SIZE` | `--chunk-size` |
 | `QUANT_CHUNK_OVERLAP` | `--chunk-overlap` |
 | `QUANT_EMBED_BATCH_SIZE` | `--embed-batch-size` |
@@ -73,6 +91,8 @@ transport: stdio
 listen: ":8080"
 embed_url: http://localhost:11434
 embed_model: nomic-embed-text
+embed_provider: ollama   # ollama (default) or openai
+# embed_api_key: sk-...  # required for OpenAI and other authenticated providers
 chunk_size: 512
 chunk_overlap: 0.15
 embed_batch_size: 16

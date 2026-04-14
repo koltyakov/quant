@@ -37,13 +37,8 @@ type openAIEmbedResponse struct {
 	} `json:"usage"`
 }
 
-func NewOpenAICompatible(ctx context.Context, baseURL, model string) (*OpenAICompatible, error) {
-	apiKey := openAIAPIKey()
+func NewOpenAICompatible(ctx context.Context, baseURL, model, apiKey string) (*OpenAICompatible, error) {
 	return newOpenAICompatible(ctx, baseURL, model, apiKey, &http.Client{Timeout: 60 * time.Second})
-}
-
-func openAIAPIKey() string {
-	return ""
 }
 
 func newOpenAICompatible(ctx context.Context, baseURL, model, apiKey string, httpClient *http.Client) (*OpenAICompatible, error) {

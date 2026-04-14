@@ -16,10 +16,19 @@ Zero CGO. Pure Go.
 
 - A `quant` binary for your platform, either downloaded from GitHub Releases or built from source
 - A coding agent or other MCP-capable client of your choice, such as Claude, Codex, OpenCode, or GitHub Copilot
-- [Ollama](https://ollama.ai) running locally with an embedding model pulled:
+- [Ollama](https://ollama.ai) installed locally, or an OpenAI-compatible embedding API at `--embed-url`
+
+  `quant` handles Ollama setup automatically on first run:
+  - If Ollama is installed but not running, `quant` starts it in the background (`ollama serve`)
+  - If the configured embedding model isn't pulled yet, `quant` pulls it automatically (`ollama pull <model>`)
+  - If the embedding backend is still unavailable after recovery attempts, `quant` starts in keyword-only mode so the MCP server remains usable
+
+  To set up manually instead:
   ```
+  ollama serve  # start Ollama
   ollama pull nomic-embed-text
   ```
+
 - Optional for scanned PDFs: [ocrmypdf](https://ocrmypdf.readthedocs.io/) installed on your system `PATH`. If present, `quant` will automatically use it as a best-effort OCR sidecar for PDFs that contain no extractable text.
 
 ## Build from source
@@ -77,14 +86,22 @@ For the full flag reference, environment variables, YAML config, include/exclude
 
 | Tool | Description |
 |---|---|
-| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path` |
+| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path`, `file_type`, `language` |
 | `list_sources` | List indexed documents. Params: `limit` |
-| `index_status` | Stats: total docs, chunks, DB size, watch dir, model, lifecycle state |
+| `index_status` | Stats: total docs, chunks, DB size, watch dir, model, embedding status, lifecycle state |
 | `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` |
+| `drill_down` | Explore a topic by finding diverse chunks related to a seed chunk from a previous search. Params: `chunk_id` (required), `limit` |
+| `summarize_matches` | Summarize all matching documents for a query — returns an overview of what the index contains on a topic. Params: `query` (required), `limit` |
+| `list_collections` | List all named collections with their document and chunk counts |
+| `delete_collection` | Delete all documents and chunks in a named collection. Params: `collection` (required) |
 
-**`search`** embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common 0-1 scale. If the embedding backend is unavailable, search falls back to keyword-only results automatically.
+**`search`** embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common 0-1 scale. If the embedding backend is unavailable, search falls back to keyword-only results automatically. The `embedding_status` field in the response indicates whether results are hybrid or keyword-only.
 
-**`find_similar`** takes a chunk ID from a previous search result and returns the nearest neighbors from the HNSW index. It is useful for discovering related code or content across the index without needing to formulate a new query.
+**`find_similar`** takes a chunk ID from a previous search result and returns the nearest neighbors from the HNSW index. Useful for discovering related content without formulating a new query.
+
+**`drill_down`** is like `find_similar` but prioritizes diversity across documents — it spreads results across different source files to help explore a topic broadly rather than staying within one file.
+
+**`summarize_matches`** runs a search and returns a high-level overview of which documents matched and what they contain, without returning individual chunks. Useful when you want a quick map of what the index knows about a subject.
 
 All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback. Tool concurrency is bounded by `--max-concurrent-tools` (default 4).
 

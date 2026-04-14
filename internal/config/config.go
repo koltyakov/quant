@@ -34,6 +34,7 @@ type Config struct {
 	EmbedURL        string    `yaml:"embed_url"`
 	EmbedModel      string    `yaml:"embed_model"`
 	EmbedProvider   string    `yaml:"embed_provider"`
+	EmbedAPIKey     string    `yaml:"embed_api_key"`
 	EmbedBatchSize  int       `yaml:"embed_batch_size"`
 	PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
 	ChunkSize       int       `yaml:"chunk_size"`
@@ -264,6 +265,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
 	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
+	flagSet.StringVar(&cfg.EmbedAPIKey, "embed-api-key", cfg.EmbedAPIKey, "API key for the embedding backend (OpenAI-compatible providers)")
 	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
@@ -382,6 +384,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_EMBED_PROVIDER"); v != "" {
 		cfg.EmbedProvider = v
+	}
+	if v := os.Getenv("QUANT_EMBED_API_KEY"); v != "" {
+		cfg.EmbedAPIKey = v
 	}
 	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
 		cfg.PDFOCRLang = v

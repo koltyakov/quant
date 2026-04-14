@@ -8,7 +8,7 @@ flowchart TD
 
     APP --> WATCH["watch.Watcher (fsnotify)<br/><i>file events</i>"]
     APP --> SCAN["scan<br/><i>initial walk</i>"]
-    APP --> EMB["embed.Ollama + CachingEmbedder<br/><i>embed batches</i>"]
+    APP --> EMB["embed.Ollama/OpenAI + CachingEmbedder<br/><i>embed batches</i>"]
 
     WATCH --> IDX["app.Indexer<br/><i>initial sync + live queue + retries</i>"]
     SCAN --> IDX
@@ -33,9 +33,9 @@ flowchart TD
 | `internal/extract` | Content extraction. A `Router` dispatches to the appropriate extractor based on file extension. Handles plain text, Jupyter notebooks, PDF (with optional OCR), Office/Open XML, OpenDocument, and RTF. |
 | `internal/chunk` | Text splitting into chunks. Uses a strategy registry: code files get a code-aware chunker (function/class boundary detection), everything else uses a generic paragraph splitter with heading breadcrumbs and overlap. |
 | `internal/ingest` | The indexing pipeline. Takes extracted text, chunks it, diffs against existing chunks to reuse embeddings, batches new chunks for embedding, and produces `ChunkRecord`s ready for storage. |
-| `internal/embed` | Embedding backend. `Ollama` implements the `Embedder` interface with retry logic, input truncation, and dimension probing. `CachingEmbedder` wraps it with an LRU cache, in-flight request deduplication, and a circuit breaker for query-time calls. |
+| `internal/embed` | Embedding backend. `Ollama` and `OpenAI` implement the `Embedder` interface with retry logic, input truncation, and dimension probing. Sentinel errors (`ErrOllamaUnavailable`, `ErrModelNotFound`) allow the app layer to attempt auto-recovery (start Ollama, pull model) before falling back to keyword-only mode. `CachingEmbedder` wraps the backend with an LRU cache, in-flight request deduplication, and a circuit breaker for query-time calls. |
 | `internal/index` | SQLite storage and search. Manages documents, chunks, FTS5 full-text index, embedding metadata, and the in-memory HNSW graph. Implements hybrid search combining FTS5 keyword results with vector similarity using RRF fusion. |
-| `internal/mcp` | MCP server. Registers tools (`search`, `list_sources`, `index_status`, `find_similar`), handles tool calls with concurrency limiting, and serves over stdio, SSE, or streamable HTTP. Includes health/readiness endpoints for HTTP transports. |
+| `internal/mcp` | MCP server. Registers tools (`search`, `list_sources`, `index_status`, `find_similar`, `drill_down`, `summarize_matches`, `list_collections`, `delete_collection`), handles tool calls with concurrency limiting, and serves over stdio, SSE, or streamable HTTP. Includes health/readiness endpoints for HTTP transports. |
 | `internal/runtime` | Index state tracking (`starting` -> `indexing` -> `ready` / `degraded`). Thread-safe snapshot reads used by the MCP server for readiness checks. |
 | `internal/selfupdate` | Binary self-update from GitHub Releases. Supports manual `quant update` and automatic background updates via `QUANT_AUTOUPDATE`. |
 | `internal/logx` | Structured logging shim used throughout the codebase. |
@@ -50,6 +50,6 @@ flowchart TD
 
 **Transactional writes.** All chunk replacements for a single document happen inside one SQLite transaction. HNSW updates are deferred until after the transaction commits.
 
-**Graceful degradation.** If the embedding backend becomes unavailable at query time, the circuit breaker opens and search falls back to keyword-only results. The embedding status is included in search responses so agents know when results are limited.
+**Graceful degradation.** If the embedding backend is unavailable at startup, `quant` attempts automatic recovery: it tries to start Ollama (`ollama serve`) if the binary is on PATH and the URL is local, then pulls the configured model if the server is reachable but the model is missing. If both recovery steps fail, `quant` starts in keyword-only mode — the MCP server remains fully operational and `index_status` reports the embedding status and the fix required. At query time, the circuit breaker (5 consecutive failures, 30-second window) provides a second layer of fallback. The embedding status is included in search responses so agents know when results are limited.
 
 **Concurrency control.** MCP tool calls are bounded by a semaphore (`--max-concurrent-tools`, default 4) to prevent resource exhaustion when multiple agents query simultaneously.

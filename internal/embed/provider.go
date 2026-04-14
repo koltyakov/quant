@@ -22,10 +22,10 @@ func DetectProvider(embedURL string) ProviderType {
 	return ProviderOllama
 }
 
-func NewEmbedder(ctx context.Context, provider ProviderType, baseURL, model string) (Embedder, error) {
+func NewEmbedder(ctx context.Context, provider ProviderType, baseURL, model, apiKey string) (Embedder, error) {
 	switch provider {
 	case ProviderOpenAI:
-		return NewOpenAICompatible(ctx, baseURL, model)
+		return NewOpenAICompatible(ctx, baseURL, model, apiKey)
 	case ProviderOllama, ProviderUnknown:
 		return NewOllama(ctx, baseURL, model)
 	default:

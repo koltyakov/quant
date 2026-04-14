@@ -113,7 +113,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		}()
 	}
 
-	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
 	if err != nil && isLocalURL(cfg.EmbedURL) {
 		if ollamaPath, lookErr := exec.LookPath("ollama"); lookErr == nil {
 			// Step 1: start Ollama if it isn't running.
@@ -122,7 +122,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 				if startErr := autoStartOllama(ctx); startErr != nil {
 					logx.Warn("auto-start Ollama failed", "err", startErr)
 				} else {
-					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
 				}
 			}
 			// Step 2: pull the model if Ollama is running but the model isn't present.
@@ -131,7 +131,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 				if pullErr := pullOllamaModel(ctx, cfg.EmbedModel); pullErr != nil {
 					logx.Warn("auto-pull model failed", "model", cfg.EmbedModel, "err", pullErr)
 				} else {
-					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
 				}
 			}
 		}
@@ -325,7 +325,7 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	}
 
 	var workerEmbedder embed.Embedder
-	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel)
+	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
 	if err != nil {
 		logx.Warn("worker cannot connect to embedding backend; search will be proxy-only", "err", err)
 	} else {

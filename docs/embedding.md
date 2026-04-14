@@ -2,11 +2,40 @@
 
 ## Backend
 
-`quant` uses Ollama as the embedding backend via its `/api/embed` endpoint. The config fields are named generically (`embed_url`, `embed_model`) so an alternative backend can be added later without renaming the surface.
+`quant` supports two embedding backends, selected via the `embed_provider` config field or `QUANT_EMBED_PROVIDER` environment variable:
+
+| Provider | Value | Notes |
+|---|---|---|
+| Ollama | `ollama` (default) | Local embedding via `/api/embed`. Auto-detected when `embed_url` does not contain `openai.com`. |
+| OpenAI-compatible | `openai` | Any API that follows the OpenAI embeddings contract. Set `embed_url` to the API base URL and configure authentication as required by the provider. |
+
+The config fields are named generically (`embed_url`, `embed_model`) so the same configuration surface works for both backends.
+
+## Authentication
+
+Ollama (local) requires no authentication. For OpenAI-compatible providers that require an API key, set it via `--embed-api-key` or the `QUANT_EMBED_API_KEY` environment variable:
+
+```bash
+QUANT_EMBED_API_KEY=sk-... quant mcp \
+  --embed-provider openai \
+  --embed-url https://api.openai.com \
+  --embed-model text-embedding-3-small
+```
+
+Or in YAML config:
+
+```yaml
+embed_provider: openai
+embed_url: https://api.openai.com
+embed_model: text-embedding-3-small
+embed_api_key: sk-...
+```
+
+The key is sent as `Authorization: Bearer <key>` on every embedding request. Providers that use a different authentication scheme (e.g. custom headers) are not currently supported.
 
 ## Model choice
 
-Practical defaults for local use:
+Practical defaults for Ollama local use:
 
 | Model | Dimensions | Notes |
 |---|---|---|
@@ -14,9 +43,18 @@ Practical defaults for local use:
 | `all-minilm` | 384 | Smaller and cheaper to run; lower retrieval quality |
 | `mxbai-embed-large` | 1024 | Higher quality; requires more RAM |
 
-Pull a model before starting `quant`:
+## Auto-setup
+
+`quant` recovers from common Ollama setup problems automatically on startup:
+
+1. **Ollama not running** — if `ollama` is installed and the embed URL points to localhost, `quant` runs `ollama serve` in the background and waits up to ~7 seconds for it to become ready.
+2. **Model not pulled** — if Ollama is running but the configured model is missing, `quant` runs `ollama pull <model>` and streams download progress to the terminal.
+3. **Still unavailable** — if both recovery steps fail (wrong URL, not installed, network error), `quant` starts in keyword-only mode. The MCP server is fully operational; search falls back to FTS5 keyword results and `index_status` reports the embedding backend status and the fix needed.
+
+To set up manually instead:
 
 ```bash
+ollama serve
 ollama pull nomic-embed-text
 ```
 

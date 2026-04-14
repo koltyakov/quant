@@ -81,7 +81,9 @@ Results are reordered so the single best chunk per unique document appears first
 
 ## Fallback behavior
 
-If the embedding backend is unavailable at query time:
+**At startup:** if the embedding backend is unavailable when `quant` starts, it attempts automatic recovery (start Ollama, pull model). If recovery fails, `quant` starts in keyword-only mode — the MCP server is fully operational and `index_status` reports the embedding status and the fix required.
+
+**At query time:** if the embedding backend becomes unavailable after a successful start:
 
 1. The circuit breaker opens after 5 consecutive failures.
 2. The search proceeds with keyword-only candidates.
@@ -92,6 +94,14 @@ If the embedding backend is unavailable at query time:
 
 The `find_similar` tool bypasses keyword search entirely. It loads the stored embedding for the given chunk ID, then queries the HNSW graph for nearest neighbors. This is useful for "more like this" exploration when you already have a relevant chunk from a previous search.
 
+## drill_down
+
+The `drill_down` tool is like `find_similar` but prioritizes diversity across documents. It spreads results across different source files to help explore a topic broadly rather than staying within one file. Useful when a single search result is a good entry point but you want to map the surrounding territory across multiple documents.
+
+## summarize_matches
+
+The `summarize_matches` tool runs a hybrid search and returns a high-level overview of which documents matched and what they contain, without returning individual chunks. It groups results by source document and produces a per-document summary. Useful when you want a quick map of what the index contains on a subject before drilling into specific chunks.
+
 ## Score kind
 
 Each result includes a `score_kind` field that indicates how the score was produced:
@@ -99,4 +109,4 @@ Each result includes a `score_kind` field that indicates how the score was produ
 | Value | Source |
 |-------|--------|
 | `"rrf"` | Hybrid search (`search` tool) - score is from RRF fusion of keyword and vector signals |
-| `"similar"` | Similarity search (`find_similar` tool) - score is raw vector similarity |
+| `"similar"` | Similarity search (`find_similar`, `drill_down` tools) - score is raw vector similarity |
