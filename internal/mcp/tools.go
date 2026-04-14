@@ -157,6 +157,10 @@ type indexStatusToolResponse struct {
 	StateUpdatedAt  time.Time             `json:"state_updated_at,omitempty"`
 }
 
+type embeddingStatusProvider interface {
+	EmbeddingStatus(ctx context.Context) (string, error)
+}
+
 type findSimilarToolResponse struct {
 	ChunkID int64                 `json:"chunk_id"`
 	Limit   int                   `json:"limit"`
@@ -232,7 +236,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	var err error
 	if filtered, ok := s.store.(interface {
 		SearchFiltered(context.Context, string, []float32, int, string, index.SearchFilter) ([]index.SearchResult, error)
-	}); ok && (len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0) {
+	}); ok && (len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0 || filter.Collection != "") {
 		results, err = filtered.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, filter)
 	} else {
 		results, err = s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
@@ -388,10 +392,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 	}
 
 	dbSize := sqliteDiskUsage(s.cfg.DBPath)
-	embedStatus := "available"
-	if s.embedder == nil {
-		embedStatus = "unavailable (keyword-only mode) — start Ollama with: ollama serve"
-	}
+	embedStatus := s.embeddingStatus(ctx)
 	structured := indexStatusToolResponse{
 		Documents:       docCount,
 		Chunks:          chunkCount,
@@ -761,9 +762,27 @@ func listSourceRows(docs []index.Document) []listSourcesResultRow {
 
 func (s *Server) cachedEmbed(ctx context.Context, text string) ([]float32, error) {
 	if s.embedder == nil {
+		if fallback, ok := s.store.(interface {
+			Embed(context.Context, string) ([]float32, error)
+		}); ok {
+			return fallback.Embed(ctx, text)
+		}
 		return nil, fmt.Errorf("embedding backend unavailable")
 	}
 	return s.embedder.Embed(ctx, text)
+}
+
+func (s *Server) embeddingStatus(ctx context.Context) string {
+	if provider, ok := s.store.(embeddingStatusProvider); ok {
+		status, err := provider.EmbeddingStatus(ctx)
+		if err == nil && strings.TrimSpace(status) != "" {
+			return status
+		}
+	}
+	if s.embedder == nil {
+		return "unavailable (keyword-only mode) — start Ollama with: ollama serve"
+	}
+	return "available"
 }
 
 func formatBytes(b int64) string {

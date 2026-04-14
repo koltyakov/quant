@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
 	"github.com/koltyakov/quant/internal/logx"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
@@ -17,6 +18,7 @@ import (
 
 type Server struct {
 	store    index.Searcher
+	embedder embed.Embedder
 	state    *runtimestate.IndexStateTracker
 	listener net.Listener
 	server   *http.Server
@@ -26,10 +28,11 @@ type Server struct {
 	ready bool
 }
 
-func NewServer(store index.Searcher, state *runtimestate.IndexStateTracker) *Server {
+func NewServer(store index.Searcher, state *runtimestate.IndexStateTracker, embedder embed.Embedder) *Server {
 	return &Server{
-		store: store,
-		state: state,
+		store:    store,
+		embedder: embedder,
+		state:    state,
 	}
 }
 
@@ -50,6 +53,9 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux.HandleFunc("/proxy/chunk_by_id", s.handleChunkByID)
 	mux.HandleFunc("/proxy/stats", s.handleStats)
 	mux.HandleFunc("/proxy/embed", s.handleEmbed)
+	mux.HandleFunc("/proxy/list_collections", s.handleListCollections)
+	mux.HandleFunc("/proxy/collection_stats", s.handleCollectionStats)
+	mux.HandleFunc("/proxy/delete_collection", s.handleDeleteCollection)
 
 	s.server = &http.Server{
 		Handler:           mux,
@@ -121,7 +127,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.Search(r.Context(), req.Query, req.QueryEmbedding, req.Limit, req.PathPrefix)
+	results, err := s.store.SearchFiltered(r.Context(), req.Query, req.QueryEmbedding, req.Limit, req.PathPrefix, req.Filter)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -169,6 +175,11 @@ func (s *Server) handleIndexStatus(w http.ResponseWriter, r *http.Request) {
 		Documents: docCount,
 		Chunks:    chunkCount,
 	}
+	if s.embedder == nil {
+		resp.EmbeddingStatus = "unavailable (keyword-only mode) — start Ollama with: ollama serve"
+	} else {
+		resp.EmbeddingStatus = "available"
+	}
 
 	if s.state != nil {
 		snap := s.state.Snapshot()
@@ -196,7 +207,20 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
-	s.writeError(w, http.StatusNotImplemented, "embed not proxied; workers embed locally")
+	var req EmbedRequest
+	if !s.readBody(w, r, &req) {
+		return
+	}
+	if s.embedder == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "embedding backend unavailable")
+		return
+	}
+	embedding, err := s.embedder.Embed(r.Context(), req.Text)
+	if err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, EmbedResponse{Embedding: embedding})
 }
 
 func (s *Server) handleChunkByID(w http.ResponseWriter, r *http.Request) {
@@ -219,4 +243,38 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, StatsResponse{DocCount: docCount, ChunkCount: chunkCount})
+}
+
+func (s *Server) handleListCollections(w http.ResponseWriter, r *http.Request) {
+	collections, err := s.store.ListCollections(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, ListCollectionsResponse{Collections: collections})
+}
+
+func (s *Server) handleCollectionStats(w http.ResponseWriter, r *http.Request) {
+	var req CollectionStatsRequest
+	if !s.readBody(w, r, &req) {
+		return
+	}
+	docs, chunks, err := s.store.CollectionStats(r.Context(), req.Collection)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, CollectionStatsResponse{Documents: docs, Chunks: chunks})
+}
+
+func (s *Server) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
+	var req DeleteCollectionRequest
+	if !s.readBody(w, r, &req) {
+		return
+	}
+	if err := s.store.DeleteCollection(r.Context(), req.Collection); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, DeleteCollectionResponse{Deleted: true})
 }

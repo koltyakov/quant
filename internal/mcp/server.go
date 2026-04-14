@@ -146,9 +146,6 @@ func (s *Server) readinessError(ctx context.Context) error {
 	if err := s.store.PingContext(ctx); err != nil {
 		return fmt.Errorf("index store is unavailable: %w", err)
 	}
-	if s.embedder == nil {
-		return errors.New("embedder is unavailable")
-	}
 	if s.state != nil {
 		snapshot := s.state.Snapshot()
 		if !snapshot.Ready() {

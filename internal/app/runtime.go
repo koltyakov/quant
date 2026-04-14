@@ -225,7 +225,7 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		logx.Info("chunk summarizer enabled", "model", summModel)
 	}
 
-	proxyServer := proxy.NewServer(store, idx.IndexState)
+	proxyServer := proxy.NewServer(store, idx.IndexState, embedder)
 	proxyAddr, err := proxyServer.Start(ctx)
 	if err != nil {
 		return fmt.Errorf("starting proxy server: %w", err)
@@ -331,19 +331,6 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 		return fmt.Errorf("main process unreachable at %s and cannot acquire lock", mainAddr)
 	}
 
-	var workerEmbedder embed.Embedder
-	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
-	if err != nil {
-		logx.Warn("worker cannot connect to embedding backend; search will be proxy-only", "err", err)
-	} else {
-		workerEmbedder = rawEmbedder
-		defer func() {
-			if err := rawEmbedder.Close(); err != nil {
-				logx.Error("closing worker embedder failed", "err", err)
-			}
-		}()
-	}
-
 	logx.Info("starting MCP server (worker)", "transport", cfg.Transport, "main_addr", mainAddr)
 
 	var wg sync.WaitGroup
@@ -358,7 +345,7 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 		watchMainAndPromote(serverCtx, cfg, version, client, mainAddr, serverCancel, &promoted)
 	}()
 
-	mcpServer := mcp.NewServer(cfg, client, workerEmbedder, version, nil)
+	mcpServer := mcp.NewServer(cfg, client, nil, version, nil)
 
 	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
 		serverCancel()

@@ -61,7 +61,18 @@ func (c *Client) Search(ctx context.Context, query string, queryEmbedding []floa
 }
 
 func (c *Client) SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter index.SearchFilter) ([]index.SearchResult, error) {
-	return c.Search(ctx, query, queryEmbedding, limit, pathPrefix)
+	body := SearchRequest{
+		Query:          query,
+		QueryEmbedding: queryEmbedding,
+		Limit:          limit,
+		PathPrefix:     pathPrefix,
+		Filter:         filter,
+	}
+	var resp SearchResponse
+	if err := c.doPost(ctx, "/proxy/search", body, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
 }
 
 func (c *Client) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]index.SearchResult, error) {
@@ -114,16 +125,33 @@ func (c *Client) Stats(ctx context.Context) (int, int, error) {
 	return resp.DocCount, resp.ChunkCount, nil
 }
 
-func (c *Client) ListCollections(_ context.Context) ([]string, error) {
-	return nil, nil
+func (c *Client) ListCollections(ctx context.Context) ([]string, error) {
+	var resp ListCollectionsResponse
+	if err := c.doGet(ctx, "/proxy/list_collections", &resp); err != nil {
+		return nil, err
+	}
+	return resp.Collections, nil
 }
 
-func (c *Client) CollectionStats(_ context.Context, _ string) (int, int, error) {
-	return 0, 0, nil
+func (c *Client) CollectionStats(ctx context.Context, collection string) (int, int, error) {
+	body := CollectionStatsRequest{Collection: collection}
+	var resp CollectionStatsResponse
+	if err := c.doPost(ctx, "/proxy/collection_stats", body, &resp); err != nil {
+		return 0, 0, err
+	}
+	return resp.Documents, resp.Chunks, nil
 }
 
-func (c *Client) DeleteCollection(_ context.Context, _ string) error {
-	return fmt.Errorf("collections not available in proxy mode")
+func (c *Client) DeleteCollection(ctx context.Context, collection string) error {
+	body := DeleteCollectionRequest{Collection: collection}
+	var resp DeleteCollectionResponse
+	if err := c.doPost(ctx, "/proxy/delete_collection", body, &resp); err != nil {
+		return err
+	}
+	if !resp.Deleted {
+		return fmt.Errorf("collection %q was not deleted", collection)
+	}
+	return nil
 }
 
 func (c *Client) PingContext(ctx context.Context) error {
@@ -131,6 +159,43 @@ func (c *Client) PingContext(ctx context.Context) error {
 		return fmt.Errorf("main process unreachable at %s", c.addr)
 	}
 	return nil
+}
+
+func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+	body := EmbedRequest{Text: text}
+	var resp EmbedResponse
+	if err := c.doPost(ctx, "/proxy/embed", body, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Embedding, nil
+}
+
+func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, text := range texts {
+		embedding, err := c.Embed(ctx, text)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = embedding
+	}
+	return out, nil
+}
+
+func (c *Client) Dimensions() int {
+	return 0
+}
+
+func (c *Client) Close() error {
+	return nil
+}
+
+func (c *Client) EmbeddingStatus(ctx context.Context) (string, error) {
+	var resp IndexStatusResponse
+	if err := c.doGet(ctx, "/proxy/index_status", &resp); err != nil {
+		return "", err
+	}
+	return resp.EmbeddingStatus, nil
 }
 
 func (c *Client) doPost(ctx context.Context, path string, reqBody, respBody any) error {

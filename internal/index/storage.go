@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,16 +21,27 @@ func sqlLikePrefixPattern(prefix string) string {
 }
 
 func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc *Document) (int64, error) {
+	tagsJSON := ""
+	if doc.Tags != nil {
+		tj, _ := json.Marshal(doc.Tags)
+		tagsJSON = string(tj)
+	}
+
 	var id int64
 	err := tx.QueryRowContext(ctx,
-		`INSERT INTO documents (path, hash, modified_at, indexed_at)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_type, language, title, tags, collection)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path) DO UPDATE SET
 			hash = excluded.hash,
 			modified_at = excluded.modified_at,
-			indexed_at = CURRENT_TIMESTAMP
+			indexed_at = CURRENT_TIMESTAMP,
+			file_type = excluded.file_type,
+			language = excluded.language,
+			title = excluded.title,
+			tags = excluded.tags,
+			collection = excluded.collection
 		 RETURNING id`,
-		doc.Path, doc.Hash, doc.ModifiedAt,
+		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upserting document: %w", err)

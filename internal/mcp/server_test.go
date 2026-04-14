@@ -571,6 +571,36 @@ func TestHandleReadiness_ReturnsServiceUnavailableWhileIndexStarting(t *testing.
 	}
 }
 
+func TestHandleReadiness_ReturnsReadyInDegradedKeywordOnlyMode(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	tracker := runtimestate.NewIndexStateTracker()
+	tracker.Set(runtimestate.IndexStateDegraded, "embedding backend unavailable; serving keyword-only results")
+	s := &Server{
+		cfg:   &config.Config{WatchDir: dir, DBPath: dbPath},
+		store: store,
+		state: tracker,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, readinessPath, nil)
+	rec := httptest.NewRecorder()
+	s.handleReadiness(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if rec.Body.String() != "ready\n" {
+		t.Fatalf("expected ready body, got %q", rec.Body.String())
+	}
+}
+
 func TestHandleListSources(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
