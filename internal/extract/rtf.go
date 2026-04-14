@@ -53,7 +53,9 @@ func extractRTFText(ctx context.Context, rtf string) (string, error) {
 			if skipGroup > 0 && depth == skipGroup {
 				skipGroup = 0
 			}
-			depth--
+			if depth > 0 {
+				depth--
+			}
 			i++
 		case '\\':
 			if i+1 >= len(rtf) {
@@ -168,6 +170,8 @@ func parseRTFControlWord(rtf string, pos int) (word string, param int, end int) 
 	word = rtf[wordStart:i]
 
 	// Read optional numeric parameter (possibly negative).
+	// RTF spec limits parameters to 32-bit signed range.
+	const maxRTFParam = 1<<31 - 1
 	param = 0
 	hasParam := false
 	neg := false
@@ -177,6 +181,9 @@ func parseRTFControlWord(rtf string, pos int) (word string, param int, end int) 
 	}
 	for i < len(rtf) && rtf[i] >= '0' && rtf[i] <= '9' {
 		param = param*10 + int(rtf[i]-'0')
+		if param > maxRTFParam {
+			param = maxRTFParam
+		}
 		hasParam = true
 		i++
 	}

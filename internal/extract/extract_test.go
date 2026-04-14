@@ -29,7 +29,7 @@ func TestRouter_SupportsTextFiles(t *testing.T) {
 
 	paths := []string{
 		"file.txt", "file.md", "file.go", "file.py", "file.js", "file.ts",
-		"file.rs", "file.json", "file.yaml", "file.html",
+		"file.rs", "file.json", "file.yaml", "file.css",
 		// New formats
 		"file.mdx", "file.rst", "file.scss", "file.less", "file.astro",
 		"file.kt", "file.groovy", "file.fs", "file.nim", "file.swift",
@@ -457,6 +457,177 @@ func TestRouter_SupportsRTF(t *testing.T) {
 	}
 }
 
+func TestRouter_SupportsHTML(t *testing.T) {
+	r := NewRouter()
+	for _, path := range []string{"file.html", "file.htm", "FILE.HTML", "FILE.HTM"} {
+		if !r.Supports(path) {
+			t.Errorf("expected support for %s", path)
+		}
+	}
+}
+
+func TestHTMLExtractor_ExtractStripsTags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.html")
+	content := `<!DOCTYPE html><html><head><title>Test Page</title></head><body><h1>Hello</h1><p>This is <b>bold</b> text.</p></body></html>`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &HTMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(text, "Hello") {
+		t.Errorf("expected text to contain 'Hello', got %q", text)
+	}
+	if !strings.Contains(text, "This is bold text.") {
+		t.Errorf("expected text to contain 'This is bold text.', got %q", text)
+	}
+	if strings.Contains(text, "<b>") {
+		t.Errorf("expected HTML tags to be stripped, got %q", text)
+	}
+	if strings.Contains(text, "<h1>") {
+		t.Errorf("expected HTML tags to be stripped, got %q", text)
+	}
+}
+
+func TestHTMLExtractor_ExtractStripsScriptAndStyle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.html")
+	content := `<html><head><style>body{color:red}</style><script>alert('xss')</script></head><body><p>Visible text.</p></body></html>`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &HTMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(text, "Visible text.") {
+		t.Errorf("expected text to contain 'Visible text.', got %q", text)
+	}
+	if strings.Contains(text, "alert") {
+		t.Errorf("expected script content to be stripped, got %q", text)
+	}
+	if strings.Contains(text, "color") {
+		t.Errorf("expected style content to be stripped, got %q", text)
+	}
+}
+
+func TestHTMLExtractor_ExtractPreservesStructure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.html")
+	content := `<html><body><h1>Title</h1><p>Paragraph one.</p><p>Paragraph two.</p></body></html>`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &HTMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	lines := strings.Split(text, "\n")
+	var nonEmpty []string
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			nonEmpty = append(nonEmpty, strings.TrimSpace(l))
+		}
+	}
+	if len(nonEmpty) < 3 {
+		t.Errorf("expected at least 3 lines of text, got %d: %v", len(nonEmpty), nonEmpty)
+	}
+}
+
+func TestHTMLExtractor_ExtractTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.html")
+	content := `<html><body><table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table></body></html>`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	ext := &HTMLExtractor{}
+	text, err := ext.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(text, "A | B") {
+		t.Errorf("expected table cells separated by pipe, got %q", text)
+	}
+	if !strings.Contains(text, "C | D") {
+		t.Errorf("expected table cells separated by pipe, got %q", text)
+	}
+}
+
+func TestHTMLExtractor_RejectsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.html")
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	if err := f.Truncate(maxExtractorFileSize + 1); err != nil {
+		_ = f.Close()
+		t.Fatalf("unexpected truncate error: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+
+	ext := &HTMLExtractor{}
+	if _, err := ext.Extract(context.Background(), path); err == nil {
+		t.Fatal("expected oversized HTML to be rejected")
+	} else if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("expected ErrFileTooLarge, got %v", err)
+	}
+}
+
+func TestHTMLExtractor_Supports(t *testing.T) {
+	ext := &HTMLExtractor{}
+	if !ext.Supports("page.html") {
+		t.Error("expected support for .html")
+	}
+	if !ext.Supports("page.htm") {
+		t.Error("expected support for .htm")
+	}
+	if !ext.Supports("PAGE.HTML") {
+		t.Error("expected case-insensitive support for .HTML")
+	}
+	if ext.Supports("page.txt") {
+		t.Error("expected no support for .txt")
+	}
+}
+
+func TestRouter_ExtractHTMLViaRouter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "page.html")
+	content := `<html><body><h1>Title</h1><p>Content here.</p></body></html>`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	r := NewRouter()
+	text, err := r.Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(text, "<h1>") {
+		t.Errorf("expected router to use HTML extractor, but got raw HTML: %q", text)
+	}
+	if !strings.Contains(text, "Content here.") {
+		t.Errorf("expected extracted text content, got %q", text)
+	}
+}
+
 func TestRouter_Unsupported(t *testing.T) {
 	r := NewRouter()
 	if r.Supports("file.bin") {
@@ -589,6 +760,36 @@ func TestExtractWordMLText_PreservesParagraphs(t *testing.T) {
 	}
 	if text != "First paragraph.\n\nSecond paragraph." {
 		t.Fatalf("unexpected WordML extraction: %q", text)
+	}
+}
+
+func TestExtractWordMLText_PreservesTableStructure(t *testing.T) {
+	xmlData := []byte(`
+		<w:document xmlns:w="w">
+			<w:body>
+				<w:p><w:r><w:t>Before table.</w:t></w:r></w:p>
+				<w:tbl>
+					<w:tr>
+						<w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>
+						<w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>
+					</w:tr>
+					<w:tr>
+						<w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>
+						<w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc>
+					</w:tr>
+				</w:tbl>
+				<w:p><w:r><w:t>After table.</w:t></w:r></w:p>
+			</w:body>
+		</w:document>
+	`)
+
+	text, err := extractWordMLText(context.Background(), xmlData)
+	if err != nil {
+		t.Fatalf("unexpected WordML extraction error: %v", err)
+	}
+	want := "Before table.\n\nA1 | B1\nA2 | B2\n\nAfter table."
+	if text != want {
+		t.Fatalf("unexpected WordML table extraction:\ngot:  %q\nwant: %q", text, want)
 	}
 }
 
@@ -946,7 +1147,7 @@ func TestODFExtractor_ExtractODT(t *testing.T) {
 		t.Fatalf("unexpected odt extract error: %v", err)
 	}
 
-	want := "[Document]\nHeading\n\nParagraph one.\n\nParagraph two."
+	want := "[Document]\n# Heading\n\nParagraph one.\n\nParagraph two."
 	if text != want {
 		t.Fatalf("unexpected odt extraction: %q", text)
 	}

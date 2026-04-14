@@ -372,7 +372,17 @@ func interpretPDFContent(data []byte, do func(stk *pdfContentStack, op string) e
 	}
 }
 
+const maxPDFContentNestingDepth = 64
+
 func (p *pdfContentParser) readObject() (pdfContentValue, error) {
+	return p.readObjectDepth(0)
+}
+
+func (p *pdfContentParser) readObjectDepth(depth int) (pdfContentValue, error) {
+	if depth > maxPDFContentNestingDepth {
+		return pdfContentValue{}, fmt.Errorf("pdf content nesting too deep (> %d levels)", maxPDFContentNestingDepth)
+	}
+
 	tok, err := p.readToken()
 	if err != nil {
 		return pdfContentValue{}, err
@@ -387,9 +397,9 @@ func (p *pdfContentParser) readObject() (pdfContentValue, error) {
 		case "null":
 			return pdfContentValue{kind: pdfContentNullKind}, nil
 		case "<<":
-			return p.readDict()
+			return p.readDictDepth(depth + 1)
 		case "[":
-			return p.readArray()
+			return p.readArrayDepth(depth + 1)
 		default:
 			return pdfContentValue{}, fmt.Errorf("unexpected keyword %q parsing object", string(v))
 		}
@@ -408,7 +418,7 @@ func (p *pdfContentParser) readObject() (pdfContentValue, error) {
 	}
 }
 
-func (p *pdfContentParser) readArray() (pdfContentValue, error) {
+func (p *pdfContentParser) readArrayDepth(depth int) (pdfContentValue, error) {
 	var values []pdfContentValue
 	for {
 		tok, err := p.readToken()
@@ -422,7 +432,7 @@ func (p *pdfContentParser) readArray() (pdfContentValue, error) {
 			return pdfContentValue{kind: pdfContentArrayKind, array: values}, nil
 		}
 		p.unreadToken(tok)
-		value, err := p.readObject()
+		value, err := p.readObjectDepth(depth)
 		if err != nil {
 			return pdfContentValue{}, err
 		}
@@ -430,7 +440,7 @@ func (p *pdfContentParser) readArray() (pdfContentValue, error) {
 	}
 }
 
-func (p *pdfContentParser) readDict() (pdfContentValue, error) {
+func (p *pdfContentParser) readDictDepth(depth int) (pdfContentValue, error) {
 	values := make(map[string]pdfContentValue)
 	for {
 		tok, err := p.readToken()
@@ -449,7 +459,7 @@ func (p *pdfContentParser) readDict() (pdfContentValue, error) {
 			return pdfContentValue{}, fmt.Errorf("unexpected dictionary key %T", tok)
 		}
 
-		value, err := p.readObject()
+		value, err := p.readObjectDepth(depth)
 		if err != nil {
 			return pdfContentValue{}, err
 		}

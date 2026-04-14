@@ -29,6 +29,7 @@ func NewRouter(opts ...Options) *Router {
 	return &Router{
 		extractors: []Extractor{
 			&TextExtractor{},
+			&HTMLExtractor{},
 			&NotebookExtractor{},
 			&PDFExtractor{ocrLanguages: cfg.PDFOCRLang, ocrTimeout: cfg.PDFOCRTimeout},
 			&OOXMLExtractor{},

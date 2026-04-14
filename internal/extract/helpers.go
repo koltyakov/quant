@@ -2,6 +2,7 @@ package extract
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -13,7 +14,31 @@ import (
 
 const maxExtractorFileSize int64 = 100 << 20
 
-var ErrFileTooLarge = errors.New("extractor file exceeds size limit")
+var (
+	ErrFileTooLarge = errors.New("extractor file exceeds size limit")
+	ErrEncrypted    = errors.New("file appears to be encrypted or password-protected")
+)
+
+// ole2Magic is the Compound Binary Format header used by legacy Office files
+// (.doc, .xls, .ppt) and password-protected OOXML files.
+var ole2Magic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
+
+func ensureNotOLE2(path string) error {
+	f, err := os.Open(path) //nolint:gosec // Extractors intentionally open user-selected local files.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	var header [8]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return nil // too small to be OLE2, let ZIP opener handle it
+	}
+	if bytes.Equal(header[:], ole2Magic) {
+		return fmt.Errorf("%w: %s", ErrEncrypted, path)
+	}
+	return nil
+}
 
 func checkContext(ctx context.Context) error {
 	if ctx == nil {

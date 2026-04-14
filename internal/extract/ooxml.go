@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/koltyakov/quant/internal/logx"
 )
 
 type OOXMLExtractor struct{}
@@ -28,6 +30,9 @@ func (o *OOXMLExtractor) Extract(ctx context.Context, path string) (string, erro
 		return "", err
 	}
 	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
+		return "", err
+	}
+	if err := ensureNotOLE2(path); err != nil {
 		return "", err
 	}
 
@@ -203,6 +208,7 @@ func extractXLSX(ctx context.Context, path string) (string, error) {
 
 		data, err := readZipFile(ctx, zr.File, sheet.Target)
 		if err != nil {
+			logx.Warn("xlsx sheet extraction skipped", "sheet", sheet.Name, "target", sheet.Target, "err", err)
 			continue
 		}
 		rows, err := parseSheetCells(ctx, data, sharedStrings)
@@ -427,6 +433,9 @@ func sectionOrdinal(name string) string {
 func extractWordMLText(ctx context.Context, data []byte) (string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	var buf strings.Builder
+	var inTable, inCell bool
+	cellIndex := 0
+	cellHasText := false
 
 	for {
 		token, err := nextXMLToken(ctx, decoder)
@@ -437,10 +446,25 @@ func extractWordMLText(ctx context.Context, data []byte) (string, error) {
 		switch se := token.(type) {
 		case xml.StartElement:
 			switch se.Name.Local {
+			case "tbl":
+				inTable = true
+			case "tc":
+				inCell = true
+				cellHasText = false
+				if cellIndex > 0 {
+					buf.WriteString(" | ")
+				}
+				cellIndex++
 			case "t":
 				var content string
 				if err := decoder.DecodeElement(&content, &se); err == nil {
+					if inCell && cellHasText {
+						buf.WriteByte(' ')
+					}
 					buf.WriteString(content)
+					if inCell {
+						cellHasText = true
+					}
 				}
 			case "tab":
 				buf.WriteByte('\t')
@@ -448,11 +472,24 @@ func extractWordMLText(ctx context.Context, data []byte) (string, error) {
 				buf.WriteByte('\n')
 			}
 		case xml.EndElement:
-			if se.Name.Local == "p" {
+			switch se.Name.Local {
+			case "p":
+				if !inCell {
+					writeParagraphBreak(&buf)
+				}
+			case "tc":
+				inCell = false
+			case "tr":
+				cellIndex = 0
+				buf.WriteByte('\n')
+			case "tbl":
+				inTable = false
 				writeParagraphBreak(&buf)
 			}
 		}
 	}
+
+	_ = inTable
 
 	if err := checkContext(ctx); err != nil {
 		return "", err

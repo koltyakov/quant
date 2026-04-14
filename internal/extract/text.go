@@ -31,7 +31,7 @@ var textExtensions = map[string]bool{
 	".mjs": true, ".cjs": true, ".mts": true, ".cts": true,
 
 	// Web
-	".html": true, ".htm": true, ".css": true, ".scss": true, ".sass": true,
+	".css": true, ".scss": true, ".sass": true,
 	".less": true, ".vue": true, ".svelte": true, ".astro": true,
 
 	// JVM

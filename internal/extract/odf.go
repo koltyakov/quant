@@ -20,6 +20,9 @@ func (o *ODFExtractor) Extract(ctx context.Context, path string) (string, error)
 	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
 		return "", err
 	}
+	if err := ensureNotOLE2(path); err != nil {
+		return "", err
+	}
 
 	switch strings.ToLower(ext(path)) {
 	case ".odt":
@@ -125,7 +128,7 @@ func extractODFText(ctx context.Context, data []byte, mode odfMode) (string, err
 				count := 1
 				for _, attr := range se.Attr {
 					if attr.Name.Local == "c" {
-						count = max(1, atoiDefault(attr.Value, 1))
+						count = min(1000, max(1, atoiDefault(attr.Value, 1)))
 						break
 					}
 				}
@@ -326,6 +329,11 @@ func writeODFParagraph(ctx context.Context, decoder *xml.Decoder, buf *strings.B
 	if buf.Len() > 0 {
 		writeParagraphBreak(buf)
 	}
+	if start.Name.Local == "h" {
+		level := min(6, max(1, atoiDefault(attrValue(start, "outline-level"), 1)))
+		buf.WriteString(strings.Repeat("#", level))
+		buf.WriteByte(' ')
+	}
 	buf.WriteString(content)
 	return nil
 }
@@ -389,8 +397,10 @@ func extractODFTableCell(ctx context.Context, decoder *xml.Decoder, root xml.Sta
 	return strings.TrimSpace(cleanSpacing(buf.String())), nil
 }
 
+const maxODFRepeatedColumns = 1000
+
 func odfRepeatedCount(se xml.StartElement) int {
-	return max(1, atoiDefault(attrValue(se, "number-columns-repeated"), 1))
+	return min(maxODFRepeatedColumns, max(1, atoiDefault(attrValue(se, "number-columns-repeated"), 1)))
 }
 
 func attrValue(se xml.StartElement, name string) string {
