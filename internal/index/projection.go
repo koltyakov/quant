@@ -34,7 +34,7 @@ func LoadProjection(data []byte) (*ProjectionLayer, error) {
 
 	inDims := int(binary.LittleEndian.Uint32(data[0:]))
 	outDims := int(binary.LittleEndian.Uint32(data[4:]))
-	expected := 12 + inDims*outDims*4 + outDims*4
+	expected := 8 + inDims*outDims*4 + outDims*4
 	if len(data) < expected {
 		return nil, fmt.Errorf("projection data truncated: have %d, need %d", len(data), expected)
 	}

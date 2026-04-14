@@ -13,9 +13,16 @@ import (
 	"github.com/koltyakov/quant/internal/selfupdate"
 )
 
-const autoUpdateCheckInterval = 30 * time.Minute
-
 var errRestartRequired = errors.New("restart required")
+var (
+	autoUpdateCheckInterval = 30 * time.Minute
+	updateCheck             = selfupdate.Check
+	updateApply             = selfupdate.Apply
+	updateCheckAndApply     = selfupdate.CheckAndApply
+	updateRestart           = selfupdate.Restart
+	updateIsInteractive     = isInteractiveInput
+	updatePrompt            = prompt
+)
 
 func runUpdateCommand(ctx context.Context, args []string) int {
 	if len(args) > 0 {
@@ -31,7 +38,7 @@ func runUpdateCommand(ctx context.Context, args []string) int {
 	fmt.Printf("Current version: %s\n", Version)
 	fmt.Println("Checking for updates...")
 
-	rel, err := selfupdate.Check(ctx, Version)
+	rel, err := updateCheck(ctx, Version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "update check failed:", err)
 		return 1
@@ -42,9 +49,9 @@ func runUpdateCommand(ctx context.Context, args []string) int {
 	}
 
 	fmt.Printf("New version available: %s\n", ensureVPrefix(rel.TagName))
-	if isInteractiveInput() {
+	if updateIsInteractive() {
 		reader := bufio.NewReader(os.Stdin)
-		answer, err := prompt(reader, "Do you want to update? [y/N] ")
+		answer, err := updatePrompt(reader, "Do you want to update? [y/N] ")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
@@ -57,7 +64,7 @@ func runUpdateCommand(ctx context.Context, args []string) int {
 	}
 
 	fmt.Println("Downloading...")
-	res, err := selfupdate.Apply(ctx, rel)
+	res, err := updateApply(ctx, rel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "update failed:", err)
 		return 1
@@ -78,7 +85,7 @@ func autoUpdateOnStart(ctx context.Context, currentVersion string) bool {
 	}
 
 	logx.Info("auto-update check starting", "current_version", currentVersion)
-	result, err := selfupdate.CheckAndApply(ctx, currentVersion)
+	result, err := updateCheckAndApply(ctx, currentVersion)
 	if err != nil {
 		logx.Warn("auto-update check failed", "err", err)
 		return false
@@ -106,7 +113,7 @@ func startAutoUpdateLoop(ctx context.Context, currentVersion string, onUpdate fu
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			result, err := selfupdate.CheckAndApply(ctx, currentVersion)
+			result, err := updateCheckAndApply(ctx, currentVersion)
 			if err != nil {
 				logx.Warn("auto-update periodic check failed", "err", err)
 				continue
@@ -123,7 +130,7 @@ func startAutoUpdateLoop(ctx context.Context, currentVersion string, onUpdate fu
 
 func restartProcess() int {
 	logx.Info("auto-update restarting process")
-	if err := selfupdate.Restart(); err != nil {
+	if err := updateRestart(); err != nil {
 		fmt.Fprintln(os.Stderr, "auto-update: restart failed:", err)
 		return 1
 	}
