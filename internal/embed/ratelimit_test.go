@@ -245,8 +245,8 @@ func TestRateLimitedEmbedderForwardsCallsAndReleasesSlotsOnError(t *testing.T) {
 	if stats.Concurrency != 0 {
 		t.Fatalf("Concurrency after forwarded calls = %d, want 0", stats.Concurrency)
 	}
-	if stats.AvailableTokens != 1 {
-		t.Fatalf("AvailableTokens after two calls = %v, want 1", stats.AvailableTokens)
+	if stats.AvailableTokens != 3 {
+		t.Fatalf("AvailableTokens after two calls = %v, want 3", stats.AvailableTokens)
 	}
 }
 

@@ -93,6 +93,81 @@ func TestQueryCountingEmbedder(t *testing.T) {
 	}
 }
 
+func TestBatchCountingEmbedderEmbedAndClose(t *testing.T) {
+	t.Parallel()
+
+	embedder := &BatchCountingEmbedder{}
+	vec, err := embedder.Embed(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if len(vec) != 1 || vec[0] != 1 {
+		t.Fatalf("Embed() = %#v, want [1]", vec)
+	}
+	if err := embedder.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestShortBatchEmbedderEmbedDimensionsClose(t *testing.T) {
+	t.Parallel()
+
+	var embedder ShortBatchEmbedder
+	vec, err := embedder.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if len(vec) != 1 || vec[0] != 1 {
+		t.Fatalf("Embed() = %#v, want [1]", vec)
+	}
+	if got := embedder.Dimensions(); got != 1 {
+		t.Fatalf("Dimensions() = %d, want 1", got)
+	}
+	if err := embedder.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestQueryCountingEmbedderDimensionsAndClose(t *testing.T) {
+	t.Parallel()
+
+	embedder := &QueryCountingEmbedder{}
+	if got := embedder.Dimensions(); got != 1 {
+		t.Fatalf("Dimensions() = %d, want 1", got)
+	}
+	if err := embedder.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestCancelAwareEmbedderBatchDimensionsClose(t *testing.T) {
+	t.Parallel()
+
+	embedder := &CancelAwareEmbedder{
+		Started: make(chan struct{}),
+		Release: make(chan struct{}),
+	}
+
+	go func() {
+		<-embedder.Started
+		close(embedder.Release)
+	}()
+
+	batch, err := embedder.EmbedBatch(context.Background(), []string{"a"})
+	if err != nil {
+		t.Fatalf("EmbedBatch() error = %v", err)
+	}
+	if len(batch) != 1 || len(batch[0]) != 1 || batch[0][0] != 1 {
+		t.Fatalf("EmbedBatch() = %#v, want [[1]]", batch)
+	}
+	if got := embedder.Dimensions(); got != 1 {
+		t.Fatalf("Dimensions() = %d, want 1", got)
+	}
+	if err := embedder.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
 func TestCancelAwareEmbedderReleaseAndCancel(t *testing.T) {
 	t.Run("release", func(t *testing.T) {
 		started := make(chan struct{})

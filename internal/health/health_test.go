@@ -234,3 +234,41 @@ func TestIndexStateCheckerMapsStatesToStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseChecker_Name(t *testing.T) {
+	t.Parallel()
+
+	checker := NewDatabaseChecker("db", func(ctx context.Context) error { return nil }, time.Second)
+	if checker.Name() != "db" {
+		t.Fatalf("Name() = %q, want %q", checker.Name(), "db")
+	}
+}
+
+func TestEmbeddingChecker_Name(t *testing.T) {
+	t.Parallel()
+
+	checker := NewEmbeddingChecker("embed", func(ctx context.Context, text string) ([]float32, error) {
+		return nil, nil
+	}, time.Second)
+	if checker.Name() != "embed" {
+		t.Fatalf("Name() = %q, want %q", checker.Name(), "embed")
+	}
+}
+
+func TestHNSWChecker_Name(t *testing.T) {
+	t.Parallel()
+
+	checker := NewHNSWChecker("hnsw", func() bool { return true })
+	if checker.Name() != "hnsw" {
+		t.Fatalf("Name() = %q, want %q", checker.Name(), "hnsw")
+	}
+}
+
+func TestIndexStateChecker_Name(t *testing.T) {
+	t.Parallel()
+
+	checker := NewIndexStateChecker("index", func() (string, string) { return "", "" })
+	if checker.Name() != "index" {
+		t.Fatalf("Name() = %q, want %q", checker.Name(), "index")
+	}
+}

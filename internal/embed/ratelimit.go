@@ -134,6 +134,10 @@ func (r *RateLimiter) Release() {
 	if r.concurrency > 0 {
 		r.concurrency--
 	}
+	r.tokens++
+	if r.tokens > r.maxTokens {
+		r.tokens = r.maxTokens
+	}
 	r.mu.Unlock()
 
 	if r.concurrencyCh != nil {

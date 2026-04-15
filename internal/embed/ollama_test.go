@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -277,6 +278,7 @@ func TestOllamaEmbedBatchMarksRetryBudgetExceededPermanent(t *testing.T) {
 		httpClient: newTestHTTPClient(t, http.StatusInternalServerError, map[string]string{
 			"error": "backend unavailable",
 		}),
+		retryBackoff: func(int) time.Duration { return 0 },
 	}
 
 	_, err := o.EmbedBatch(context.Background(), []string{"short input"})

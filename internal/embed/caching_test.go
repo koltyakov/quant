@@ -279,3 +279,114 @@ func TestCachingEmbedder_EmbedBatchPassesThrough(t *testing.T) {
 		t.Fatalf("expected 2 vectors, got %d", len(vecs))
 	}
 }
+
+func TestCachingEmbedder_Dimensions(t *testing.T) {
+	inner := stubEmbedder{dimensions: 768}
+	c := NewCachingEmbedder(inner, CachingConfig{CacheSize: 2})
+	if got := c.Dimensions(); got != 768 {
+		t.Fatalf("expected dimensions 768, got %d", got)
+	}
+}
+
+func TestCachingEmbedder_Close(t *testing.T) {
+	closeErr := errors.New("close failed")
+	inner := stubEmbedder{closeErr: closeErr}
+	c := NewCachingEmbedder(inner, CachingConfig{CacheSize: 2})
+	if err := c.Close(); err != closeErr {
+		t.Fatalf("expected closeErr, got %v", err)
+	}
+}
+
+func TestCachingEmbedder_CircuitBreaker_RecordFailure(t *testing.T) {
+	callCount := 0
+	inner := stubEmbedder{
+		embedFn: func(_ context.Context, _ string) ([]float32, error) {
+			callCount++
+			return nil, errors.New("embed failed")
+		},
+	}
+	c := NewCachingEmbedder(inner, CachingConfig{
+		CacheSize:           2,
+		CircuitFailureLimit: 3,
+		CircuitResetTimeout: time.Minute,
+	})
+
+	for i := 0; i < 3; i++ {
+		_, err := c.Embed(context.Background(), "query")
+		if err == nil {
+			t.Fatalf("expected error on call %d", i+1)
+		}
+	}
+
+	if c.circuitBreaker.Allow() {
+		t.Fatal("expected circuit breaker to be open after failures, but Allow returned true")
+	}
+}
+
+func TestCachingEmbedder_CircuitBreaker_RecordSuccess(t *testing.T) {
+	inner := &queryCountingEmbedder{}
+	c := NewCachingEmbedder(inner, CachingConfig{
+		CacheSize:           2,
+		CircuitFailureLimit: 3,
+		CircuitResetTimeout: time.Minute,
+	})
+
+	cb := c.circuitBreaker
+	for i := 0; i < 2; i++ {
+		cb.RecordFailure()
+	}
+	if cb.failures != 2 {
+		t.Fatalf("expected 2 failures, got %d", cb.failures)
+	}
+
+	cb.RecordSuccess()
+	if cb.failures != 0 {
+		t.Fatalf("expected failures reset to 0 after RecordSuccess, got %d", cb.failures)
+	}
+	if cb.state != circuitClosed {
+		t.Fatal("expected circuit to remain closed")
+	}
+}
+
+func TestCachingEmbedder_CacheKey_ModelID(t *testing.T) {
+	inner := &queryCountingEmbedder{}
+	c := NewCachingEmbedder(inner, CachingConfig{
+		CacheSize: 2,
+		ModelID:   "text-embedding-3-small",
+	})
+
+	keyWithModel := c.cacheKey("hello world")
+	keyWithoutModel := newTestCachingEmbedder(inner, 2).cacheKey("hello world")
+
+	if keyWithModel == keyWithoutModel {
+		t.Fatal("expected cache keys to differ when ModelID is set")
+	}
+	if keyWithModel != "text-embedding-3-small\x00hello world" {
+		t.Fatalf("expected model-prefixed cache key, got %q", keyWithModel)
+	}
+}
+
+func TestCachingEmbedder_CircuitBreaker_Reset(t *testing.T) {
+	inner := stubEmbedder{
+		embedFn: func(_ context.Context, _ string) ([]float32, error) {
+			return nil, errors.New("fail")
+		},
+	}
+	c := NewCachingEmbedder(inner, CachingConfig{
+		CacheSize:           2,
+		CircuitFailureLimit: 1,
+		CircuitResetTimeout: 50 * time.Millisecond,
+	})
+
+	cb := c.circuitBreaker
+	cb.RecordFailure()
+	if cb.Allow() {
+		t.Fatal("expected circuit to be open after failure")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if !cb.Allow() {
+		t.Fatal("expected circuit to reset after timeout, but Allow returned false")
+	}
+}

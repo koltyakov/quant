@@ -31,7 +31,7 @@ func FindSemanticBoundaries(paragraphs []string, getSimilarity func(a, b string)
 		sim := getSimilarity(paragraphs[i-1], paragraphs[i])
 		if sim < threshold {
 			pos := 0
-			for j := 0; j < i; j++ {
+			for j := 0; j < i && j < len(paragraphs); j++ {
 				pos += len(paragraphs[j]) + 1
 			}
 			boundaries = append(boundaries, SemanticBoundary{Position: pos, Score: sim})

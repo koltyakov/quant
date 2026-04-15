@@ -16,11 +16,12 @@ import (
 )
 
 type Ollama struct {
-	baseURL    string
-	embedURL   string
-	model      string
-	dims       int
-	httpClient *http.Client
+	baseURL      string
+	embedURL     string
+	model        string
+	dims         int
+	httpClient   *http.Client
+	retryBackoff func(retry int) time.Duration
 }
 
 type ollamaEmbedRequest struct {
@@ -54,10 +55,11 @@ func newOllama(ctx context.Context, baseURL, model string, httpClient *http.Clie
 		return nil, err
 	}
 	o := &Ollama{
-		baseURL:    baseURL,
-		embedURL:   embedURL,
-		model:      model,
-		httpClient: httpClient,
+		baseURL:      baseURL,
+		embedURL:     embedURL,
+		model:        model,
+		httpClient:   httpClient,
+		retryBackoff: defaultRetryBackoff,
 	}
 
 	dims, err := o.probeDimensions(ctx)
@@ -81,6 +83,10 @@ func (o *Ollama) Embed(ctx context.Context, text string) ([]float32, error) {
 }
 
 const maxEmbedRetries = 4
+
+func defaultRetryBackoff(retry int) time.Duration {
+	return time.Duration(1<<retry) * 500 * time.Millisecond
+}
 
 func (o *Ollama) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
@@ -154,7 +160,7 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 			if retries >= maxEmbedRetries {
 				return nil, fmt.Errorf("%w: ollama: max retry budget (%d) exceeded", ErrPermanent, maxEmbedRetries)
 			}
-			backoff := time.Duration(1<<retries) * 500 * time.Millisecond
+			backoff := o.retryBackoff(retries)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
