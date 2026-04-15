@@ -31,6 +31,34 @@ Zero CGO. Pure Go.
 
 - Optional for scanned PDFs: [ocrmypdf](https://ocrmypdf.readthedocs.io/) installed on your system `PATH`. If present, `quant` will automatically use it as a best-effort OCR sidecar for PDFs that contain no extractable text.
 
+## Install
+
+The quickest install path on macOS and Linux is the release installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh | sh
+```
+
+By default it installs `quant` to `~/.local/bin`. To choose another directory:
+
+```bash
+QUANT_INSTALL_DIR=/usr/local/bin sh -c "$(curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh)"
+```
+
+If you already have Go installed, you can also install from source:
+
+```bash
+go install github.com/koltyakov/quant/cmd/quant@latest
+```
+
+Windows users can download the `quant_Windows_x86_64.zip` archive from GitHub Releases and place `quant.exe` on `PATH`.
+
+After installing:
+
+```bash
+quant version
+```
+
 ## Build from source
 
 You only need Go if you are building `quant` yourself instead of using a release binary.
