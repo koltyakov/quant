@@ -42,7 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/instal
 By default it installs `quant` to `~/.local/bin`. To choose another directory:
 
 ```bash
-QUANT_INSTALL_DIR=/usr/local/bin sh -c "$(curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh)"
+QUANT_INSTALL_DIR=/usr/local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh)"
 ```
 
 If you already have Go installed, you can also install from source:
@@ -79,6 +80,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 
 ```
 ./bin/quant mcp [--dir <path>] [options]
+./bin/quant init [client] [options]
 ./bin/quant update
 ./bin/quant version
 ```
@@ -88,6 +90,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 | Command | Description |
 |---------|-------------|
 | `mcp` | Start the MCP server |
+| `init` | Scaffold a project MCP config and research assistant instructions |
 | `update` | Check for and apply the latest GitHub release |
 | `version` | Print the quant version and exit |
 | `help` | Show top-level CLI help |
@@ -103,6 +106,9 @@ For the full flag reference, environment variables, YAML config, include/exclude
 ### Quick examples
 
 ```bash
+# Create a research workspace for Codex
+./bin/quant init codex --dir ./my-research-project
+
 # Index a folder over stdio
 ./bin/quant mcp --dir ./my-project
 

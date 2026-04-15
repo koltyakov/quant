@@ -10,6 +10,28 @@
 
 This keeps tool selection clearer for the agent, reduces irrelevant retrieval noise, and makes it easier to control which documents are in scope for a task.
 
+## Project init
+
+Use `quant init [client]` to scaffold a research project with a `data/` folder, a project-scoped MCP config, and research instructions:
+
+```bash
+quant init codex --dir ./my-research-project
+quant init opencode --dir ./my-research-project
+```
+
+Supported clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `gemini`.
+
+`quant init` writes relative MCP commands such as `quant mcp --dir ./data` so the project folder stays portable. Existing files are skipped by default; use `--force` to replace generated files. Use `--no-agents` to skip `AGENTS.md`, and `--skill` to add a project skill for clients that support it (`codex` and `claude`).
+
+| Client | MCP config | Instruction files |
+|---|---|---|
+| OpenCode | `opencode.json` | `AGENTS.md` referenced by `instructions` |
+| Codex | `.codex/config.toml` | `AGENTS.md`; optional `.agents/skills/quant-research/SKILL.md` |
+| Claude Code | `.mcp.json` | `AGENTS.md` plus `CLAUDE.md` shim; optional `.claude/skills/quant-research/SKILL.md` |
+| Cursor | `.cursor/mcp.json` | `AGENTS.md` |
+| GitHub Copilot (VS Code) | `.vscode/mcp.json` | `AGENTS.md` |
+| Gemini CLI | `.gemini/settings.json` | `AGENTS.md` via `contextFileName` |
+
 ## Claude Code
 
 Project-scoped MCPs are the right default:
@@ -58,19 +80,15 @@ Add a local stdio MCP with the Codex CLI:
 codex mcp add quant -- quant mcp --dir /path/to/project
 ```
 
-Or add to `codex.json` / `.codex/config.json`:
+Or add to `.codex/config.toml`:
 
-```json
-{
-  "mcpServers": {
-    "quant": {
-      "type": "stdio",
-      "command": "quant",
-      "args": ["mcp", "--dir", "/path/to/project"],
-      "env": { "QUANT_AUTOUPDATE": "true" }
-    }
-  }
-}
+```toml
+[mcp_servers.quant]
+command = "quant"
+args = ["mcp", "--dir", "/path/to/project"]
+
+[mcp_servers.quant.env]
+QUANT_AUTOUPDATE = "true"
 ```
 
 ## OpenCode

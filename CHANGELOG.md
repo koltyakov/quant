@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.10.0 (2026-04-15)
+
+### Features
+
+- **Tree-sitter chunkers for multiple languages** - New structure-aware chunkers for C, Java, JavaScript, Python, and Rust using Tree-sitter, producing higher-quality chunks that respect code syntax (functions, classes, imports, etc.) rather than splitting on plain newlines.
+- **HTML file extraction** - A new `HTMLExtractor` processes `.html` and `.htm` files, extracting readable text content while stripping tags, scripts, and style blocks.
+- **Periodic database vacuuming** - The indexer now vacuums the SQLite database on a configurable schedule to reclaim disk space and optimize query performance after heavy indexing or deletion workloads.
+- **Proxy server embedding support** - The proxy server now handles embedding and collection management requests, allowing remote proxy clients to trigger embeddings and manage collections through the proxy layer.
+
+### Improvements
+
+- **Comprehensive test coverage** - Added extensive unit tests across the codebase covering the indexer (initial sync, resync, watch, live indexing), embedding (caching, rate limiting, backoff, retry, providers), extraction (PDF, OOXML, ODF, RTF, HTML), MCP server lifecycle and tools, proxy client/server, locking (contention, timeout), HNSW operations, store CRUD/search/migration/dedup, self-update, and more.
+- **Install script** - New `scripts/install.sh` provides a one-command installation experience documented in the README.
+
 ## v0.9.0 (2026-04-13)
 
 ### Features
