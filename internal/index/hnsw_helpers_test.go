@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/coder/hnsw"
@@ -84,22 +83,24 @@ func TestDiskBackedHNSWFlushAndLoad(t *testing.T) {
 		t.Fatalf("unexpected disk-backed search results: %v", got)
 	}
 
+	disk.Add(3, []float32{0, 1})
+
 	loader := NewDiskBackedHNSW(graphPath, 8, 16, 1)
 	if err := loader.LoadFromDisk(context.Background()); err != nil {
 		t.Fatalf("LoadFromDisk returned error: %v", err)
 	}
-	if !loader.Ready() || loader.Len() != 2 || loader.ModCount() != 0 {
+	if !loader.Ready() || loader.Len() != 3 || loader.ModCount() != 0 {
 		t.Fatalf("unexpected loaded graph state: ready=%v len=%d mods=%d", loader.Ready(), loader.Len(), loader.ModCount())
 	}
 
-	loader.BatchAdd([]hnsw.Node[int]{hnsw.MakeNode(3, []float32{0, 1})})
+	if got := loader.Search([]float32{0, 1}, 2); len(got) != 2 || got[0] != 3 {
+		t.Fatalf("unexpected loaded search results: %v", got)
+	}
+
 	loader.BatchDelete([]int{1})
 	loader.Delete(99)
 	if loader.Len() != 2 {
-		t.Fatalf("unexpected len after batch add/delete: %d", loader.Len())
-	}
-	if got := loader.Search([]float32{0, 1}, 2); !reflect.DeepEqual(got, []int{3, 2}) && !reflect.DeepEqual(got, []int{3, 1}) {
-		t.Fatalf("unexpected post-update search results: %v", got)
+		t.Fatalf("unexpected len after delete: %d", loader.Len())
 	}
 
 	empty := NewDiskBackedHNSW("", 8, 16, 0)

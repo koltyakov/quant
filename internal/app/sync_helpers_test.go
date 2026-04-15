@@ -28,25 +28,30 @@ func TestResyncCoordinatorInitialSyncAndPendingResync(t *testing.T) {
 
 	var mu sync.Mutex
 	var states []string
-	onReadyCalled := 0
-	startupCalls := 0
-	resyncCalls := 0
+	var onReadyCalled int
+	var startupCalls int
+	var resyncCalls int
 	blockResync := make(chan struct{})
 	resyncStarted := make(chan struct{}, 1)
 
 	coordinator := NewResyncCoordinator(ResyncCallbacks{
 		OnStartup: func(context.Context) (SyncReport, error) {
+			mu.Lock()
 			startupCalls++
+			mu.Unlock()
 			return SyncReport{}, nil
 		},
 		OnResync: func(context.Context) (SyncReport, error) {
+			mu.Lock()
 			resyncCalls++
+			calls := resyncCalls
+			mu.Unlock()
 			select {
 			case resyncStarted <- struct{}{}:
 			default:
 			}
 			<-blockResync
-			if resyncCalls == 1 {
+			if calls == 1 {
 				return SyncReport{HadIndexFailures: true}, nil
 			}
 			return SyncReport{}, nil
@@ -57,13 +62,18 @@ func TestResyncCoordinatorInitialSyncAndPendingResync(t *testing.T) {
 			states = append(states, string(state)+":"+message)
 		},
 		OnReady: func(context.Context, SyncReport) {
+			mu.Lock()
 			onReadyCalled++
+			mu.Unlock()
 		},
 	})
 
 	coordinator.RunInitialSync(ctx)
-	if startupCalls != 1 || onReadyCalled != 1 {
-		t.Fatalf("unexpected initial sync callbacks: startup=%d ready=%d", startupCalls, onReadyCalled)
+	mu.Lock()
+	su, rd := startupCalls, onReadyCalled
+	mu.Unlock()
+	if su != 1 || rd != 1 {
+		t.Fatalf("unexpected initial sync callbacks: startup=%d ready=%d", su, rd)
 	}
 
 	coordinator.RequestResync(ctx)
@@ -72,10 +82,19 @@ func TestResyncCoordinatorInitialSyncAndPendingResync(t *testing.T) {
 	close(blockResync)
 
 	deadline := time.After(2 * time.Second)
-	for resyncCalls < 2 {
+	for {
+		mu.Lock()
+		rc := resyncCalls
+		mu.Unlock()
+		if rc >= 2 {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for coalesced resyncs, got %d calls", resyncCalls)
+			mu.Lock()
+			rc = resyncCalls
+			mu.Unlock()
+			t.Fatalf("timed out waiting for coalesced resyncs, got %d calls", rc)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
