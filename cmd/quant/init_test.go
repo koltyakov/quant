@@ -259,6 +259,146 @@ func TestInitProjectQuantCommandParts(t *testing.T) {
 	}
 }
 
+func TestParseInitArgsExplicitDir(t *testing.T) {
+	opts, err := parseInitArgs([]string{"opencode", "--dir", t.TempDir()})
+	if err != nil {
+		t.Fatalf("parseInitArgs() error = %v", err)
+	}
+	if !opts.ExplicitDir {
+		t.Fatalf("ExplicitDir = false, want true when --dir is passed")
+	}
+
+	opts2, err := parseInitArgs([]string{"opencode"})
+	if err != nil {
+		t.Fatalf("parseInitArgs() error = %v", err)
+	}
+	if opts2.ExplicitDir {
+		t.Fatalf("ExplicitDir = true, want false when --dir is not passed")
+	}
+}
+
+func TestInitProjectNoGitignoreWithoutExplicitDir(t *testing.T) {
+	dir := t.TempDir()
+	_, err := initProject(initOptions{
+		Client:       "opencode",
+		ProjectDir:   dir,
+		DataDir:      "data",
+		QuantCommand: "quant",
+		Autoupdate:   true,
+	})
+	if err != nil {
+		t.Fatalf("initProject() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".gitignore should not exist without explicit --dir")
+	}
+}
+
+func TestInitProjectGitignoreCreate(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "myproject")
+	res, err := initProject(initOptions{
+		Client:       "opencode",
+		ProjectDir:   sub,
+		DataDir:      "data",
+		QuantCommand: "quant",
+		Autoupdate:   true,
+		ExplicitDir:  true,
+	})
+	if err != nil {
+		t.Fatalf("initProject() error = %v", err)
+	}
+	found := false
+	for _, p := range res.Created {
+		if p == ".gitignore" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf(".gitignore not in created files: %v", res.Created)
+	}
+	gi := readFile(t, filepath.Join(sub, ".gitignore"))
+	for _, want := range []string{"data/", "*quant.db", "*quant.db-*", ".index/"} {
+		if !strings.Contains(gi, want) {
+			t.Fatalf(".gitignore missing %q:\n%s", want, gi)
+		}
+	}
+}
+
+func TestInitProjectGitignoreAppend(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "myproject")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, ".gitignore"), []byte("node_modules/\n*.log\n"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	res, err := initProject(initOptions{
+		Client:       "opencode",
+		ProjectDir:   sub,
+		DataDir:      "docs",
+		QuantCommand: "quant",
+		Autoupdate:   true,
+		ExplicitDir:  true,
+	})
+	if err != nil {
+		t.Fatalf("initProject() error = %v", err)
+	}
+	found := false
+	for _, p := range res.Created {
+		if p == ".gitignore" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf(".gitignore not in created files: %v", res.Created)
+	}
+	gi := readFile(t, filepath.Join(sub, ".gitignore"))
+	if !strings.HasPrefix(gi, "node_modules/\n*.log\n") {
+		t.Fatalf("existing .gitignore content not preserved:\n%s", gi)
+	}
+	if !strings.Contains(gi, "docs/") {
+		t.Fatalf(".gitignore missing docs/ after append:\n%s", gi)
+	}
+}
+
+func TestInitProjectGitignoreSkipIfAllPresent(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "myproject")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	existing := "data/\n*quant.db\n*quant.db-*\n.index/\n"
+	if err := os.WriteFile(filepath.Join(sub, ".gitignore"), []byte(existing), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	res, err := initProject(initOptions{
+		Client:       "opencode",
+		ProjectDir:   sub,
+		DataDir:      "data",
+		QuantCommand: "quant",
+		Autoupdate:   true,
+		ExplicitDir:  true,
+	})
+	if err != nil {
+		t.Fatalf("initProject() error = %v", err)
+	}
+	for _, p := range res.Skipped {
+		if p == ".gitignore" {
+			return
+		}
+	}
+	for _, p := range res.Created {
+		if p == ".gitignore" {
+			t.Fatalf(".gitignore should have been skipped when all entries already present")
+		}
+	}
+	t.Fatalf(".gitignore not in skipped or created: created=%v skipped=%v", res.Created, res.Skipped)
+}
+
 func stubInitPrompt(interactive bool, answer string) func() {
 	oldInteractive := initIsInteractive
 	oldPrompt := initPrompt

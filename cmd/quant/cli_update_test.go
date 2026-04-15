@@ -66,6 +66,15 @@ func TestRunAndRunMCPCommand(t *testing.T) {
 	if !strings.Contains(stderr, "error:") {
 		t.Fatalf("expected parse error, got %q", stderr)
 	}
+
+	stdout, stderr = captureOutput(t, func() {
+		if code := run([]string{"launch", "--help"}); code != 0 {
+			t.Fatalf("run(launch --help) code = %d", code)
+		}
+	})
+	if !strings.Contains(stdout, "quant launch <client>") || stderr != "" {
+		t.Fatalf("unexpected launch help output: stdout=%q stderr=%q", stdout, stderr)
+	}
 }
 
 func TestTerminalPromptHelpers(t *testing.T) {

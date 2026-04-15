@@ -39,6 +39,7 @@ type initOptions struct {
 	NoAgents     bool
 	Skill        bool
 	Autoupdate   bool
+	ExplicitDir  bool
 }
 
 type initResult struct {
@@ -122,6 +123,12 @@ func parseInitArgs(args []string) (initOptions, error) {
 	if err := flagSet.Parse(parseArgs); err != nil {
 		return opts, err
 	}
+
+	flagSet.Visit(func(f *flag.Flag) {
+		if f.Name == "dir" {
+			opts.ExplicitDir = true
+		}
+	})
 
 	remaining := flagSet.Args()
 	if clientArg != "" {
@@ -220,6 +227,20 @@ func initProject(opts initOptions) (initResult, error) {
 		return res, fmt.Errorf("creating data dir: %w", err)
 	}
 	res.Created = append(res.Created, displayInitPath(opts.ProjectDir, dataDirPath))
+
+	if opts.ExplicitDir {
+		wrote, err := writeGitignore(opts)
+		if err != nil {
+			return res, fmt.Errorf("writing .gitignore: %w", err)
+		}
+		gitignorePath := filepath.Join(opts.ProjectDir, ".gitignore")
+		displayPath := displayInitPath(opts.ProjectDir, gitignorePath)
+		if wrote {
+			res.Created = append(res.Created, displayPath)
+		} else {
+			res.Skipped = append(res.Skipped, displayPath)
+		}
+	}
 
 	files, err := renderInitFiles(opts)
 	if err != nil {
@@ -421,6 +442,75 @@ func writeInitFile(path string, content []byte, force bool) (bool, error) {
 	}
 	if err := os.WriteFile(path, content, initFileMode); err != nil {
 		return false, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return true, nil
+}
+
+func renderGitignoreEntries(dataDir string) []string {
+	return []string{
+		dataDir + "/",
+		"*quant.db",
+		"*quant.db-*",
+		".index/",
+	}
+}
+
+func writeGitignore(opts initOptions) (bool, error) {
+	gitignorePath := filepath.Join(opts.ProjectDir, ".gitignore")
+	entries := renderGitignoreEntries(opts.DataDir)
+
+	existing, err := os.ReadFile(gitignorePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("reading .gitignore: %w", err)
+	}
+
+	if errors.Is(err, os.ErrNotExist) {
+		var b strings.Builder
+		b.WriteString("# quant\n")
+		for _, e := range entries {
+			b.WriteString(e)
+			b.WriteByte('\n')
+		}
+		if err := os.WriteFile(gitignorePath, []byte(b.String()), initFileMode); err != nil {
+			return false, fmt.Errorf("writing .gitignore: %w", err)
+		}
+		return true, nil
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	existingSet := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		existingSet[strings.TrimSpace(line)] = true
+	}
+
+	var newEntries []string
+	for _, entry := range entries {
+		if !existingSet[entry] {
+			newEntries = append(newEntries, entry)
+		}
+	}
+	if len(newEntries) == 0 {
+		return false, nil
+	}
+
+	var b strings.Builder
+	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	b.WriteString("# quant\n")
+	for _, e := range newEntries {
+		b.WriteString(e)
+		b.WriteByte('\n')
+	}
+
+	f, err := os.OpenFile(gitignorePath, os.O_WRONLY|os.O_APPEND, initFileMode)
+	if err != nil {
+		return false, fmt.Errorf("opening .gitignore for append: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(b.String()); err != nil {
+		return false, fmt.Errorf("appending to .gitignore: %w", err)
 	}
 	return true, nil
 }

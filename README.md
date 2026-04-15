@@ -81,6 +81,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 ```
 ./bin/quant mcp [--dir <path>] [options]
 ./bin/quant init [client] [options]
+./bin/quant launch <client> [--dir <path>] [-- <client args...>]
 ./bin/quant update
 ./bin/quant version
 ```
@@ -91,6 +92,7 @@ mkdir -p bin && go build -o bin/quant ./cmd/quant
 |---------|-------------|
 | `mcp` | Start the MCP server |
 | `init` | Scaffold a project MCP config and research assistant instructions |
+| `launch` | Start a supported agent with quant MCP injected for this session |
 | `update` | Check for and apply the latest GitHub release |
 | `version` | Print the quant version and exit |
 | `help` | Show top-level CLI help |
@@ -108,6 +110,9 @@ For the full flag reference, environment variables, YAML config, include/exclude
 ```bash
 # Create a research workspace for Codex
 ./bin/quant init codex --dir ./my-research-project
+
+# Launch Codex with quant MCP over ./data
+./bin/quant launch codex
 
 # Index a folder over stdio
 ./bin/quant mcp --dir ./my-project

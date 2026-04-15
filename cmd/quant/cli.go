@@ -27,6 +27,8 @@ func run(args []string) int {
 		return runMCPCommand(commandArgs)
 	case "init":
 		return runInitCommand(commandArgs)
+	case "launch":
+		return runLaunchCommand(ctx, commandArgs)
 	case "update":
 		return runUpdateCommand(ctx, commandArgs)
 	case "version":
@@ -40,6 +42,9 @@ func run(args []string) int {
 		return 0
 	case "init-help":
 		printInitUsage()
+		return 0
+	case "launch-help":
+		printLaunchUsage()
 		return 0
 	case "update-help":
 		printUpdateUsage()
@@ -66,6 +71,9 @@ func resolveCommand(args []string) (string, []string) {
 		if len(args) > 1 && args[1] == "init" {
 			return "init-help", nil
 		}
+		if len(args) > 1 && args[1] == "launch" {
+			return "launch-help", nil
+		}
 		if len(args) > 1 && args[1] == "update" {
 			return "update-help", nil
 		}
@@ -83,6 +91,11 @@ func resolveCommand(args []string) (string, []string) {
 			return "init-help", nil
 		}
 		return "init", args[1:]
+	case "launch":
+		if len(args) > 1 && isHelpRequest(args[1:]) {
+			return "launch-help", nil
+		}
+		return "launch", args[1:]
 	case "update":
 		if len(args) > 1 && isHelpRequest(args[1:]) {
 			return "update-help", nil
@@ -121,12 +134,14 @@ func printUsage() {
 Usage:
   quant mcp [flags]      Start the MCP server
   quant init [client]    Scaffold a project MCP config
+  quant launch <client>  Launch an agent with quant MCP for this session
   quant update           Update to the latest release
   quant version          Print version
   quant help             Show help
 
 Run 'quant mcp --help' for MCP flags.
-Run 'quant init --help' for init flags.`)
+Run 'quant init --help' for init flags.
+Run 'quant launch --help' for launch flags.`)
 }
 
 func printMCPUsage() {

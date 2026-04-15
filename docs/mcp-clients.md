@@ -32,6 +32,20 @@ Supported clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `g
 | GitHub Copilot (VS Code) | `.vscode/mcp.json` | `AGENTS.md` |
 | Gemini CLI | `.gemini/settings.json` | `AGENTS.md` via `contextFileName` |
 
+## Session launch
+
+Use `quant launch <client>` to start a supported agent with the `quant` MCP server injected only for that process. This does not write project or user MCP configuration.
+
+```bash
+quant launch codex
+quant launch opencode --dir ../docs
+quant launch claude -- --permission-mode plan
+```
+
+By default, `quant launch` indexes `./data`, matching `quant init` workspaces. Pass `--dir .` or another path to index a different directory. Extra arguments after `--` are forwarded to the agent unchanged.
+
+Supported launch clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `gemini`. The `copilot` launcher targets the GitHub Copilot CLI; use `quant init copilot` for VS Code workspace configuration.
+
 ## Claude Code
 
 Project-scoped MCPs are the right default:
