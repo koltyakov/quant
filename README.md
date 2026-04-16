@@ -39,12 +39,7 @@ The quickest install path on macOS and Linux is the release installer:
 curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh | sh
 ```
 
-By default it installs `quant` to `~/.local/bin`. To choose another directory:
-
-```bash
-QUANT_INSTALL_DIR=/usr/local/bin \
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh)"
-```
+It installs `quant` to `~/.local/bin`. The installer checks whether `ollama` is on `PATH`; if it is missing, it asks whether to install Ollama with the official shell installer and prints manual setup guidance if skipped.
 
 If you already have Go installed, you can also install from source:
 
@@ -52,7 +47,15 @@ If you already have Go installed, you can also install from source:
 go install github.com/koltyakov/quant/cmd/quant@latest
 ```
 
-Windows users can download the `quant_Windows_x86_64.zip` archive from GitHub Releases and place `quant.exe` on `PATH`.
+On Windows, use the PowerShell installer:
+
+```powershell
+irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.ps1 | iex
+```
+
+It installs `quant.exe` to `%LOCALAPPDATA%\Programs\quant` and adds it to your user `PATH`. The installer also checks for Ollama and offers to install it via `winget`.
+
+Or download the `quant_Windows_x86_64.zip` archive directly from GitHub Releases and place `quant.exe` on `PATH`.
 
 After installing:
 
