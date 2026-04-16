@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.11.0 (2026-04-16)
+
+### Features
+
+- **Project initialization command** - `quant init <client>` generates MCP configuration files, instruction templates (AGENTS.md, CLAUDE.md), and skills for supported clients (opencode, codex, claude, cursor, copilot, gemini). Generated configs include tool permission rules so `quant` MCP tools are allowed without prompting.
+- **Launch command** - `quant launch <client>` starts a supported agent with the `quant` MCP server injected for that process only, without writing persistent config. Supports session-level tool permission flags for clients that require them.
+- **Windows install script** - New `scripts/install.ps1` provides a one-command PowerShell installation experience alongside the existing `scripts/install.sh`.
+- **Ollama installation prompt** - When the embedding backend is unavailable, `quant` now prompts to install Ollama if it is not detected on the system.
+
+### Improvements
+
+- **MCP tool permissions** - `quant init` and `quant launch` now configure tool permissions for all supported clients, allowing `quant` MCP tools without manual approval prompts.
+- **Self-update skips git describe builds** - Versions produced by `make install` (e.g. `v0.10.0-3-gecb7c99`) are now recognized as newer than the corresponding release tag, preventing unnecessary downgrade prompts.
+- **No auto-update during launch** - `quant launch` no longer sets `QUANT_AUTOUPDATE`, so launched agents will not trigger self-update checks.
+
 ## v0.10.0 (2026-04-15)
 
 ### Features
