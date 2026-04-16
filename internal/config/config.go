@@ -211,6 +211,10 @@ func ParseArgs(args []string) (*Config, error) {
 			cfg.EmbedURL = f.Value.String()
 		case "embed-model":
 			cfg.EmbedModel = f.Value.String()
+		case "embed-provider":
+			cfg.EmbedProvider = f.Value.String()
+		case "embed-api-key":
+			cfg.EmbedAPIKey = f.Value.String()
 		case "pdf-ocr-lang":
 			cfg.PDFOCRLang = f.Value.String()
 		case "chunk-size":
@@ -412,6 +416,18 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("QUANT_EMBED_BATCH_SIZE"); v != "" {
 		cfg.EmbedBatchSize = mustParseIntEnv("QUANT_EMBED_BATCH_SIZE", v, cfg.EmbedBatchSize)
 	}
+	if v := os.Getenv("QUANT_RERANKER"); v != "" {
+		cfg.RerankerType = v
+	}
+	if v := os.Getenv("QUANT_RERANKER_MODEL"); v != "" {
+		cfg.RerankerModel = v
+	}
+	if v := os.Getenv("QUANT_SUMMARIZER"); v != "" {
+		cfg.SummarizerEnabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("QUANT_SUMMARIZER_MODEL"); v != "" {
+		cfg.SummarizerModel = v
+	}
 }
 
 func defaultIndexWorkers() int {
@@ -422,11 +438,7 @@ func defaultIndexWorkers() int {
 	if cpus <= 4 {
 		return 2
 	}
-	workers := cpus / 2
-	if workers > 8 {
-		workers = 8
-	}
-	return workers
+	return min(cpus/2, 8)
 }
 
 func defaultMaxConcurrentTools() int {
@@ -434,11 +446,7 @@ func defaultMaxConcurrentTools() int {
 	if cpus <= 2 {
 		return 2
 	}
-	tools := cpus / 2
-	if tools > 8 {
-		tools = 8
-	}
-	return tools
+	return min(cpus/2, 8)
 }
 
 func defaultMaxVectorCandidates() int {
@@ -470,13 +478,7 @@ func DefaultMemoryLimit() int64 {
 		total = math.MaxInt64
 	}
 	limit := int64(total) / fraction
-	if limit < minLimit {
-		limit = minLimit
-	}
-	if limit > maxLimit {
-		limit = maxLimit
-	}
-	return limit
+	return max(min(limit, maxLimit), minLimit)
 }
 
 func mustParseIntFlag(name, value string, fallback int) int {

@@ -78,6 +78,10 @@ The summarizer generates a concise summary of each chunk at index time using a l
 | `QUANT_EMBED_BATCH_SIZE` | `--embed-batch-size` |
 | `QUANT_INDEX_WORKERS` | `--index-workers` |
 | `QUANT_PDF_OCR_LANG` | `--pdf-ocr-lang` |
+| `QUANT_RERANKER` | `--reranker` |
+| `QUANT_RERANKER_MODEL` | `--reranker-model` |
+| `QUANT_SUMMARIZER` | `--summarizer` |
+| `QUANT_SUMMARIZER_MODEL` | `--summarizer-model` |
 
 Auto-update is controlled separately:
 
