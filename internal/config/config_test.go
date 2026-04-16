@@ -215,6 +215,84 @@ func TestParseArgs_ResolvesConfigPathsRelativeToConfigFile(t *testing.T) {
 	}
 }
 
+func TestApplyEnv_RerankerSummarizer(t *testing.T) {
+	cfg := Default()
+
+	t.Setenv("QUANT_RERANKER", "cross-encoder")
+	t.Setenv("QUANT_RERANKER_MODEL", "llama3.2")
+	t.Setenv("QUANT_SUMMARIZER", "true")
+	t.Setenv("QUANT_SUMMARIZER_MODEL", "llama3.2")
+
+	applyEnv(cfg)
+
+	if cfg.RerankerType != "cross-encoder" {
+		t.Errorf("expected reranker cross-encoder, got %s", cfg.RerankerType)
+	}
+	if cfg.RerankerModel != "llama3.2" {
+		t.Errorf("expected reranker model llama3.2, got %s", cfg.RerankerModel)
+	}
+	if !cfg.SummarizerEnabled {
+		t.Errorf("expected summarizer enabled")
+	}
+	if cfg.SummarizerModel != "llama3.2" {
+		t.Errorf("expected summarizer model llama3.2, got %s", cfg.SummarizerModel)
+	}
+}
+
+func TestApplyEnv_SummarizerBoolVariants(t *testing.T) {
+	for _, v := range []string{"true", "1", "yes"} {
+		cfg := Default()
+		t.Setenv("QUANT_SUMMARIZER", v)
+		applyEnv(cfg)
+		if !cfg.SummarizerEnabled {
+			t.Errorf("QUANT_SUMMARIZER=%q should enable summarizer", v)
+		}
+	}
+	cfg := Default()
+	t.Setenv("QUANT_SUMMARIZER", "false")
+	applyEnv(cfg)
+	if cfg.SummarizerEnabled {
+		t.Errorf("QUANT_SUMMARIZER=false should not enable summarizer")
+	}
+}
+
+func TestParseArgs_EmbedProviderAndAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUANT_EMBED_PROVIDER", "openai")
+	t.Setenv("QUANT_EMBED_API_KEY", "env-key")
+
+	cfg, err := ParseArgs([]string{"--dir", dir})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	// Env vars take precedence (applied after flags, per documented precedence).
+	if cfg.EmbedProvider != "openai" {
+		t.Errorf("expected embed_provider openai from env, got %s", cfg.EmbedProvider)
+	}
+	if cfg.EmbedAPIKey != "env-key" {
+		t.Errorf("expected embed_api_key env-key from env, got %s", cfg.EmbedAPIKey)
+	}
+}
+
+func TestLoadYAML_EmbedProviderAndAPIKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	if err := os.WriteFile(cfgPath, []byte("embed_provider: openai\nembed_api_key: sk-test\n"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	cfg := Default()
+	if err := loadYAML(cfg, cfgPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EmbedProvider != "openai" {
+		t.Errorf("expected embed_provider openai, got %s", cfg.EmbedProvider)
+	}
+	if cfg.EmbedAPIKey != "sk-test" {
+		t.Errorf("expected embed_api_key sk-test, got %s", cfg.EmbedAPIKey)
+	}
+}
+
 func TestParseArgs_Help(t *testing.T) {
 	_, err := ParseArgs([]string{"--help"})
 	if !errors.Is(err, flag.ErrHelp) {

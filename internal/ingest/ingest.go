@@ -82,6 +82,10 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 		return nil
 	}
 
+	// Cancel the producer goroutine if we return early (e.g. on error).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	batchSize := p.BatchSize
 	if batchSize < 1 {
 		batchSize = 16

@@ -95,8 +95,8 @@ Settings are applied in this order, with later sources overriding earlier ones:
 
 1. Built-in defaults
 2. YAML config file (`--config`)
-3. Environment variables
-4. Explicit CLI flags
+3. CLI flags
+4. Environment variables
 
 ## YAML config file
 

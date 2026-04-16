@@ -197,37 +197,6 @@ func ParseArgs(args []string) (*Config, error) {
 
 	applyEnv(cfg)
 
-	flagSet.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "dir":
-			cfg.WatchDir = f.Value.String()
-		case "db":
-			cfg.DBPath = f.Value.String()
-		case "transport":
-			cfg.Transport = Transport(f.Value.String())
-		case "listen":
-			cfg.ListenAddr = f.Value.String()
-		case "embed-url":
-			cfg.EmbedURL = f.Value.String()
-		case "embed-model":
-			cfg.EmbedModel = f.Value.String()
-		case "embed-provider":
-			cfg.EmbedProvider = f.Value.String()
-		case "embed-api-key":
-			cfg.EmbedAPIKey = f.Value.String()
-		case "pdf-ocr-lang":
-			cfg.PDFOCRLang = f.Value.String()
-		case "chunk-size":
-			cfg.ChunkSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.ChunkSize)
-		case "chunk-overlap":
-			cfg.ChunkOverlap = mustParseFloatFlag(f.Name, f.Value.String(), cfg.ChunkOverlap)
-		case "index-workers":
-			cfg.IndexWorkers = mustParseIntFlag(f.Name, f.Value.String(), cfg.IndexWorkers)
-		case "embed-batch-size":
-			cfg.EmbedBatchSize = mustParseIntFlag(f.Name, f.Value.String(), cfg.EmbedBatchSize)
-		}
-	})
-
 	if cfg.WatchDir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
