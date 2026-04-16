@@ -101,7 +101,7 @@ func TestRateLimiterAcquireHonorsContextCancellation(t *testing.T) {
 	}
 	defer rl.Release()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 
 	err := rl.Acquire(ctx)

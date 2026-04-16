@@ -95,15 +95,13 @@ func (r *Registry) Check(ctx context.Context) []CheckResult {
 	var wg sync.WaitGroup
 
 	for i, checker := range checkers {
-		wg.Add(1)
-		go func(idx int, c Checker) {
-			defer wg.Done()
+		wg.Go(func() {
 			start := time.Now()
-			result := c.Check(ctx)
+			result := checker.Check(ctx)
 			result.Duration = time.Since(start)
 			result.Timestamp = start
-			results[idx] = result
-		}(i, checker)
+			results[i] = result
+		})
 	}
 
 	wg.Wait()

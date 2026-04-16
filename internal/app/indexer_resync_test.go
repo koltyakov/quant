@@ -84,7 +84,7 @@ func TestResyncCoordinator_FinishWithPending(t *testing.T) {
 }
 
 func TestResyncCoordinator_ErrorWithoutContextCancel(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	errorCalled := false
@@ -103,7 +103,7 @@ func TestResyncCoordinator_ErrorWithoutContextCancel(t *testing.T) {
 }
 
 func TestResyncCoordinator_ResyncSuccessState(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	stateCalled := false
@@ -356,7 +356,7 @@ func TestInitialSync_WithValidDir(t *testing.T) {
 		Embedder:  &stubEmbedder{dimensions: 3},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	err := idx.InitialSync(ctx)

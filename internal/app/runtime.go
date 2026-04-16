@@ -264,37 +264,15 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 
 	idx.StartLiveIndexWorkers(serverCtx, &wg)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		idx.WatchLoop(serverCtx, watcher)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		idx.RunInitialSync(serverCtx)
-	}()
+	wg.Go(func() { idx.WatchLoop(serverCtx, watcher) })
+	wg.Go(func() { idx.RunInitialSync(serverCtx) })
 
 	if cfg.HNSWReoptimizeThreshold > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			idx.RunHNSWReoptimizer(serverCtx, store, cfg.HNSWReoptimizeThreshold)
-		}()
+		wg.Go(func() { idx.RunHNSWReoptimizer(serverCtx, store, cfg.HNSWReoptimizeThreshold) })
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		idx.RunHNSWPeriodicFlush(serverCtx, store)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		idx.RunPeriodicVacuum(serverCtx, store)
-	}()
+	wg.Go(func() { idx.RunHNSWPeriodicFlush(serverCtx, store) })
+	wg.Go(func() { idx.RunPeriodicVacuum(serverCtx, store) })
 
 	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
 	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)
@@ -339,11 +317,7 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 
 	var promoted atomic.Bool
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		watchMainAndPromote(serverCtx, cfg, client, mainAddr, serverCancel, &promoted)
-	}()
+	wg.Go(func() { watchMainAndPromote(serverCtx, cfg, client, mainAddr, serverCancel, &promoted) })
 
 	mcpServer := mcp.NewServer(cfg, client, nil, version, nil)
 

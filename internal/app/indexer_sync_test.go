@@ -918,7 +918,7 @@ func TestRunInitialSync_InitializesResyncWhenNil(t *testing.T) {
 	})
 	idx.Resync = nil
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	idx.RunInitialSync(ctx)
@@ -932,10 +932,7 @@ func TestRequestResync_InitializesResyncWhenNil(t *testing.T) {
 	idx := newTestIndexer(root, &stubDocumentStore{}, &stubExtractor{}, &stubEmbedder{dimensions: 3})
 	idx.Resync = nil
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	idx.RequestResync(ctx)
+	idx.RequestResync(t.Context())
 	if idx.Resync == nil {
 		t.Fatal("expected Resync to be initialized")
 	}
@@ -960,7 +957,7 @@ func TestInitialSync_Delegates(t *testing.T) {
 		Quarantine: &stubQuarantineStore{},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	err := idx.InitialSync(ctx)

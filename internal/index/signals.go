@@ -164,10 +164,7 @@ func (s *RecencySignal) Score(ctx *SignalContext, candidate *ScoredCandidate) fl
 		halfLife = recencyHalfLife
 	}
 	weight := s.Weight()
-	age := ctx.Now.Sub(candidate.modifiedAt)
-	if age < 0 {
-		age = 0
-	}
+	age := max(ctx.Now.Sub(candidate.modifiedAt), 0)
 	decay := float32(fastExp(-0.693 * float64(age) / float64(halfLife)))
 	return weight * decay / float32(rrfK+1)
 }
@@ -227,7 +224,7 @@ func (s *FileTypeSignal) Score(ctx *SignalContext, candidate *ScoredCandidate) f
 func toLower(s string) string {
 	// Implemented inline to avoid import
 	result := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			result[i] = c + 32

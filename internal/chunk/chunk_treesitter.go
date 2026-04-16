@@ -35,7 +35,7 @@ func tsChunk(src string, spec tsDeclSpec, chunkSize int, overlapFraction float64
 	var pendingAttr string
 
 	n := int(root.NamedChildCount())
-	for i := 0; i < n; i++ {
+	for i := range n {
 		child := root.NamedChild(i)
 		nodeType := child.Type()
 

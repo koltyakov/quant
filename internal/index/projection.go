@@ -60,10 +60,10 @@ func (p *ProjectionLayer) Project(input []float32) []float32 {
 		return nil
 	}
 	output := make([]float32, p.outDims)
-	for j := 0; j < p.outDims; j++ {
+	for j := range p.outDims {
 		var sum float32
-		for i := 0; i < p.inDims; i++ {
-			sum += input[i] * p.weight[i*p.outDims+j]
+		for i, v := range input {
+			sum += v * p.weight[i*p.outDims+j]
 		}
 		output[j] = sum + p.bias[j]
 	}

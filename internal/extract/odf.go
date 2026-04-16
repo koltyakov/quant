@@ -141,7 +141,7 @@ func extractODFText(ctx context.Context, data []byte, mode odfMode) (string, err
 						return "", err
 					}
 					value = strings.TrimSpace(value)
-					for i := 0; i < repeat; i++ {
+					for range repeat {
 						if value == "" {
 							continue
 						}
@@ -282,7 +282,7 @@ func extractODFElementText(ctx context.Context, decoder *xml.Decoder, root xml.S
 					}
 					value = strings.TrimSpace(value)
 					depth--
-					for i := 0; i < repeat; i++ {
+					for range repeat {
 						if value == "" {
 							continue
 						}

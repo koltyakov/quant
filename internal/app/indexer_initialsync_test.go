@@ -129,7 +129,7 @@ func TestInitialSyncWithReport_StoreDeleteError(t *testing.T) {
 		Quarantine: &stubQuarantineStore{},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	report, err := idx.InitialSyncWithReport(ctx)
@@ -338,7 +338,7 @@ func TestInitialSyncWithReport_EmptyDir(t *testing.T) {
 		Quarantine: &stubQuarantineStore{},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	report, err := idx.InitialSyncWithReport(ctx)

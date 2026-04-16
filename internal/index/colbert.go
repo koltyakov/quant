@@ -76,7 +76,7 @@ func (c *ColBERTIndex) Search(queryTokens [][]float32, k int) []colBERTResult {
 	k = min(k, len(results))
 
 	out := make([]colBERTResult, k)
-	for i := 0; i < k; i++ {
+	for i := range k {
 		out[i] = colBERTResult{ChunkID: results[i].id, Score: results[i].score}
 	}
 	return out

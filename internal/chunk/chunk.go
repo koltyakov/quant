@@ -167,7 +167,6 @@ func headingDepth(line string) int {
 }
 
 func splitUnits(text string) []string {
-	lines := strings.Split(text, "\n")
 	var units []string
 	var paragraph []string
 	inFence := false
@@ -189,7 +188,7 @@ func splitUnits(text string) []string {
 		fence = nil
 	}
 
-	for _, rawLine := range lines {
+	for rawLine := range strings.SplitSeq(text, "\n") {
 		line := strings.TrimRight(rawLine, " \t")
 		trimmed := strings.TrimSpace(line)
 
@@ -242,11 +241,10 @@ func expandLargeUnits(units []string, chunkSize int) []string {
 
 func splitLargeUnit(unit string, chunkSize int) []string {
 	if strings.Contains(unit, "\n") {
-		lines := strings.Split(unit, "\n")
 		var parts []string
 		var current []string
 		currentWords := 0
-		for _, line := range lines {
+		for line := range strings.SplitSeq(unit, "\n") {
 			lineWords := wordCount(line)
 			if currentWords > 0 && currentWords+lineWords > chunkSize {
 				parts = append(parts, strings.Join(current, "\n"))

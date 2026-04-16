@@ -154,7 +154,7 @@ type indexStatusToolResponse struct {
 	FTS             *index.FTSDiagnostics `json:"fts,omitempty"`
 	State           string                `json:"state,omitempty"`
 	StateMessage    string                `json:"state_message,omitempty"`
-	StateUpdatedAt  time.Time             `json:"state_updated_at,omitempty"`
+	StateUpdatedAt  time.Time             `json:"state_updated_at"`
 }
 
 type embeddingStatusProvider interface {
@@ -364,17 +364,19 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 
 	total := docCount
 
-	output := fmt.Sprintf("Indexed documents (%d total", total)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Indexed documents (%d total", total)
 	if len(docs) != total {
-		output += fmt.Sprintf(", showing first %d", len(docs))
+		fmt.Fprintf(&sb, ", showing first %d", len(docs))
 	}
-	output += "):\n"
+	sb.WriteString("):\n")
 	for _, doc := range docs {
-		output += fmt.Sprintf("  %s (indexed: %s)\n", doc.Path, doc.IndexedAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(&sb, "  %s (indexed: %s)\n", doc.Path, doc.IndexedAt.Format("2006-01-02 15:04:05"))
 	}
 	if len(docs) != total {
-		output += fmt.Sprintf("  ... and %d more\n", total-len(docs))
+		fmt.Fprintf(&sb, "  ... and %d more\n", total-len(docs))
 	}
+	output := sb.String()
 
 	return mcplib.NewToolResultStructured(structured, output), nil
 }
@@ -593,10 +595,7 @@ func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolReq
 	limit := 10
 	if v, ok := args["limit"].(float64); ok {
 		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
-			limit = int(v)
-			if limit > 50 {
-				limit = 50
-			}
+			limit = min(int(v), 50)
 		}
 	}
 
@@ -658,10 +657,7 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 	limit := 20
 	if v, ok := args["limit"].(float64); ok {
 		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
-			limit = int(v)
-			if limit > 50 {
-				limit = 50
-			}
+			limit = min(int(v), 50)
 		}
 	}
 
@@ -829,8 +825,7 @@ func formatSearchSpotlights(results []index.SearchResult, limit int) string {
 	}
 
 	parts := make([]string, 0, limit)
-	for i := 0; i < limit; i++ {
-		r := results[i]
+	for _, r := range results[:limit] {
 		parts = append(parts, fmt.Sprintf(
 			"%s#%d score=%.4f %s snippet=%q",
 			r.DocumentPath,
@@ -852,8 +847,8 @@ func formatDocumentSpotlights(docs []index.Document, limit int) string {
 	}
 
 	parts := make([]string, 0, limit)
-	for i := 0; i < limit; i++ {
-		parts = append(parts, docs[i].Path)
+	for _, d := range docs[:limit] {
+		parts = append(parts, d.Path)
 	}
 	return strings.Join(parts, ", ")
 }

@@ -23,8 +23,7 @@ import (
 func TestResyncCoordinatorInitialSyncAndPendingResync(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	var mu sync.Mutex
 	var states []string
