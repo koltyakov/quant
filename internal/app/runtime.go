@@ -342,7 +342,7 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchMainAndPromote(serverCtx, cfg, version, client, mainAddr, serverCancel, &promoted)
+		watchMainAndPromote(serverCtx, cfg, client, mainAddr, serverCancel, &promoted)
 	}()
 
 	mcpServer := mcp.NewServer(cfg, client, nil, version, nil)
@@ -428,7 +428,7 @@ func ollamaLive(ctx context.Context, baseURL string) error {
 	return nil
 }
 
-func watchMainAndPromote(ctx context.Context, cfg *config.Config, version string, client *proxy.Client, mainAddr string, cancel context.CancelFunc, promoted *atomic.Bool) {
+func watchMainAndPromote(ctx context.Context, cfg *config.Config, client *proxy.Client, mainAddr string, cancel context.CancelFunc, promoted *atomic.Bool) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 

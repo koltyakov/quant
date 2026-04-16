@@ -113,7 +113,7 @@ func splitGo(src string, chunkSize int, overlapFraction float64) []Chunk {
 
 // goPreamble extracts the package clause and import declarations as a reusable header.
 func goDeclSignature(decl string) string {
-	for _, line := range strings.Split(decl, "\n") {
+	for line := range strings.SplitSeq(decl, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			if len(trimmed) > 120 {

@@ -35,7 +35,7 @@ func TestSyncDocumentOnce_FileSucceeds_IndexUpdated(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "docs/a.txt", file, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "docs/a.txt", file, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSyncDocumentOnce_FileRemoved_DocExists(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "gone/once.txt", filepath.Join(root, "gone", "once.txt"), nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "gone/once.txt", filepath.Join(root, "gone", "once.txt"), nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSyncDocumentOnce_SameModTimeSameHash_Noop(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err = idx.syncDocumentOnce(context.Background(), "same.txt", file, &modTime, nil, version)
+	action, err = idx.syncDocumentOnce(context.Background(), "same.txt", file, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error on second sync: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestSyncDocumentOnce_UnsupportedTypeNoDocRemoval(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "data.bin", file, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "data.bin", file, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestSyncDocumentOnce_ExtractError(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "err.txt", file, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "err.txt", file, nil, version)
 	if err == nil {
 		t.Fatalf("expected extraction error, got action=%s", action)
 	}

@@ -127,7 +127,7 @@ func (h *headingBreadcrumbs) push(heading string) {
 // Returns empty string if no headings have been seen.
 func (h *headingBreadcrumbs) breadcrumb() string {
 	var parts []string
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if h.levels[i] != "" {
 			parts = append(parts, h.levels[i])
 		}
@@ -145,7 +145,7 @@ func (h *headingBreadcrumbs) breadcrumb() string {
 // singleDepth returns the depth of the single populated heading, for preserving
 // the # prefix when there's only one level.
 func (h *headingBreadcrumbs) singleDepth() int {
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		if h.levels[i] != "" {
 			return i + 1
 		}
@@ -290,10 +290,7 @@ func splitLargeUnit(unit string, chunkSize int) []string {
 	words := strings.Fields(unit)
 	var parts []string
 	for start := 0; start < len(words); start += chunkSize {
-		end := start + chunkSize
-		if end > len(words) {
-			end = len(words)
-		}
+		end := min(start+chunkSize, len(words))
 		parts = append(parts, strings.Join(words[start:end], " "))
 	}
 	return parts
@@ -311,8 +308,7 @@ func splitSentences(text string) []string {
 	var sentences []string
 	start := 0
 
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
+	for i, r := range runes {
 		if r != '.' && r != '!' && r != '?' {
 			continue
 		}

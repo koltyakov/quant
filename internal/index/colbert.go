@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
@@ -72,9 +73,7 @@ func (c *ColBERTIndex) Search(queryTokens [][]float32, k int) []colBERTResult {
 		return results[i].score > results[j].score
 	})
 
-	if k > len(results) {
-		k = len(results)
-	}
+	k = min(k, len(results))
 
 	out := make([]colBERTResult, k)
 	for i := 0; i < k; i++ {
@@ -175,9 +174,9 @@ func DecodeTokenEmbeddings(data []byte) [][]float32 {
 
 	result := make([][]float32, nTokens)
 	offset := 12
-	for i := 0; i < nTokens; i++ {
+	for i := range nTokens {
 		result[i] = make([]float32, dims)
-		for j := 0; j < dims; j++ {
+		for j := range dims {
 			result[i][j] = math.Float32frombits(binary.LittleEndian.Uint32(data[offset:]))
 			offset += 4
 		}
@@ -277,9 +276,10 @@ func joinInts(ids []int, sep string) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	s := fmt.Sprintf("%d", ids[0])
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d", ids[0])
 	for _, id := range ids[1:] {
-		s += fmt.Sprintf("%s%d", sep, id)
+		fmt.Fprintf(&b, "%s%d", sep, id)
 	}
-	return s
+	return b.String()
 }

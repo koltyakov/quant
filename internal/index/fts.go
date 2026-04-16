@@ -28,7 +28,7 @@ func splitIdentifier(token string) []string {
 
 	var words []string
 	if isSnake {
-		for _, part := range strings.Split(token, "_") {
+		for part := range strings.SplitSeq(token, "_") {
 			if part != "" {
 				words = append(words, strings.ToLower(part))
 			}

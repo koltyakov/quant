@@ -63,7 +63,7 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding
 	var vectorOnlyCandidates map[int]*searchCandidate
 	if queryEmbedding != nil {
 		var err error
-		vectorOnlyCandidates, err = s.collectVectorCandidatesFiltered(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter, metadataWhere, metadataArgs)
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -358,10 +358,6 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 		}
 	}
 	return rank, rows.Err()
-}
-
-func (s *Store) collectVectorCandidatesFiltered(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, docFilter map[string]float32, metadataWhere string, metadataArgs []any) (map[int]*searchCandidate, error) {
-	return s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter)
 }
 
 func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) (map[int]*searchCandidate, error) {

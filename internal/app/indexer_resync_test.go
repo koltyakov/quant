@@ -289,7 +289,7 @@ func TestSyncDocumentOnce_StatErrorPermission(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "permission_test", "/nonexistent/deeply/nested/path/that/should/not/exist.txt", nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "permission_test", "/nonexistent/deeply/nested/path/that/should/not/exist.txt", nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

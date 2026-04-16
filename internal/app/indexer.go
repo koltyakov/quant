@@ -191,10 +191,8 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	scannedPaths := make(map[string]bool)
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for item := range jobs {
 				if idx.isQuarantined(ctx, item.key) {
 					continue
@@ -203,7 +201,7 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 				action, err := idx.SyncDocument(ctx, item.key, item.result.Path, &modTime, item.doc)
 				indexResults <- indexResult{path: item.result.Path, modTime: modTime, action: action, err: err}
 			}
-		}()
+		})
 	}
 
 	go func() {
@@ -299,10 +297,7 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 }
 
 func (idx *Indexer) workerCount(maxPending int) int {
-	workers := idx.cfg.IndexWorkers
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(idx.cfg.IndexWorkers, 1)
 	if maxPending > 0 && workers > maxPending {
 		workers = maxPending
 	}
@@ -319,10 +314,8 @@ func (idx *Indexer) StartLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 	}
 
 	workers := idx.workerCount(0)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -331,7 +324,7 @@ func (idx *Indexer) StartLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 					idx.processLiveIndexRequest(ctx, path)
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -564,22 +557,20 @@ func (idx *Indexer) SyncDocument(ctx context.Context, key, path string, modTime 
 		return IndexNoop, nil
 	}
 
-	currentModTime := modTime
 	currentDoc := doc
 	currentVersion := version
 	for {
-		action, err := idx.syncDocumentOnce(ctx, key, path, currentModTime, currentDoc, currentVersion)
+		action, err := idx.syncDocumentOnce(ctx, key, path, currentDoc, currentVersion)
 		nextVersion, rerun := idx.paths.Finish(key)
 		if !rerun {
 			return action, err
 		}
-		currentModTime = nil
 		currentDoc = nil
 		currentVersion = nextVersion
 	}
 }
 
-func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document, version uint64) (IndexAction, error) {
+func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, doc *index.Document, version uint64) (IndexAction, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -658,7 +649,7 @@ func (idx *Indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path
 	}
 	current := idx.cfg.WatchDir
 	if relDir != "." {
-		for _, part := range strings.Split(relDir, string(filepath.Separator)) {
+		for part := range strings.SplitSeq(relDir, string(filepath.Separator)) {
 			current = filepath.Join(current, part)
 			matcher.Load(current)
 		}

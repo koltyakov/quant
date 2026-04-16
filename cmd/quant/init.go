@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -187,7 +188,7 @@ func normalizeInitOptions(opts *initOptions) error {
 	if filepath.IsAbs(dataDir) {
 		return fmt.Errorf("data-dir must be relative to the project")
 	}
-	for _, part := range strings.Split(dataDir, string(os.PathSeparator)) {
+	for part := range strings.SplitSeq(dataDir, string(os.PathSeparator)) {
 		if part == ".." {
 			return fmt.Errorf("data-dir must stay within the project")
 		}
@@ -201,12 +202,7 @@ func normalizeInitOptions(opts *initOptions) error {
 }
 
 func isSupportedInitClient(client string) bool {
-	for _, supported := range supportedInitClients {
-		if client == supported {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(supportedInitClients, client)
 }
 
 func initProject(opts initOptions) (initResult, error) {

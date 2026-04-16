@@ -104,10 +104,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 	go func() {
 		defer close(resultCh)
 		for batchStart := 0; batchStart < len(toEmbed); batchStart += batchSize {
-			batchEnd := batchStart + batchSize
-			if batchEnd > len(toEmbed) {
-				batchEnd = len(toEmbed)
-			}
+			batchEnd := min(batchStart+batchSize, len(toEmbed))
 			batch := toEmbed[batchStart:batchEnd]
 			texts := make([]string, len(batch))
 			for i, c := range batch {
@@ -196,10 +193,7 @@ func PrepareChunks(text, filePath string, chunkSize int, overlap float64) []chun
 }
 
 func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
-	contentBudget := embedContentBudget(c.Heading)
-	if contentBudget < 1 {
-		contentBudget = 1
-	}
+	contentBudget := max(embedContentBudget(c.Heading), 1)
 	if utf8.RuneCountInString(BuildEmbedInput("", c.Heading, c.Content)) <= embed.MaxInputRunes {
 		return []chunk.Chunk{c}
 	}
@@ -231,7 +225,7 @@ func embedContentBudget(heading string) int {
 }
 
 func CodeSignature(block string) string {
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			if len(trimmed) > 120 {

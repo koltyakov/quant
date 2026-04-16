@@ -1317,7 +1317,7 @@ func TestSyncDocumentOnce_StatError(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "nonexistent", "/nonexistent/path/that/should/not/exist/abc123.txt", nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "nonexistent", "/nonexistent/path/that/should/not/exist/abc123.txt", nil, version)
 	if action != IndexNoop && action != IndexRemoved {
 		t.Fatalf("expected noop or removed, got %s", action)
 	}
@@ -1341,7 +1341,7 @@ func TestSyncDocumentOnce_UnsupportedTypeNoDoc(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "a.dat", file, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "a.dat", file, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -72,9 +72,7 @@ func (d *docEmbeddingIndex) topDocPaths(queryEmbed []float32, topK int) map[stri
 		all = append(all, scored{path: path, vec: vec, dot: dot})
 	}
 
-	if topK > len(all) {
-		topK = len(all)
-	}
+	topK = min(topK, len(all))
 
 	for i := 0; i < topK; i++ {
 		for j := len(all) - 1; j > i; j-- {

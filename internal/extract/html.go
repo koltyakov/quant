@@ -126,7 +126,7 @@ func cleanHTMLText(s string) string {
 	b.Grow(len(s))
 
 	prevNewline := false
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			if !prevNewline {

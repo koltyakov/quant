@@ -143,7 +143,7 @@ func tsChunk(src string, spec tsDeclSpec, chunkSize int, overlapFraction float64
 }
 
 func tsSignature(block string) string {
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			if len(trimmed) > 120 {

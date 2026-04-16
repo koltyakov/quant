@@ -303,7 +303,7 @@ func TestSyncDocumentOnce_FileNotFound_RemoveFromIndex(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "docs/old.txt", filepath.Join(root, "docs", "old.txt"), nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "docs/old.txt", filepath.Join(root, "docs", "old.txt"), nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestSyncDocumentOnce_FileNotFound_NoDoc(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "docs/ghost.txt", filepath.Join(root, "docs", "ghost.txt"), nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "docs/ghost.txt", filepath.Join(root, "docs", "ghost.txt"), nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestSyncDocumentOnce_IsDirectory_Noop(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "subdir", dir, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "subdir", dir, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestSyncDocumentOnce_UnsupportedExtractor_RemoveFromIndex(t *testing.T) {
 		t.Fatal("expected Begin to succeed")
 	}
 
-	action, err := idx.syncDocumentOnce(context.Background(), "docs/a.dat", file, nil, nil, version)
+	action, err := idx.syncDocumentOnce(context.Background(), "docs/a.dat", file, nil, version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

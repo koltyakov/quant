@@ -95,7 +95,7 @@ func splitCode(src string, chunkSize int, overlapFraction float64) []Chunk {
 }
 
 func codeSignature(block string) string {
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			if len(trimmed) > 120 {

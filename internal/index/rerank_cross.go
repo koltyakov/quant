@@ -150,10 +150,7 @@ func (r *CrossEncoderReranker) scoreBatch(ctx context.Context, query string, can
 
 	batchSize := 8
 	for batchStart := 0; batchStart < len(pairs); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(pairs) {
-			batchEnd = len(pairs)
-		}
+		batchEnd := min(batchStart+batchSize, len(pairs))
 		batch := pairs[batchStart:batchEnd]
 
 		batchScores, err := r.scoreSubBatch(ctx, query, batch)
