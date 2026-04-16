@@ -516,7 +516,7 @@ func TestProcessLiveIndexRequest_ProcessesFile(t *testing.T) {
 	idx.live = NewLiveIndexQueue(2)
 
 	modTime := time.Now()
-	if !idx.live.MarkPending(file, modTime) {
+	if !idx.live.MarkPending("a.txt", modTime) {
 		t.Fatal("expected MarkPending to return true")
 	}
 
@@ -600,7 +600,7 @@ func TestScheduleIndexRetry_QuarantineOnGiveUp(t *testing.T) {
 	idx.scheduleIndexRetry(context.Background(), file, time.Now(), permanentErr)
 	time.Sleep(30 * time.Millisecond)
 
-	result := idx.retries.Schedule(file, time.Now(), func(time.Time) {})
+	result := idx.retries.Schedule("a.txt", time.Now(), func(time.Time) {})
 	if result != RetryScheduleGaveUp {
 		t.Fatalf("expected RetryScheduleGaveUp after max attempts, got %v", result)
 	}
@@ -842,8 +842,8 @@ func TestEnqueueLiveIndex_QueuePath(t *testing.T) {
 	default:
 		t.Fatal("expected path to be queued")
 	}
-	if queued != file {
-		t.Fatalf("expected queued path %s, got %s", file, queued)
+	if queued != "a.txt" {
+		t.Fatalf("expected queued key %s, got %s", "a.txt", queued)
 	}
 }
 

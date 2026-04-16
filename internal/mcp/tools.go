@@ -155,6 +155,8 @@ type indexStatusToolResponse struct {
 	State           string                `json:"state,omitempty"`
 	StateMessage    string                `json:"state_message,omitempty"`
 	StateUpdatedAt  time.Time             `json:"state_updated_at"`
+	StateServing    bool                  `json:"state_serving"`
+	StateFresh      bool                  `json:"state_fresh"`
 }
 
 type embeddingStatusProvider interface {
@@ -417,6 +419,8 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		structured.State = string(snapshot.State)
 		structured.StateMessage = snapshot.Message
 		structured.StateUpdatedAt = snapshot.UpdatedAt
+		structured.StateServing = snapshot.Servable()
+		structured.StateFresh = snapshot.Fresh()
 	}
 
 	output := fmt.Sprintf(
@@ -434,6 +438,8 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		if structured.StateMessage != "" {
 			output += fmt.Sprintf("\n  State Detail: %s", structured.StateMessage)
 		}
+		output += fmt.Sprintf("\n  Serving Queries: %t", structured.StateServing)
+		output += fmt.Sprintf("\n  Index Fresh: %t", structured.StateFresh)
 	}
 
 	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel, "state", structured.State)

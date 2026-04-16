@@ -63,7 +63,7 @@ type Indexer struct {
 
 func NewIndexer(ic IndexerConfig) *Indexer {
 	cfg := ic.Cfg
-	return &Indexer{
+	idx := &Indexer{
 		cfg:        cfg,
 		store:      ic.Store,
 		hnswStore:  ic.HNSWStore,
@@ -84,9 +84,14 @@ func NewIndexer(ic IndexerConfig) *Indexer {
 		retries:    NewRetryScheduler(),
 		IndexState: runtimestate.NewIndexStateTracker(),
 	}
+	idx.initResyncCoordinator()
+	return idx
 }
 
 func (idx *Indexer) initResyncCoordinator() {
+	if idx == nil || idx.Resync != nil {
+		return
+	}
 	idx.Resync = NewResyncCoordinator(ResyncCallbacks{
 		OnStartup: func(ctx context.Context) (SyncReport, error) {
 			idx.setIndexState(runtimestate.IndexStateIndexing, "initial filesystem scan in progress")
@@ -125,16 +130,12 @@ func (idx *Indexer) initResyncCoordinator() {
 }
 
 func (idx *Indexer) RunInitialSync(ctx context.Context) {
-	if idx.Resync == nil {
-		idx.initResyncCoordinator()
-	}
+	idx.initResyncCoordinator()
 	idx.Resync.RunInitialSync(ctx)
 }
 
 func (idx *Indexer) RequestResync(ctx context.Context) {
-	if idx.Resync == nil {
-		idx.initResyncCoordinator()
-	}
+	idx.initResyncCoordinator()
 	idx.Resync.RequestResync(ctx)
 }
 
@@ -157,27 +158,27 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	}
 	docByPath := make(map[string]*index.Document, len(docs))
 	for i := range docs {
-		key, err := NormalizeStoredDocumentPath(idx.cfg.WatchDir, docs[i].Path)
+		ref, err := ResolveStoredDocumentRef(idx.cfg.WatchDir, docs[i].Path)
 		if err != nil {
 			continue
 		}
-		if key != docs[i].Path {
-			if err := idx.store.RenameDocumentPath(ctx, docs[i].Path, key); err != nil {
-				return report, fmt.Errorf("renaming indexed document %s to %s: %w", docs[i].Path, key, err)
+		if ref.Key != docs[i].Path {
+			if err := idx.store.RenameDocumentPath(ctx, docs[i].Path, ref.Key); err != nil {
+				return report, fmt.Errorf("renaming indexed document %s to %s: %w", docs[i].Path, ref.Key, err)
 			}
-			docs[i].Path = key
+			docs[i].Path = ref.Key
 		}
 		docByPath[docs[i].Path] = &docs[i]
 	}
 
 	type pendingItem struct {
-		key    string
+		ref    DocumentRef
 		result scan.Result
 		doc    *index.Document
 	}
 
 	type indexResult struct {
-		path    string
+		ref     DocumentRef
 		modTime time.Time
 		action  IndexAction
 		err     error
@@ -194,12 +195,12 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	for range workers {
 		wg.Go(func() {
 			for item := range jobs {
-				if idx.isQuarantined(ctx, item.key) {
+				if idx.isQuarantined(ctx, item.ref.Key) {
 					continue
 				}
 				modTime := item.result.ModifiedAt
-				action, err := idx.SyncDocument(ctx, item.key, item.result.Path, &modTime, item.doc)
-				indexResults <- indexResult{path: item.result.Path, modTime: modTime, action: action, err: err}
+				action, err := idx.SyncDocumentRef(ctx, item.ref, &modTime, item.doc)
+				indexResults <- indexResult{ref: item.ref, modTime: modTime, action: action, err: err}
 			}
 		})
 	}
@@ -209,20 +210,20 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 			if idx.shouldIgnorePath(r.Path) {
 				return nil
 			}
-			key, err := DocumentKey(idx.cfg.WatchDir, r.Path)
+			ref, err := ResolveDocumentRef(idx.cfg.WatchDir, r.Path)
 			if err != nil {
 				return fmt.Errorf("computing document key for %s: %w", r.Path, err)
 			}
-			scannedPaths[key] = true
+			scannedPaths[ref.Key] = true
 			if !idx.extractor.Supports(r.Path) {
 				return nil
 			}
-			doc := docByPath[key]
+			doc := docByPath[ref.Key]
 
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case jobs <- pendingItem{key: key, result: r, doc: doc}:
+			case jobs <- pendingItem{ref: ref, result: r, doc: doc}:
 				return nil
 			}
 		})
@@ -235,19 +236,19 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	for result := range indexResults {
 		if result.err != nil {
 			report.HadIndexFailures = true
-			logx.Error("indexing failed", "path", result.path, "err", result.err)
-			idx.scheduleIndexRetry(ctx, result.path, result.modTime, result.err)
+			logx.Error("indexing failed", "path", result.ref.AbsPath, "err", result.err)
+			idx.scheduleIndexRetryRef(ctx, result.ref, result.modTime, result.err)
 			reclaimProcessMemory()
 			continue
 		}
 		if idx.retries != nil {
-			idx.retries.Clear(result.path)
+			idx.retries.Clear(result.ref.Key)
 		}
 		switch result.action {
 		case IndexUpdated:
-			logx.Info("indexed document", "path", result.path)
+			logx.Info("indexed document", "path", result.ref.AbsPath)
 		case IndexRemoved:
-			logx.Info("removed document from index", "path", result.path)
+			logx.Info("removed document from index", "path", result.ref.AbsPath)
 		}
 		reclaimProcessMemory()
 	}
@@ -265,12 +266,16 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 
 	for _, doc := range docs {
 		if !scannedPaths[doc.Path] {
-			absPath := filepath.Join(idx.cfg.WatchDir, doc.Path)
-			if shouldIndex, err := idx.shouldIndexExistingPath(reconcileMatcher, absPath); err != nil {
+			ref, refErr := ResolveStoredDocumentRef(idx.cfg.WatchDir, doc.Path)
+			if refErr != nil {
+				logx.Error("resolving stored document path failed", "path", doc.Path, "err", refErr)
+				continue
+			}
+			if shouldIndex, err := idx.shouldIndexExistingPath(reconcileMatcher, ref.AbsPath); err != nil {
 				logx.Error("reconciling stale document failed", "path", doc.Path, "err", err)
 				continue
 			} else if shouldIndex {
-				action, err := idx.SyncDocument(ctx, doc.Path, absPath, nil, &doc)
+				action, err := idx.SyncDocumentRef(ctx, ref, nil, &doc)
 				if err != nil {
 					report.HadIndexFailures = true
 					logx.Error("reconciling existing document failed", "path", doc.Path, "err", err)
@@ -278,18 +283,18 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 				}
 				switch action {
 				case IndexUpdated:
-					logx.Info("indexed document", "path", absPath)
+					logx.Info("indexed document", "path", ref.AbsPath)
 				case IndexRemoved:
-					logx.Info("removed document from index", "path", absPath)
+					logx.Info("removed document from index", "path", ref.AbsPath)
 				}
 				reclaimProcessMemory()
 				continue
 			}
-			if err := idx.store.DeleteDocument(ctx, doc.Path); err != nil {
+			if err := idx.store.DeleteDocument(ctx, ref.Key); err != nil {
 				logx.Error("removing stale document failed", "path", doc.Path, "err", err)
 				continue
 			}
-			logx.Info("removed document from index", "path", doc.Path)
+			logx.Info("removed document from index", "path", ref.AbsPath)
 		}
 	}
 
@@ -320,8 +325,8 @@ func (idx *Indexer) StartLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 				select {
 				case <-ctx.Done():
 					return
-				case path := <-idx.live.Jobs:
-					idx.processLiveIndexRequest(ctx, path)
+				case key := <-idx.live.Jobs:
+					idx.processLiveIndexRequestKey(ctx, key)
 				}
 			}
 		})
@@ -329,62 +334,97 @@ func (idx *Indexer) StartLiveIndexWorkers(ctx context.Context, wg *sync.WaitGrou
 }
 
 func (idx *Indexer) EnqueueLiveIndex(ctx context.Context, path string, modTime time.Time) bool {
+	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if err != nil {
+		logx.Error("computing document key failed", "path", path, "err", err)
+		return false
+	}
+	return idx.enqueueLiveDocument(ctx, ref, modTime)
+}
+
+func (idx *Indexer) enqueueLiveDocument(ctx context.Context, ref DocumentRef, modTime time.Time) bool {
 	if idx.live == nil {
-		idx.processLiveIndexRequestDirect(ctx, path, modTime)
+		idx.processLiveIndexDocumentDirect(ctx, ref, modTime)
 		return true
 	}
 
-	if !idx.live.MarkPending(path, modTime) {
+	if !idx.live.MarkPending(ref.Key, modTime) {
 		return true
 	}
 
 	select {
-	case idx.live.Jobs <- path:
+	case idx.live.Jobs <- ref.Key:
 		return true
 	default:
-		idx.live.Cancel(path)
+		idx.live.Cancel(ref.Key)
 		idx.setIndexState(runtimestate.IndexStateDegraded, "live index queue overflow; full resync scheduled")
-		logx.Warn("live index queue full; scheduling resync", "path", path)
+		logx.Warn("live index queue full; scheduling resync", "path", ref.AbsPath)
 		idx.RequestResync(ctx)
 		return false
 	}
 }
 
 func (idx *Indexer) processLiveIndexRequest(ctx context.Context, path string) {
-	modTime, ok := idx.live.StartProcessing(path)
+	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if err != nil {
+		logx.Error("computing document key failed", "path", path, "err", err)
+		return
+	}
+	idx.processLiveIndexRequestKey(ctx, ref.Key)
+}
+
+func (idx *Indexer) processLiveIndexRequestKey(ctx context.Context, key string) {
+	modTime, ok := idx.live.StartProcessing(key)
 	if !ok {
 		return
 	}
 
-	idx.processLiveIndexRequestDirect(ctx, path, modTime)
+	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
+	if err != nil {
+		logx.Error("resolving live index document failed", "key", key, "err", err)
+		idx.live.CancelPrefix(key)
+		idx.live.FinishProcessing(key)
+		return
+	}
 
-	if idx.live.FinishProcessing(path) {
+	idx.processLiveIndexDocumentDirect(ctx, ref, modTime)
+
+	if idx.live.FinishProcessing(key) {
 		select {
-		case idx.live.Jobs <- path:
+		case idx.live.Jobs <- key:
 		default:
-			idx.live.Cancel(path)
+			idx.live.Cancel(key)
 			idx.setIndexState(runtimestate.IndexStateDegraded, "live index queue overflow; full resync scheduled")
-			logx.Warn("live index queue full; scheduling resync", "path", path)
+			logx.Warn("live index queue full; scheduling resync", "path", ref.AbsPath)
 			idx.RequestResync(ctx)
 		}
 	}
 }
 
 func (idx *Indexer) processLiveIndexRequestDirect(ctx context.Context, path string, modTime time.Time) {
-	action, err := idx.IndexFile(ctx, path, modTime)
+	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if err != nil {
+		logx.Error("computing document key failed", "path", path, "err", err)
+		return
+	}
+	idx.processLiveIndexDocumentDirect(ctx, ref, modTime)
+}
+
+func (idx *Indexer) processLiveIndexDocumentDirect(ctx context.Context, ref DocumentRef, modTime time.Time) {
+	action, err := idx.IndexDocument(ctx, ref, modTime)
 	if err != nil {
 		idx.setIndexState(runtimestate.IndexStateDegraded, "live indexing failed; some files may be stale")
-		logx.Error("indexing failed", "path", path, "err", err)
-		idx.scheduleIndexRetry(ctx, path, modTime, err)
+		logx.Error("indexing failed", "path", ref.AbsPath, "err", err)
+		idx.scheduleIndexRetryRef(ctx, ref, modTime, err)
 	} else {
 		if idx.retries != nil {
-			idx.retries.Clear(path)
+			idx.retries.Clear(ref.Key)
 		}
 		switch action {
 		case IndexUpdated:
-			logx.Info("indexed document", "path", path)
+			logx.Info("indexed document", "path", ref.AbsPath)
 		case IndexRemoved:
-			logx.Info("removed document from index", "path", path)
+			logx.Info("removed document from index", "path", ref.AbsPath)
 		}
 	}
 	reclaimProcessMemory()
@@ -409,10 +449,6 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 		return
 	}
 
-	if idx.isQuarantined(ctx, event.Path) {
-		return
-	}
-
 	switch event.Op {
 	case watch.Resync:
 		idx.RequestResync(ctx)
@@ -429,22 +465,39 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 		if info.IsDir() {
 			return
 		}
-		idx.EnqueueLiveIndex(ctx, event.Path, info.ModTime())
+		ref, err := ResolveDocumentRef(idx.cfg.WatchDir, event.Path)
+		if err != nil {
+			logx.Error("computing document key failed", "path", event.Path, "err", err)
+			return
+		}
+		if idx.isQuarantined(ctx, ref.Key) {
+			return
+		}
+		idx.enqueueLiveDocument(ctx, ref, info.ModTime())
 
 	case watch.Remove:
-		key, err := DocumentKey(idx.cfg.WatchDir, event.Path)
+		ref, err := ResolveDocumentRef(idx.cfg.WatchDir, event.Path)
 		if err != nil {
 			logx.Error("removing document failed", "path", event.Path, "err", err)
 			return
 		}
+		if idx.isQuarantined(ctx, ref.Key) {
+			return
+		}
 		if event.IsDir {
-			idx.paths.InvalidatePrefix(key)
-			if err := idx.store.DeleteDocumentsByPrefix(ctx, key); err != nil {
+			idx.paths.InvalidatePrefix(ref.Key)
+			if idx.live != nil {
+				idx.live.CancelPrefix(ref.Key)
+			}
+			if idx.retries != nil {
+				idx.retries.ClearPrefix(ref.Key)
+			}
+			if err := idx.store.DeleteDocumentsByPrefix(ctx, ref.Key); err != nil {
 				logx.Error("removing directory from index failed", "path", event.Path, "err", err)
 				return
 			}
 		} else {
-			action, err := idx.SyncDocument(ctx, key, event.Path, nil, nil)
+			action, err := idx.SyncDocumentRef(ctx, ref, nil, nil)
 			if err != nil {
 				logx.Error("removing document failed", "path", event.Path, "err", err)
 				return
@@ -552,7 +605,25 @@ func (idx *Indexer) setIndexState(state runtimestate.IndexState, message string)
 }
 
 func (idx *Indexer) SyncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (IndexAction, error) {
-	version, started := idx.paths.Begin(key, modTime)
+	if path != "" {
+		return idx.SyncDocumentRef(ctx, DocumentRef{Key: key, AbsPath: path}, modTime, doc)
+	}
+	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
+	if err != nil {
+		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
+	}
+	return idx.SyncDocumentRef(ctx, ref, modTime, doc)
+}
+
+func (idx *Indexer) SyncDocumentRef(ctx context.Context, ref DocumentRef, modTime *time.Time, doc *index.Document) (IndexAction, error) {
+	if ref.AbsPath == "" {
+		var err error
+		ref, err = ResolveDocumentRefFromKey(idx.cfg.WatchDir, ref.Key)
+		if err != nil {
+			return IndexNoop, fmt.Errorf("resolving document key: %w", err)
+		}
+	}
+	version, started := idx.paths.Begin(ref.Key, modTime)
 	if !started {
 		return IndexNoop, nil
 	}
@@ -560,8 +631,8 @@ func (idx *Indexer) SyncDocument(ctx context.Context, key, path string, modTime 
 	currentDoc := doc
 	currentVersion := version
 	for {
-		action, err := idx.syncDocumentOnce(ctx, key, path, currentDoc, currentVersion)
-		nextVersion, rerun := idx.paths.Finish(key)
+		action, err := idx.syncDocumentOnceRef(ctx, ref, currentDoc, currentVersion)
+		nextVersion, rerun := idx.paths.Finish(ref.Key)
 		if !rerun {
 			return action, err
 		}
@@ -571,14 +642,25 @@ func (idx *Indexer) SyncDocument(ctx context.Context, key, path string, modTime 
 }
 
 func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, doc *index.Document, version uint64) (IndexAction, error) {
-	info, err := os.Stat(path)
+	if path != "" {
+		return idx.syncDocumentOnceRef(ctx, DocumentRef{Key: key, AbsPath: path}, doc, version)
+	}
+	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
+	if err != nil {
+		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
+	}
+	return idx.syncDocumentOnceRef(ctx, ref, doc, version)
+}
+
+func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, doc *index.Document, version uint64) (IndexAction, error) {
+	info, err := os.Stat(ref.AbsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			doc, err = idx.loadDocument(ctx, key, doc)
+			doc, err = idx.loadDocument(ctx, ref.Key, doc)
 			if err != nil {
 				return IndexNoop, err
 			}
-			return removeDocumentIfPresent(ctx, idx.store, doc, key)
+			return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 		}
 		return IndexNoop, fmt.Errorf("stating file: %w", err)
 	}
@@ -586,23 +668,23 @@ func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, doc 
 		return IndexNoop, nil
 	}
 
-	if !idx.extractor.Supports(path) {
-		doc, err = idx.loadDocument(ctx, key, doc)
+	if !idx.extractor.Supports(ref.AbsPath) {
+		doc, err = idx.loadDocument(ctx, ref.Key, doc)
 		if err != nil {
 			return IndexNoop, err
 		}
-		return removeDocumentIfPresent(ctx, idx.store, doc, key)
+		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 	}
 
 	effectiveModTime := info.ModTime()
 
-	doc, err = idx.loadDocument(ctx, key, doc)
+	doc, err = idx.loadDocument(ctx, ref.Key, doc)
 	if err != nil {
 		return IndexNoop, err
 	}
 	precomputedHash := ""
 	if doc != nil && SameModTime(doc.ModifiedAt, effectiveModTime) {
-		precomputedHash, err = scan.FileHash(path)
+		precomputedHash, err = scan.FileHash(ref.AbsPath)
 		if err != nil {
 			return IndexNoop, fmt.Errorf("hashing file: %w", err)
 		}
@@ -611,7 +693,7 @@ func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, doc 
 		}
 	}
 
-	return idx.indexFileCore(ctx, key, path, effectiveModTime, precomputedHash, doc, version)
+	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, precomputedHash, doc, version)
 }
 
 func (idx *Indexer) loadDocument(ctx context.Context, key string, doc *index.Document) (*index.Document, error) {
@@ -659,11 +741,15 @@ func (idx *Indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path
 }
 
 func (idx *Indexer) IndexFile(ctx context.Context, path string, modTime time.Time) (IndexAction, error) {
-	key, err := DocumentKey(idx.cfg.WatchDir, path)
+	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
 	if err != nil {
 		return IndexNoop, fmt.Errorf("computing document key: %w", err)
 	}
-	return idx.SyncDocument(ctx, key, path, &modTime, nil)
+	return idx.IndexDocument(ctx, ref, modTime)
+}
+
+func (idx *Indexer) IndexDocument(ctx context.Context, ref DocumentRef, modTime time.Time) (IndexAction, error) {
+	return idx.SyncDocumentRef(ctx, ref, &modTime, nil)
 }
 
 func (idx *Indexer) getPipeline() *ingest.Pipeline {
@@ -684,10 +770,21 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 }
 
 func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
+	if path != "" {
+		return idx.indexFileCoreRef(ctx, DocumentRef{Key: key, AbsPath: path}, modTime, precomputedHash, doc, version)
+	}
+	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
+	if err != nil {
+		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
+	}
+	return idx.indexFileCoreRef(ctx, ref, modTime, precomputedHash, doc, version)
+}
+
+func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
 	hash := precomputedHash
 	if hash == "" {
 		var err error
-		hash, err = scan.FileHash(path)
+		hash, err = scan.FileHash(ref.AbsPath)
 		if err != nil {
 			return IndexNoop, fmt.Errorf("hashing file: %w", err)
 		}
@@ -696,11 +793,11 @@ func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime
 		return IndexNoop, nil
 	}
 
-	if !idx.paths.IsCurrent(key, version) {
+	if !idx.paths.IsCurrent(ref.Key, version) {
 		return IndexNoop, nil
 	}
 
-	text, err := idx.extractor.Extract(ctx, path)
+	text, err := idx.extractor.Extract(ctx, ref.AbsPath)
 	if err != nil {
 		if errors.Is(err, ErrOCRFailed) {
 			return IndexNoop, err
@@ -709,27 +806,27 @@ func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime
 	}
 
 	if text == "" {
-		return removeDocumentIfPresent(ctx, idx.store, doc, key)
+		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 	}
 
-	chunks := ingest.PrepareChunks(text, path, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
+	chunks := ingest.PrepareChunks(text, ref.AbsPath, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		return removeDocumentIfPresent(ctx, idx.store, doc, key)
+		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 	}
 
-	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, key)
+	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
 
 	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(ctx, chunks, existingByContent)
 	if err != nil {
 		return IndexNoop, err
 	}
 
-	if err := idx.getPipeline().EmbedChunks(ctx, key, toEmbed, embedPositions, chunkRecords); err != nil {
+	if err := idx.getPipeline().EmbedChunks(ctx, ref.Key, toEmbed, embedPositions, chunkRecords); err != nil {
 		return IndexNoop, err
 	}
 
 	indexedDoc := &index.Document{
-		Path:       key,
+		Path:       ref.Key,
 		Hash:       hash,
 		ModifiedAt: modTime,
 	}
@@ -763,13 +860,13 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 	return !matcher.ShouldIndex(relPath)
 }
 
-func (idx *Indexer) isQuarantined(ctx context.Context, path string) bool {
+func (idx *Indexer) isQuarantined(ctx context.Context, key string) bool {
 	if idx.quarantine == nil {
 		return false
 	}
-	quarantined, err := idx.quarantine.IsQuarantined(ctx, path)
+	quarantined, err := idx.quarantine.IsQuarantined(ctx, key)
 	if err != nil {
-		logx.Warn("failed to check quarantine status", "path", path, "err", err)
+		logx.Warn("failed to check quarantine status", "path", key, "err", err)
 		return false
 	}
 	return quarantined
@@ -803,28 +900,37 @@ func normalizeModTime(t time.Time) time.Time {
 }
 
 func (idx *Indexer) scheduleIndexRetry(ctx context.Context, path string, modTime time.Time, err error) {
+	ref, refErr := ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if refErr != nil {
+		logx.Warn("computing retry document key failed", "path", path, "err", refErr)
+		return
+	}
+	idx.scheduleIndexRetryRef(ctx, ref, modTime, err)
+}
+
+func (idx *Indexer) scheduleIndexRetryRef(ctx context.Context, ref DocumentRef, modTime time.Time, err error) {
 	if idx.retries == nil {
 		return
 	}
 	if !shouldRetryIndexError(err) {
-		idx.retries.Clear(path)
-		logx.Warn("not retrying path", "path", path, "err", err)
+		idx.retries.Clear(ref.Key)
+		logx.Warn("not retrying path", "path", ref.AbsPath, "err", err)
 		if shouldQuarantineIndexError(err) {
-			idx.quarantineFailedPath(ctx, path, err)
+			idx.quarantineFailedRef(ctx, ref, err)
 		}
 		return
 	}
-	result := idx.retries.Schedule(path, modTime, func(retryModTime time.Time) {
+	result := idx.retries.Schedule(ref.Key, modTime, func(retryModTime time.Time) {
 		select {
 		case <-ctx.Done():
-			idx.retries.Clear(path)
+			idx.retries.Clear(ref.Key)
 			return
 		default:
 		}
-		idx.EnqueueLiveIndex(ctx, path, retryModTime)
+		idx.enqueueLiveDocument(ctx, ref, retryModTime)
 	})
 	if result == RetryScheduleGaveUp && shouldQuarantineIndexError(err) {
-		idx.quarantineFailedPath(ctx, path, err)
+		idx.quarantineFailedRef(ctx, ref, err)
 	}
 }
 
@@ -866,27 +972,33 @@ func (idx *Indexer) quarantineFailedPath(ctx context.Context, path string, failu
 	if idx == nil || idx.cfg == nil || path == "" || failure == nil {
 		return
 	}
+	ref, refErr := ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if refErr != nil {
+		logx.Warn("computing key for quarantine failed", "path", path, "err", refErr)
+		return
+	}
+	idx.quarantineFailedRef(ctx, ref, failure)
+}
+
+func (idx *Indexer) quarantineFailedRef(ctx context.Context, ref DocumentRef, failure error) {
+	if idx == nil || idx.cfg == nil || ref.Key == "" || failure == nil {
+		return
+	}
 	if idx.quarantine == nil {
-		logx.Warn("no quarantine store available; skipping quarantine", "path", path)
+		logx.Warn("no quarantine store available; skipping quarantine", "path", ref.AbsPath)
 		return
 	}
 
-	key, keyErr := DocumentKey(idx.cfg.WatchDir, path)
-	if keyErr != nil {
-		logx.Warn("computing key for quarantine failed", "path", path, "err", keyErr)
+	if err := idx.quarantine.AddToQuarantine(ctx, ref.Key, failure.Error()); err != nil {
+		logx.Warn("adding path to quarantine failed", "path", ref.AbsPath, "err", err)
 		return
 	}
 
-	if err := idx.quarantine.AddToQuarantine(ctx, key, failure.Error()); err != nil {
-		logx.Warn("adding path to quarantine failed", "path", path, "err", err)
-		return
+	if delErr := idx.store.DeleteDocument(ctx, ref.Key); delErr != nil {
+		logx.Warn("removing quarantined document from index failed", "path", ref.AbsPath, "err", delErr)
 	}
 
-	if delErr := idx.store.DeleteDocument(ctx, key); delErr != nil {
-		logx.Warn("removing quarantined document from index failed", "path", path, "err", delErr)
-	}
-
-	logx.Warn("quarantined path in skip list", "path", path, "error", failure.Error())
+	logx.Warn("quarantined path in skip list", "path", ref.AbsPath, "error", failure.Error())
 }
 
 func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (IndexAction, error) {

@@ -171,6 +171,22 @@ func (q *LiveIndexQueue) Cancel(path string) {
 	}
 }
 
+func (q *LiveIndexQueue) CancelPrefix(prefix string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for path, state := range q.states {
+		if path != prefix && !strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+			continue
+		}
+		state.hasPending = false
+		state.queued = false
+		if !state.running {
+			delete(q.states, path)
+		}
+	}
+}
+
 func (q *LiveIndexQueue) StartProcessing(path string) (time.Time, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -242,6 +258,25 @@ func (r *RetryScheduler) Clear(path string) {
 		state.timer.Stop()
 	}
 	delete(r.states, path)
+}
+
+func (r *RetryScheduler) ClearPrefix(prefix string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.states == nil {
+		return
+	}
+
+	for path, state := range r.states {
+		if path != prefix && !strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+			continue
+		}
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(r.states, path)
+	}
 }
 
 func (r *RetryScheduler) evictOverflow() int {

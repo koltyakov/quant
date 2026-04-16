@@ -21,8 +21,18 @@ type IndexSnapshot struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 }
 
+// Ready reports whether the index can serve queries. It is retained for
+// compatibility; prefer Servable or Fresh at new call sites.
 func (s IndexSnapshot) Ready() bool {
+	return s.Servable()
+}
+
+func (s IndexSnapshot) Servable() bool {
 	return s.State == IndexStateReady || s.State == IndexStateDegraded
+}
+
+func (s IndexSnapshot) Fresh() bool {
+	return s.State == IndexStateReady
 }
 
 type IndexStateTracker struct {

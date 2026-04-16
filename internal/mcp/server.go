@@ -148,7 +148,7 @@ func (s *Server) readinessError(ctx context.Context) error {
 	}
 	if s.state != nil {
 		snapshot := s.state.Snapshot()
-		if !snapshot.Ready() {
+		if !snapshot.Servable() {
 			if snapshot.State == "" {
 				return errors.New("index is not ready")
 			}
