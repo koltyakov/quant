@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -20,25 +21,33 @@ type openAIChatResponse struct {
 }
 
 type OpenAICompleter struct {
-	baseURL    string
+	chatURL    string
 	apiKey     string
 	httpClient *http.Client
 	maxRetries int
 }
 
-func NewOpenAICompleter(cfg Config) *OpenAICompleter {
+func NewOpenAICompleter(cfg Config) (*OpenAICompleter, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 2
 	}
-	return &OpenAICompleter{
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:     cfg.APIKey,
-		httpClient: &http.Client{Timeout: cfg.Timeout},
-		maxRetries: cfg.MaxRetries,
+	return newOpenAICompleter(cfg, &http.Client{Timeout: cfg.Timeout})
+}
+
+func newOpenAICompleter(cfg Config, httpClient *http.Client) (*OpenAICompleter, error) {
+	chatURL, err := openAIChatURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
 	}
+	return &OpenAICompleter{
+		chatURL:    chatURL,
+		apiKey:     cfg.APIKey,
+		httpClient: httpClient,
+		maxRetries: cfg.MaxRetries,
+	}, nil
 }
 
 func (o *OpenAICompleter) Complete(ctx context.Context, req CompleteRequest) (CompleteResponse, error) {
@@ -74,7 +83,7 @@ func (o *OpenAICompleter) Complete(ctx context.Context, req CompleteRequest) (Co
 }
 
 func (o *OpenAICompleter) doRequest(ctx context.Context, body []byte) (openAIChatResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.chatURL, bytes.NewReader(body))
 	if err != nil {
 		return openAIChatResponse{}, err
 	}
@@ -103,4 +112,38 @@ func (o *OpenAICompleter) doRequest(ctx context.Context, body []byte) (openAICha
 		return openAIChatResponse{}, fmt.Errorf("decoding chat response: %w", err)
 	}
 	return chatResp, nil
+}
+
+func openAIChatURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("llm URL must be a valid URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return "", fmt.Errorf("llm URL must be an absolute URL with scheme and host")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("llm URL scheme must be http or https")
+	}
+
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case path == "", path == "/v1":
+		path = "/v1/chat/completions"
+	case strings.HasSuffix(path, "/chat/completions"):
+	case strings.HasSuffix(path, "/embeddings"):
+		path = strings.TrimSuffix(path, "/embeddings") + "/chat/completions"
+	case strings.HasSuffix(path, "/embed"):
+		path = strings.TrimSuffix(path, "/embed") + "/chat/completions"
+	default:
+		path += "/v1/chat/completions"
+	}
+
+	chatURL := *parsed
+	chatURL.Path = path
+	chatURL.RawPath = ""
+	chatURL.Fragment = ""
+	return chatURL.String(), nil
 }

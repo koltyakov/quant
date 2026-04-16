@@ -2,8 +2,18 @@ package llm
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"strings"
 	"time"
+)
+
+type ProviderType string
+
+const (
+	ProviderOllama  ProviderType = "ollama"
+	ProviderOpenAI  ProviderType = "openai"
+	ProviderUnknown ProviderType = ""
 )
 
 type Message struct {
@@ -27,6 +37,7 @@ type Completer interface {
 }
 
 type Config struct {
+	Provider   ProviderType
 	BaseURL    string
 	Model      string
 	APIKey     string
@@ -34,13 +45,36 @@ type Config struct {
 	MaxRetries int
 }
 
-func NewCompleter(cfg Config) Completer {
-	if cfg.APIKey != "" || isOpenAIURL(cfg.BaseURL) {
-		return NewOpenAICompleter(cfg)
+func NewCompleter(cfg Config) (Completer, error) {
+	provider := cfg.Provider
+	if provider == ProviderUnknown {
+		inferred, err := inferProvider(cfg.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("llm_provider not set: %w (set --llm-provider to \"ollama\" or \"openai\")", err)
+		}
+		provider = inferred
 	}
-	return NewOllamaCompleter(cfg)
+	switch provider {
+	case ProviderOpenAI:
+		return NewOpenAICompleter(cfg)
+	case ProviderOllama:
+		return NewOllamaCompleter(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported llm provider: %s", provider)
+	}
 }
 
-func isOpenAIURL(raw string) bool {
-	return strings.Contains(strings.ToLower(raw), "openai.com")
+func inferProvider(raw string) (ProviderType, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ProviderUnknown, fmt.Errorf("cannot parse URL")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return ProviderOllama, nil
+	}
+	if strings.Contains(host, "openai.com") {
+		return ProviderOpenAI, nil
+	}
+	return ProviderUnknown, fmt.Errorf("cannot determine provider from URL %q", raw)
 }

@@ -178,19 +178,28 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		store.SetWeightOverrides(float32(cfg.KeywordWeight), float32(cfg.VectorWeight))
 	}
 
-	if cfg.RerankerType == "cross-encoder" && cfg.RerankerModel != "" {
-		rerankerCompleter := llm.NewCompleter(llm.Config{
-			BaseURL: cfg.EmbedURL,
-			APIKey:  cfg.EmbedAPIKey,
+	var featureCompleter llm.Completer
+	if cfg.RerankerType != "" || cfg.SummarizerEnabled {
+		featureCompleter, err = llm.NewCompleter(llm.Config{
+			Provider: llm.ProviderType(cfg.LLMProvider),
+			BaseURL:  cfg.LLMURL,
+			APIKey:   cfg.LLMAPIKey,
 		})
+		if err != nil {
+			return fmt.Errorf("error configuring llm backend: %w", err)
+		}
+	}
+
+	if cfg.RerankerType == "cross-encoder" {
+		rerankerModel := cfg.EffectiveRerankerModel()
 		reranker := index.NewCrossEncoderReranker(index.CrossEncoderConfig{
-			Completer:   rerankerCompleter,
-			Model:       cfg.RerankerModel,
+			Completer:   featureCompleter,
+			Model:       rerankerModel,
 			TopK:        20,
 			ScoreWeight: 0.5,
 		})
 		store.SetReranker(reranker)
-		logx.Info("cross-encoder reranker enabled", "model", cfg.RerankerModel)
+		logx.Info("cross-encoder reranker enabled", "model", rerankerModel)
 	}
 
 	if rawEmbedder != nil {
@@ -218,16 +227,9 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	})
 
 	if cfg.SummarizerEnabled {
-		summModel := cfg.SummarizerModel
-		if summModel == "" {
-			summModel = cfg.EmbedModel
-		}
-		summCompleter := llm.NewCompleter(llm.Config{
-			BaseURL: cfg.EmbedURL,
-			APIKey:  cfg.EmbedAPIKey,
-		})
+		summModel := cfg.EffectiveSummarizerModel()
 		summarizer := index.NewChunkSummarizer(index.SummarizerConfig{
-			Completer: summCompleter,
+			Completer: featureCompleter,
 			Model:     summModel,
 		})
 		idx.pipeline.Summarizer = newSummarizerAdapter(summarizer)

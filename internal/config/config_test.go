@@ -23,6 +23,9 @@ func TestDefault(t *testing.T) {
 	if cfg.EmbedModel != "nomic-embed-text" {
 		t.Errorf("expected nomic-embed-text, got %s", cfg.EmbedModel)
 	}
+	if cfg.LLMURL != "http://localhost:11434" {
+		t.Errorf("expected default llm URL, got %s", cfg.LLMURL)
+	}
 	if cfg.PDFOCRLang != "eng" {
 		t.Errorf("expected PDF OCR lang eng, got %s", cfg.PDFOCRLang)
 	}
@@ -79,6 +82,10 @@ func TestApplyEnv(t *testing.T) {
 	cfg := Default()
 
 	t.Setenv("QUANT_EMBED_MODEL", "all-minilm")
+	t.Setenv("QUANT_LLM_URL", "https://llm.example.com")
+	t.Setenv("QUANT_LLM_MODEL", "gpt-4.1-mini")
+	t.Setenv("QUANT_LLM_PROVIDER", "openai")
+	t.Setenv("QUANT_LLM_API_KEY", "llm-secret")
 	t.Setenv("QUANT_PDF_OCR_LANG", "rus+eng")
 	t.Setenv("QUANT_CHUNK_SIZE", "256")
 	t.Setenv("QUANT_INDEX_WORKERS", "6")
@@ -87,6 +94,18 @@ func TestApplyEnv(t *testing.T) {
 
 	if cfg.EmbedModel != "all-minilm" {
 		t.Errorf("expected embed model all-minilm, got %s", cfg.EmbedModel)
+	}
+	if cfg.LLMURL != "https://llm.example.com" {
+		t.Errorf("expected llm URL https://llm.example.com, got %s", cfg.LLMURL)
+	}
+	if cfg.LLMModel != "gpt-4.1-mini" {
+		t.Errorf("expected llm model gpt-4.1-mini, got %s", cfg.LLMModel)
+	}
+	if cfg.LLMProvider != "openai" {
+		t.Errorf("expected llm provider openai, got %s", cfg.LLMProvider)
+	}
+	if cfg.LLMAPIKey != "llm-secret" {
+		t.Errorf("expected llm api key llm-secret, got %s", cfg.LLMAPIKey)
 	}
 	if cfg.PDFOCRLang != "rus+eng" {
 		t.Errorf("expected PDF OCR lang rus+eng, got %s", cfg.PDFOCRLang)
@@ -293,6 +312,32 @@ func TestLoadYAML_EmbedProviderAndAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadYAML_LLMConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	content := "llm_url: https://llm.example.com/v1\nllm_model: gpt-4.1-mini\nllm_provider: openai\nllm_api_key: llm-test\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	cfg := Default()
+	if err := loadYAML(cfg, cfgPath, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMURL != "https://llm.example.com/v1" {
+		t.Errorf("expected llm_url from YAML, got %s", cfg.LLMURL)
+	}
+	if cfg.LLMModel != "gpt-4.1-mini" {
+		t.Errorf("expected llm_model from YAML, got %s", cfg.LLMModel)
+	}
+	if cfg.LLMProvider != "openai" {
+		t.Errorf("expected llm_provider from YAML, got %s", cfg.LLMProvider)
+	}
+	if cfg.LLMAPIKey != "llm-test" {
+		t.Errorf("expected llm_api_key from YAML, got %s", cfg.LLMAPIKey)
+	}
+}
+
 func TestParseArgs_Help(t *testing.T) {
 	_, err := ParseArgs([]string{"--help"})
 	if !errors.Is(err, flag.ErrHelp) {
@@ -336,11 +381,11 @@ func TestParseArgs_InternalDefaults(t *testing.T) {
 func TestParseArgs_CLIBeatsYAML(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("embed_model: yaml-model\nchunk_size: 1024\n"), 0644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("embed_model: yaml-model\nllm_model: yaml-llm\nchunk_size: 1024\n"), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
 
-	cfg, err := ParseArgs([]string{"--dir", dir, "--config", cfgPath, "--embed-model", "cli-model"})
+	cfg, err := ParseArgs([]string{"--dir", dir, "--config", cfgPath, "--embed-model", "cli-model", "--llm-model", "cli-llm"})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
@@ -349,6 +394,9 @@ func TestParseArgs_CLIBeatsYAML(t *testing.T) {
 	}
 	if cfg.ChunkSize != 1024 {
 		t.Errorf("YAML should apply when no CLI flag is set; got %d", cfg.ChunkSize)
+	}
+	if cfg.LLMModel != "cli-llm" {
+		t.Errorf("CLI llm-model should beat YAML; got %s", cfg.LLMModel)
 	}
 }
 
@@ -396,5 +444,47 @@ func TestValidate_RerankerCrossEncoderWithoutModel(t *testing.T) {
 	cfg.RerankerModel = ""
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for cross-encoder reranker without model")
+	}
+}
+
+func TestValidate_RerankerAllowsSharedLLMModel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.RerankerType = "cross-encoder"
+	cfg.LLMModel = "shared-llm-model"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected shared llm model to satisfy reranker validation, got %v", err)
+	}
+}
+
+func TestValidate_SummarizerWithoutModel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.SummarizerEnabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for summarizer without model")
+	}
+}
+
+func TestValidate_SummarizerAllowsSharedLLMModel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.SummarizerEnabled = true
+	cfg.LLMModel = "shared-llm-model"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected shared llm model to satisfy summarizer validation, got %v", err)
+	}
+}
+
+func TestValidate_InvalidLLMProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.LLMProvider = "custom"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid llm provider")
 	}
 }

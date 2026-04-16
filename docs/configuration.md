@@ -18,6 +18,15 @@ All flags apply to `quant mcp`.
 | `--embed-api-key` | - | API key for the embedding backend. Required for OpenAI and other authenticated providers. |
 | `--config` | - | Path to a YAML config file |
 
+### LLM flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--llm-url` | `http://localhost:11434` | LLM API URL used by reranking and summarization |
+| `--llm-model` | - | Default LLM model for reranking and summarization |
+| `--llm-provider` | auto-detected | LLM backend: `ollama` or `openai`. Auto-detected from URL when not set. |
+| `--llm-api-key` | - | API key for the LLM backend. Required for OpenAI and other authenticated providers. |
+
 ### Indexing flags
 
 | Flag | Default | Description |
@@ -32,28 +41,32 @@ All flags apply to `quant mcp`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--reranker` | - | Reranker type. Only accepted value: `cross-encoder` (requires `--reranker-model`). |
-| `--reranker-model` | - | Model used for cross-encoder reranking (e.g. `llama3.2`). Requires Ollama. |
+| `--reranker-model` | `--llm-model` | Model used for cross-encoder reranking (e.g. `llama3.2`). Overrides the shared LLM model for this feature. |
 
 Cross-encoder reranking adds a second-pass LLM reranking step after the initial hybrid retrieval. The model sees each `(query, chunk)` pair and produces a relevance score that overrides the RRF score for final ranking.
 
-**When to use:** When retrieval precision matters more than latency. Reranking runs at query time and adds one Ollama call per candidate, so it noticeably increases response time. Good for research workspaces where you want the single best result to be highly accurate.
+**When to use:** When retrieval precision matters more than latency. Reranking runs at query time and adds one LLM call per candidate batch, so it noticeably increases response time. Good for research workspaces where you want the single best result to be highly accurate.
 
-**Model choice:** A small instruction-following model works well (e.g. `llama3.2`). The model does not need to be the same as the embedding model.
+**Backend choice:** Reranking is configured independently from embeddings. You can embed with one provider and rerank with another by pointing `--llm-*` at a different service.
+
+**Model choice:** A small instruction-following model works well (e.g. `llama3.2`). If `--reranker-model` is omitted, `quant` falls back to `--llm-model`.
 
 ### Summarizer flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--summarizer` | `false` | Enable LLM-powered chunk summarization at index time. |
-| `--summarizer-model` | same as `--embed-model` | Model used for chunk summarization. Requires Ollama. |
+| `--summarizer-model` | `--llm-model` | Model used for chunk summarization. Overrides the shared LLM model for this feature. |
 
-The summarizer generates a concise summary of each chunk at index time using a local LLM. Summaries are stored alongside the chunk text and used to improve search signal.
+The summarizer generates a concise summary of each chunk at index time using the configured LLM backend. Summaries are stored alongside the chunk text and used to improve search signal.
 
 **When to use:** When your documents are dense or technical and keyword matching struggles because the terminology in queries differs from the source text. Summaries can bridge the vocabulary gap.
 
 **Cost:** Runs at index time, not query time — so search latency is unaffected. The tradeoff is significantly longer initial indexing and higher compute during reindexing. Large corpora with frequent updates can become expensive to maintain.
 
-**Model choice:** Defaults to the same model as `--embed-model`. A small generative model (e.g. `llama3.2`) works well and is faster than a large model.
+**Backend choice:** Summarization is configured independently from embeddings through `--llm-*`.
+
+**Model choice:** A small generative model (e.g. `llama3.2`) works well and is faster than a large model. If `--summarizer-model` is omitted, `quant` falls back to `--llm-model`.
 
 ### PDF flags
 
@@ -73,6 +86,10 @@ The summarizer generates a concise summary of each chunk at index time using a l
 | `QUANT_EMBED_MODEL` | `--embed-model` |
 | `QUANT_EMBED_PROVIDER` | `--embed-provider` |
 | `QUANT_EMBED_API_KEY` | `--embed-api-key` |
+| `QUANT_LLM_URL` | `--llm-url` |
+| `QUANT_LLM_MODEL` | `--llm-model` |
+| `QUANT_LLM_PROVIDER` | `--llm-provider` |
+| `QUANT_LLM_API_KEY` | `--llm-api-key` |
 | `QUANT_CHUNK_SIZE` | `--chunk-size` |
 | `QUANT_CHUNK_OVERLAP` | `--chunk-overlap` |
 | `QUANT_EMBED_BATCH_SIZE` | `--embed-batch-size` |
@@ -111,6 +128,10 @@ embed_url: http://localhost:11434
 embed_model: nomic-embed-text
 embed_provider: ollama   # ollama (default) or openai
 # embed_api_key: sk-...  # required for OpenAI and other authenticated providers
+llm_url: http://localhost:11434
+llm_model: llama3.2
+llm_provider: ollama     # ollama (default) or openai
+# llm_api_key: sk-...    # required for OpenAI and other authenticated providers
 chunk_size: 512
 chunk_overlap: 0.15
 embed_batch_size: 16

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -18,23 +19,31 @@ type ollamaResponse struct {
 }
 
 type OllamaCompleter struct {
-	baseURL    string
+	chatURL    string
 	httpClient *http.Client
 	maxRetries int
 }
 
-func NewOllamaCompleter(cfg Config) *OllamaCompleter {
+func NewOllamaCompleter(cfg Config) (*OllamaCompleter, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
 	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = 2
 	}
-	return &OllamaCompleter{
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
-		httpClient: &http.Client{Timeout: cfg.Timeout},
-		maxRetries: cfg.MaxRetries,
+	return newOllamaCompleter(cfg, &http.Client{Timeout: cfg.Timeout})
+}
+
+func newOllamaCompleter(cfg Config, httpClient *http.Client) (*OllamaCompleter, error) {
+	chatURL, err := ollamaChatURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
 	}
+	return &OllamaCompleter{
+		chatURL:    chatURL,
+		httpClient: httpClient,
+		maxRetries: cfg.MaxRetries,
+	}, nil
 }
 
 func (o *OllamaCompleter) Complete(ctx context.Context, req CompleteRequest) (CompleteResponse, error) {
@@ -66,7 +75,7 @@ func (o *OllamaCompleter) Complete(ctx context.Context, req CompleteRequest) (Co
 }
 
 func (o *OllamaCompleter) doRequest(ctx context.Context, body []byte) (ollamaResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.chatURL, bytes.NewReader(body))
 	if err != nil {
 		return ollamaResponse{}, err
 	}
@@ -91,4 +100,36 @@ func (o *OllamaCompleter) doRequest(ctx context.Context, body []byte) (ollamaRes
 		return ollamaResponse{}, fmt.Errorf("decoding chat response: %w", err)
 	}
 	return chatResp, nil
+}
+
+func ollamaChatURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("llm URL must be a valid URL: %w", err)
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return "", fmt.Errorf("llm URL must be an absolute URL with scheme and host")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("llm URL scheme must be http or https")
+	}
+
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case path == "", path == "/api":
+		path = "/api/chat"
+	case strings.HasSuffix(path, "/api/chat"):
+	case strings.HasSuffix(path, "/api/embed"):
+		path = strings.TrimSuffix(path, "/api/embed") + "/api/chat"
+	default:
+		path += "/api/chat"
+	}
+
+	chatURL := *parsed
+	chatURL.Path = path
+	chatURL.RawPath = ""
+	chatURL.Fragment = ""
+	return chatURL.String(), nil
 }

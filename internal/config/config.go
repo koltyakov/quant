@@ -35,6 +35,10 @@ type Config struct {
 	EmbedModel      string    `yaml:"embed_model"`
 	EmbedProvider   string    `yaml:"embed_provider"`
 	EmbedAPIKey     string    `yaml:"embed_api_key"`
+	LLMURL          string    `yaml:"llm_url"`
+	LLMModel        string    `yaml:"llm_model"`
+	LLMProvider     string    `yaml:"llm_provider"`
+	LLMAPIKey       string    `yaml:"llm_api_key"`
 	EmbedBatchSize  int       `yaml:"embed_batch_size"`
 	PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
 	ChunkSize       int       `yaml:"chunk_size"`
@@ -69,6 +73,7 @@ func Default() *Config {
 		ListenAddr:     ":8080",
 		EmbedURL:       "http://localhost:11434",
 		EmbedModel:     "nomic-embed-text",
+		LLMURL:         "http://localhost:11434",
 		EmbedBatchSize: 16,
 		PDFOCRLang:     "eng",
 		PDFOCRTimeout:  2 * time.Minute,
@@ -108,7 +113,10 @@ func (c *Config) Validate() error {
 	if c.Transport != TransportStdio && c.Transport != TransportSSE && c.Transport != TransportHTTP {
 		return fmt.Errorf("invalid transport %q; must be stdio, sse, or http", c.Transport)
 	}
-	if err := validateEmbedURL(c.EmbedURL); err != nil {
+	if err := validateHTTPURL("embed_url", c.EmbedURL); err != nil {
+		return err
+	}
+	if err := validateLLMProvider(c.LLMProvider); err != nil {
 		return err
 	}
 	if c.ChunkSize < 64 || c.ChunkSize > 8192 {
@@ -128,8 +136,16 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("invalid reranker %q; must be \"cross-encoder\"", c.RerankerType)
 	}
-	if c.RerankerType == "cross-encoder" && c.RerankerModel == "" {
-		return fmt.Errorf("reranker cross-encoder requires --reranker-model")
+	if c.RerankerType == "cross-encoder" && c.EffectiveRerankerModel() == "" {
+		return fmt.Errorf("reranker cross-encoder requires --reranker-model or --llm-model")
+	}
+	if c.SummarizerEnabled && c.EffectiveSummarizerModel() == "" {
+		return fmt.Errorf("summarizer requires --summarizer-model or --llm-model")
+	}
+	if c.RerankerType != "" || c.SummarizerEnabled {
+		if err := validateHTTPURL("llm_url", c.LLMURL); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -150,19 +166,46 @@ func (c *Config) PathMatcher() *PathMatcher {
 	return c.pathMatcher
 }
 
-func validateEmbedURL(raw string) error {
+func (c *Config) EffectiveRerankerModel() string {
+	if c.RerankerModel != "" {
+		return c.RerankerModel
+	}
+	return c.LLMModel
+}
+
+func (c *Config) EffectiveSummarizerModel() string {
+	if c.SummarizerModel != "" {
+		return c.SummarizerModel
+	}
+	return c.LLMModel
+}
+
+func validateHTTPURL(name, raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("embed_url must be a valid URL: %w", err)
+		return fmt.Errorf("%s must be a valid URL: %w", name, err)
 	}
 	if !parsed.IsAbs() || parsed.Host == "" {
-		return fmt.Errorf("embed_url must be an absolute URL with scheme and host")
+		return fmt.Errorf("%s must be an absolute URL with scheme and host", name)
 	}
 	switch parsed.Scheme {
 	case "http", "https":
 		return nil
 	default:
-		return fmt.Errorf("embed_url scheme must be http or https")
+		return fmt.Errorf("%s scheme must be http or https", name)
+	}
+}
+
+func validateEmbedURL(raw string) error {
+	return validateHTTPURL("embed_url", raw)
+}
+
+func validateLLMProvider(provider string) error {
+	switch provider {
+	case "", "ollama", "openai":
+		return nil
+	default:
+		return fmt.Errorf("invalid llm_provider %q; must be \"ollama\" or \"openai\"", provider)
 	}
 }
 
@@ -253,15 +296,19 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flagSet.StringVar(&cfg.EmbedProvider, "embed-provider", cfg.EmbedProvider, "Embedding backend: ollama or openai (auto-detected from URL when not set)")
 	flagSet.StringVar(&cfg.EmbedAPIKey, "embed-api-key", cfg.EmbedAPIKey, "API key for the embedding backend (OpenAI-compatible providers)")
+	flagSet.StringVar(&cfg.LLMURL, "llm-url", cfg.LLMURL, "LLM API URL for reranking and summarization")
+	flagSet.StringVar(&cfg.LLMModel, "llm-model", cfg.LLMModel, "Default LLM model for reranking and summarization")
+	flagSet.StringVar(&cfg.LLMProvider, "llm-provider", cfg.LLMProvider, "LLM backend: ollama or openai (auto-detected from URL when not set)")
+	flagSet.StringVar(&cfg.LLMAPIKey, "llm-api-key", cfg.LLMAPIKey, "API key for the LLM backend (OpenAI-compatible providers)")
 	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
 	flagSet.Float64Var(&cfg.ChunkOverlap, "chunk-overlap", cfg.ChunkOverlap, "Chunk overlap fraction (0-1)")
 	flagSet.IntVar(&cfg.IndexWorkers, "index-workers", cfg.IndexWorkers, "Number of parallel indexing workers")
 	flagSet.IntVar(&cfg.EmbedBatchSize, "embed-batch-size", cfg.EmbedBatchSize, "Number of chunks to embed per batch")
-	flagSet.StringVar(&cfg.RerankerType, "reranker", cfg.RerankerType, "Reranker type: cross-encoder (requires --reranker-model)")
+	flagSet.StringVar(&cfg.RerankerType, "reranker", cfg.RerankerType, "Reranker type: cross-encoder (requires --reranker-model or --llm-model)")
 	flagSet.StringVar(&cfg.RerankerModel, "reranker-model", cfg.RerankerModel, "Model for cross-encoder reranking (e.g. llama3.2)")
 	flagSet.BoolVar(&cfg.SummarizerEnabled, "summarizer", cfg.SummarizerEnabled, "Enable LLM-powered chunk summarization at index time")
-	flagSet.StringVar(&cfg.SummarizerModel, "summarizer-model", cfg.SummarizerModel, "Model for chunk summarization (default: same as embed model)")
+	flagSet.StringVar(&cfg.SummarizerModel, "summarizer-model", cfg.SummarizerModel, "Model for chunk summarization (default: same as llm model)")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg
@@ -288,6 +335,10 @@ func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 		EmbedModel      string    `yaml:"embed_model"`
 		EmbedProvider   string    `yaml:"embed_provider"`
 		EmbedAPIKey     string    `yaml:"embed_api_key"`
+		LLMURL          string    `yaml:"llm_url"`
+		LLMModel        string    `yaml:"llm_model"`
+		LLMProvider     string    `yaml:"llm_provider"`
+		LLMAPIKey       string    `yaml:"llm_api_key"`
 		EmbedBatchSize  *int      `yaml:"embed_batch_size"`
 		PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
 		ChunkSize       *int      `yaml:"chunk_size"`
@@ -329,6 +380,18 @@ func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 	}
 	if parsed.EmbedAPIKey != "" && !cliSet["embed-api-key"] {
 		cfg.EmbedAPIKey = parsed.EmbedAPIKey
+	}
+	if parsed.LLMURL != "" && !cliSet["llm-url"] {
+		cfg.LLMURL = parsed.LLMURL
+	}
+	if parsed.LLMModel != "" && !cliSet["llm-model"] {
+		cfg.LLMModel = parsed.LLMModel
+	}
+	if parsed.LLMProvider != "" && !cliSet["llm-provider"] {
+		cfg.LLMProvider = parsed.LLMProvider
+	}
+	if parsed.LLMAPIKey != "" && !cliSet["llm-api-key"] {
+		cfg.LLMAPIKey = parsed.LLMAPIKey
 	}
 	if parsed.PDFOCRLang != "" && !cliSet["pdf-ocr-lang"] {
 		cfg.PDFOCRLang = parsed.PDFOCRLang
@@ -398,6 +461,18 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("QUANT_EMBED_API_KEY"); v != "" {
 		cfg.EmbedAPIKey = v
+	}
+	if v := os.Getenv("QUANT_LLM_URL"); v != "" {
+		cfg.LLMURL = v
+	}
+	if v := os.Getenv("QUANT_LLM_MODEL"); v != "" {
+		cfg.LLMModel = v
+	}
+	if v := os.Getenv("QUANT_LLM_PROVIDER"); v != "" {
+		cfg.LLMProvider = v
+	}
+	if v := os.Getenv("QUANT_LLM_API_KEY"); v != "" {
+		cfg.LLMAPIKey = v
 	}
 	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
 		cfg.PDFOCRLang = v

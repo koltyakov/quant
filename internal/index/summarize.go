@@ -90,9 +90,13 @@ func (s *ChunkSummarizer) summarizeBatch(ctx context.Context, contents []string)
 
 		batchResults, err := s.summarizeSubBatch(ctx, batch)
 		if err != nil {
-			logx.Warn("batch summarization failed; using empty summaries", "batch_start", batchStart, "err", err)
-			for i := range batch {
-				results[batchStart+i] = &SummaryResult{}
+			logx.Warn("batch summarization failed; retrying per item", "batch_start", batchStart, "err", err)
+			fallbackResults, fallbackErr := s.summarizeIndividually(ctx, batchStart, batch)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			for i, r := range fallbackResults {
+				results[batchStart+i] = r
 			}
 			continue
 		}
@@ -101,6 +105,23 @@ func (s *ChunkSummarizer) summarizeBatch(ctx context.Context, contents []string)
 		}
 	}
 
+	return results, nil
+}
+
+func (s *ChunkSummarizer) summarizeIndividually(ctx context.Context, offset int, contents []string) ([]*SummaryResult, error) {
+	results := make([]*SummaryResult, len(contents))
+	for i, content := range contents {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		result, err := s.Summarize(ctx, content)
+		if err != nil {
+			logx.Warn("chunk summarization failed; using empty summary", "index", offset+i, "err", err)
+			results[i] = &SummaryResult{}
+			continue
+		}
+		results[i] = result
+	}
 	return results, nil
 }
 
@@ -143,12 +164,12 @@ func parseBatchSummaryResponse(content string, expected int) ([]*SummaryResult, 
 	start := strings.Index(content, "[")
 	end := strings.LastIndex(content, "]")
 	if start < 0 || end < 0 || end <= start {
-		return individualFallback(content, expected), nil
+		return nil, fmt.Errorf("batch summary response did not contain a JSON array")
 	}
 
 	var parsed []summaryJSON
 	if err := json.Unmarshal([]byte(content[start:end+1]), &parsed); err != nil {
-		return individualFallback(content, expected), nil
+		return nil, fmt.Errorf("decoding batch summary response: %w", err)
 	}
 
 	results := make([]*SummaryResult, expected)
@@ -160,19 +181,6 @@ func parseBatchSummaryResponse(content string, expected int) ([]*SummaryResult, 
 		}
 	}
 	return results, nil
-}
-
-func individualFallback(content string, expected int) []*SummaryResult {
-	single, _ := parseSummaryResponse(content)
-	results := make([]*SummaryResult, expected)
-	for i := range results {
-		if i == 0 && single != nil {
-			results[i] = single
-		} else {
-			results[i] = &SummaryResult{}
-		}
-	}
-	return results
 }
 
 func parseSummaryResponse(content string) (*SummaryResult, error) {

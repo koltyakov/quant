@@ -108,13 +108,18 @@ func TestChunkSummarizerAndBatch(t *testing.T) {
 		t.Fatalf("expected truncated prompt body, got length %d", len(prompts[0]))
 	}
 
+	calls := 0
 	batchStub := &stubLLMCompleter{
 		fn: func(_ context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+			calls++
 			content := req.Messages[len(req.Messages)-1].Content
+			if strings.Contains(content, "Texts:\n") {
+				return llm.CompleteResponse{}, fmt.Errorf("batch summarizer error")
+			}
 			if strings.Contains(content, "bad") {
 				return llm.CompleteResponse{}, fmt.Errorf("summarizer error")
 			}
-			return llm.CompleteResponse{Content: `[{"summary":"ok","topics":["topic"]},{"summary":"ok","topics":["topic"]}]`}, nil
+			return llm.CompleteResponse{Content: `{"summary":"ok","topics":["topic"]}`}, nil
 		},
 	}
 
@@ -126,8 +131,11 @@ func TestChunkSummarizerAndBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SummarizeBatch returned error: %v", err)
 	}
-	if batch[0].Summary != "" || batch[1].Summary != "" {
-		t.Fatalf("expected empty summaries when batch fails: %+v", batch)
+	if calls != 3 {
+		t.Fatalf("expected batch attempt plus 2 fallback calls, got %d", calls)
+	}
+	if batch[0].Summary != "ok" || batch[1].Summary != "" {
+		t.Fatalf("expected per-item fallback results, got %+v", batch)
 	}
 }
 
