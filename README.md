@@ -33,6 +33,8 @@ Zero CGO. Pure Go.
 
 ## Install
 
+### macOS and Linux
+
 The quickest install path on macOS and Linux is the release installer:
 
 ```bash
@@ -41,11 +43,7 @@ curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/instal
 
 It installs `quant` to `~/.local/bin`. The installer checks whether `ollama` is on `PATH`; if it is missing, it asks whether to install Ollama with the official shell installer and prints manual setup guidance if skipped.
 
-If you already have Go installed, you can also install from source:
-
-```bash
-go install github.com/koltyakov/quant/cmd/quant@latest
-```
+### Windows
 
 On Windows, use the PowerShell installer:
 
@@ -55,7 +53,13 @@ irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.ps1 |
 
 It installs `quant.exe` to `%LOCALAPPDATA%\Programs\quant` and adds it to your user `PATH`. The installer also checks for Ollama and offers to install it via `winget`.
 
-Or download the `quant_Windows_x86_64.zip` archive directly from GitHub Releases and place `quant.exe` on `PATH`.
+### Alternative: Go install
+
+If you already have Go installed, you can also install from source:
+
+```bash
+go install github.com/koltyakov/quant/cmd/quant@latest
+```
 
 After installing:
 
@@ -67,26 +71,20 @@ quant version
 
 You only need Go if you are building `quant` yourself instead of using a release binary.
 
-- Go 1.26.1+
+- Go 1.26.0+
 
 ```
-make build
-```
-
-Or directly:
-
-```
-mkdir -p bin && go build -o bin/quant ./cmd/quant
+make install
 ```
 
 ## Usage
 
 ```
-./bin/quant mcp [--dir <path>] [options]
-./bin/quant init [client] [options]
-./bin/quant launch <client> [--dir <path>] [-- <client args...>]
-./bin/quant update
-./bin/quant version
+quant mcp [--dir <path>] [options]
+quant init [client] [options]
+quant launch <client> [--dir <path>] [-- <client args...>]
+quant update
+quant version
 ```
 
 **Commands:**
@@ -112,16 +110,16 @@ For the full flag reference, environment variables, YAML config, include/exclude
 
 ```bash
 # Create a research workspace for Codex
-./bin/quant init codex --dir ./my-research-project
+quant init codex --dir ./my-research-project
 
 # Launch Codex with quant MCP over ./data
-./bin/quant launch codex
+quant launch codex
 
 # Index a folder over stdio
-./bin/quant mcp --dir ./my-project
+quant mcp --dir ./my-project
 
 # Update to the latest release
-./bin/quant update
+quant update
 ```
 
 For clients with narrow MCP permission controls, `quant init` and `quant launch` also allow all `quant` MCP tools without prompting.
