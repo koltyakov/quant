@@ -265,6 +265,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
 	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
+	flagSet.StringVar(&cfg.EmbedProvider, "embed-provider", cfg.EmbedProvider, "Embedding backend: ollama or openai (auto-detected from URL when not set)")
 	flagSet.StringVar(&cfg.EmbedAPIKey, "embed-api-key", cfg.EmbedAPIKey, "API key for the embedding backend (OpenAI-compatible providers)")
 	flagSet.StringVar(&cfg.PDFOCRLang, "pdf-ocr-lang", cfg.PDFOCRLang, "Tesseract language(s) for scanned PDF OCR, e.g. eng or rus+eng")
 	flagSet.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Chunk size in words")
@@ -299,6 +300,8 @@ func loadYAML(cfg *Config, path string) error {
 		ListenAddr      string    `yaml:"listen"`
 		EmbedURL        string    `yaml:"embed_url"`
 		EmbedModel      string    `yaml:"embed_model"`
+		EmbedProvider   string    `yaml:"embed_provider"`
+		EmbedAPIKey     string    `yaml:"embed_api_key"`
 		EmbedBatchSize  *int      `yaml:"embed_batch_size"`
 		PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
 		ChunkSize       *int      `yaml:"chunk_size"`
@@ -330,6 +333,12 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if parsed.EmbedModel != "" {
 		cfg.EmbedModel = parsed.EmbedModel
+	}
+	if parsed.EmbedProvider != "" {
+		cfg.EmbedProvider = parsed.EmbedProvider
+	}
+	if parsed.EmbedAPIKey != "" {
+		cfg.EmbedAPIKey = parsed.EmbedAPIKey
 	}
 	if parsed.PDFOCRLang != "" {
 		cfg.PDFOCRLang = parsed.PDFOCRLang

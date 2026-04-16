@@ -50,7 +50,7 @@ where K = 60 (standard RRF constant).
 
 ### Adaptive weighting
 
-When `--keyword-weight` and `--vector-weight` are both 0 (the default), `quant` classifies the query and chooses weights automatically:
+`quant` classifies the query shape and selects weights automatically:
 
 | Query shape | Keyword weight | Vector weight | Rationale |
 |-------------|---------------|---------------|-----------|
@@ -60,7 +60,7 @@ When `--keyword-weight` and `--vector-weight` are both 0 (the default), `quant` 
 | 4+ tokens, natural language | 0.7 | 1.4 | Longer queries benefit from semantic matching |
 | Everything else | 1.0 | 1.0 | Balanced |
 
-Setting explicit weights via `--keyword-weight` / `--vector-weight` overrides the auto-classification while preserving the other signal's proportional contribution.
+Weights are chosen per query and are not user-configurable.
 
 ## Stage 4: Bonus signals
 

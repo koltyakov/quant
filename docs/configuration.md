@@ -34,12 +34,26 @@ All flags apply to `quant mcp`.
 | `--reranker` | - | Reranker type. Only accepted value: `cross-encoder` (requires `--reranker-model`). |
 | `--reranker-model` | - | Model used for cross-encoder reranking (e.g. `llama3.2`). Requires Ollama. |
 
+Cross-encoder reranking adds a second-pass LLM reranking step after the initial hybrid retrieval. The model sees each `(query, chunk)` pair and produces a relevance score that overrides the RRF score for final ranking.
+
+**When to use:** When retrieval precision matters more than latency. Reranking runs at query time and adds one Ollama call per candidate, so it noticeably increases response time. Good for research workspaces where you want the single best result to be highly accurate.
+
+**Model choice:** A small instruction-following model works well (e.g. `llama3.2`). The model does not need to be the same as the embedding model.
+
 ### Summarizer flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--summarizer` | `false` | Enable LLM-powered chunk summarization at index time. |
 | `--summarizer-model` | same as `--embed-model` | Model used for chunk summarization. Requires Ollama. |
+
+The summarizer generates a concise summary of each chunk at index time using a local LLM. Summaries are stored alongside the chunk text and used to improve search signal.
+
+**When to use:** When your documents are dense or technical and keyword matching struggles because the terminology in queries differs from the source text. Summaries can bridge the vocabulary gap.
+
+**Cost:** Runs at index time, not query time — so search latency is unaffected. The tradeoff is significantly longer initial indexing and higher compute during reindexing. Large corpora with frequent updates can become expensive to maintain.
+
+**Model choice:** Defaults to the same model as `--embed-model`. A small generative model (e.g. `llama3.2`) works well and is faster than a large model.
 
 ### PDF flags
 

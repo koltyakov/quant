@@ -183,7 +183,7 @@ flowchart TD
 
 - **No CGO** - uses `modernc.org/sqlite` (pure Go SQLite)
 - **Hybrid retrieval** - SQLite FTS5 prefilter + normalized vector rerank via RRF
-- **Adaptive query weighting** - identifier-like queries (camelCase, short tokens) upweight keyword signals; longer natural-language queries upweight vector signals. Overridable via `--keyword-weight` / `--vector-weight`
+- **Adaptive query weighting** - identifier-like queries (camelCase, short tokens) upweight keyword signals; longer natural-language queries upweight vector signals. Weights are selected automatically per query.
 - **HNSW approximate nearest neighbors** - in-memory HNSW graph (M=16, EfSearch=100) built from stored embeddings after initial sync; incremental add/delete during live indexing
 - **Int8 quantized embeddings** - embeddings are L2-normalized and quantized to 1 byte/dimension (~4x storage savings, <1% recall loss)
 - **Bounded-memory rerank** - top-k heap keeps vector reranking memory stable as candidate sets grow
@@ -199,11 +199,12 @@ See [docs/architecture.md](docs/architecture.md) for the internal package layout
 ## Further reading
 
 - [Configuration reference](docs/configuration.md) - all flags, environment variables, YAML config, include/exclude patterns, auto-update
-- [MCP client integration](docs/mcp-clients.md) - Claude Code, GitHub Copilot, Codex, OpenCode
+- [MCP client integration](docs/mcp-clients.md) - Claude Code, GitHub Copilot, Codex, OpenCode, Cursor, Gemini
 - [Embedding models](docs/embedding.md) - model choice, quantization, and hardware guidance
 - [Search and ranking](docs/search.md) - hybrid search pipeline, RRF fusion, and signal weighting
 - [Supported file types](docs/file-types.md) - extensions, special filenames, and document extractors
 - [Architecture](docs/architecture.md) - internal package layout and data flow
+- [Troubleshooting](docs/troubleshooting.md) - common issues and fixes
 
 ## Contributing
 

@@ -123,6 +123,41 @@ Add a local MCP in `opencode.json` or `opencode.jsonc`:
 }
 ```
 
+## Cursor
+
+Add a project-level `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "quant": {
+      "command": "quant",
+      "args": ["mcp", "--dir", "/path/to/project"],
+      "env": { "QUANT_AUTOUPDATE": "true" }
+    }
+  }
+}
+```
+
+## Gemini CLI
+
+Add `quant` to `.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "quant": {
+      "command": "quant",
+      "args": ["mcp", "--dir", "/path/to/project"],
+      "env": { "QUANT_AUTOUPDATE": "true" }
+    }
+  },
+  "contextFileName": "AGENTS.md"
+}
+```
+
+The `contextFileName` field tells Gemini CLI to load `AGENTS.md` as system context automatically. `quant init gemini` writes this file with research instructions for the agent.
+
 ## Choosing a transport
 
 `quant` supports three MCP transports:
