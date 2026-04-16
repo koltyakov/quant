@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.12.0 (2026-04-16)
+
+### Features
+
+- **Shared LLM configuration for reranking and summarization** - New `--llm-url`, `--llm-model`, `--llm-provider`, and `--llm-api-key` settings let cross-encoder reranking and chunk summarization share a configurable LLM backend, with per-feature model overrides still available via `--reranker-model` and `--summarizer-model`.
+- **OpenAI-compatible LLM support for search enhancements** - Reranking and summarization now work with either Ollama or OpenAI-compatible chat backends, making it possible to run embeddings and LLM-based search features against different providers.
+- **Stronger configuration surface for search features** - Reranker and summarizer settings are now available consistently across CLI flags, YAML config, and environment variables, including explicit provider selection and API keys.
+- **Expanded integration and troubleshooting docs** - Documentation now includes manual MCP setup examples for Cursor and Gemini plus a dedicated troubleshooting guide.
+
+### Improvements
+
+- **Cleaner configuration precedence** - Config loading now applies defaults, YAML, CLI flags, and environment variables in a predictable order, with broader coverage for provider, reranker, and summarizer settings.
+- **Indexer path handling refactor** - A canonical `DocumentRef` flow now keeps document keys, absolute paths, retries, live queue entries, and quarantine behavior aligned across initial sync and watch-driven updates.
+- **Runtime bootstrap cleanup** - Main-process startup now uses explicit bootstrap and runner types instead of a single oversized orchestration path, making lifecycle management and promotion behavior easier to reason about.
+- **More robust shutdown behavior** - Main-process teardown and proxy shutdown are now idempotent, reducing duplicate shutdown races during promotion, restart, and test flows.
+
 ## v0.11.0 (2026-04-16)
 
 ### Features
