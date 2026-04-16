@@ -24,8 +24,10 @@ type Server struct {
 	server   *http.Server
 	addr     string
 
-	mu    sync.Mutex
-	ready bool
+	mu           sync.Mutex
+	ready        bool
+	shutdownOnce sync.Once
+	shutdownErr  error
 }
 
 func NewServer(store index.Searcher, state *runtimestate.IndexStateTracker, embedder embed.Embedder) *Server {
@@ -92,15 +94,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	server := s.server
-	s.ready = false
-	s.mu.Unlock()
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		server := s.server
+		s.ready = false
+		s.mu.Unlock()
 
-	if server == nil {
-		return nil
-	}
-	return server.Shutdown(ctx)
+		if server == nil {
+			return
+		}
+		s.shutdownErr = server.Shutdown(ctx)
+	})
+	return s.shutdownErr
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {

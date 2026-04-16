@@ -70,6 +70,24 @@ func TestProcessRunnerRun_ReturnsServerError(t *testing.T) {
 	}
 }
 
+func TestMainProcessClose_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	proc := &mainProcess{
+		cancel: func() {
+			calls++
+		},
+	}
+
+	proc.Close()
+	proc.Close()
+
+	if calls != 1 {
+		t.Fatalf("expected cancel to run once, got %d", calls)
+	}
+}
+
 func TestWatchMainAndPromoteInterval_PromotesWhenLockAvailable(t *testing.T) {
 	t.Parallel()
 

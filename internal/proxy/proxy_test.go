@@ -189,6 +189,40 @@ func newProxyTestHarness(t *testing.T, keywordOnly ...bool) (*index.Store, *Clie
 	return store, NewClient(addr), embedder
 }
 
+func TestServerShutdown_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := NewServer(store, nil, nil)
+	if _, err := server.Start(ctx); err != nil {
+		if strings.Contains(err.Error(), "bind: operation not permitted") || strings.Contains(err.Error(), "bind: permission denied") {
+			t.Skipf("proxy listener unavailable in this environment: %v", err)
+		}
+		t.Fatalf("unexpected proxy start error: %v", err)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("first shutdown error: %v", err)
+	}
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), time.Second)
+	defer secondCancel()
+	if err := server.Shutdown(secondCtx); err != nil {
+		t.Fatalf("second shutdown error: %v", err)
+	}
+}
+
 func testTime() time.Time {
 	return time.Unix(1_700_000_000, 0).UTC()
 }

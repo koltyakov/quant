@@ -61,11 +61,12 @@ func (r *processRunner) Run(server mcpProcessServer, cfg *config.Config) error {
 }
 
 type mainProcess struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	cfg     *config.Config
-	version string
-	lock    *lock.Lock
+	ctx       context.Context
+	cancel    context.CancelFunc
+	cfg       *config.Config
+	version   string
+	lock      *lock.Lock
+	closeOnce sync.Once
 
 	rawEmbedder    embed.Embedder
 	searchEmbedder embed.Embedder
@@ -87,6 +88,7 @@ func newMainProcess(ctx context.Context, cfg *config.Config, version string, lk 
 	}
 	defer func() {
 		if err != nil {
+			cancel()
 			proc.Close()
 		}
 	}()
@@ -130,36 +132,38 @@ func (p *mainProcess) Close() {
 	if p == nil {
 		return
 	}
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.proxyServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if err := p.proxyServer.Shutdown(shutdownCtx); err != nil {
-			logx.Error("shutting down proxy server failed", "err", err)
+	p.closeOnce.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
 		}
-		cancel()
-	}
-	if p.watcher != nil {
-		if err := p.watcher.Close(); err != nil {
-			logx.Error("closing watcher failed", "err", err)
+		if p.proxyServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := p.proxyServer.Shutdown(shutdownCtx); err != nil {
+				logx.Error("shutting down proxy server failed", "err", err)
+			}
+			cancel()
 		}
-	}
-	if p.rawEmbedder != nil {
-		if err := p.rawEmbedder.Close(); err != nil {
-			logx.Error("closing embedder failed", "err", err)
+		if p.watcher != nil {
+			if err := p.watcher.Close(); err != nil {
+				logx.Error("closing watcher failed", "err", err)
+			}
 		}
-	}
-	if p.store != nil {
-		if err := p.store.Close(); err != nil {
-			logx.Error("closing store failed", "err", err)
+		if p.rawEmbedder != nil {
+			if err := p.rawEmbedder.Close(); err != nil {
+				logx.Error("closing embedder failed", "err", err)
+			}
 		}
-	}
-	if p.lock != nil {
-		if err := p.lock.Release(); err != nil {
-			logx.Error("releasing lock failed", "err", err)
+		if p.store != nil {
+			if err := p.store.Close(); err != nil {
+				logx.Error("closing store failed", "err", err)
+			}
 		}
-	}
+		if p.lock != nil {
+			if err := p.lock.Release(); err != nil {
+				logx.Error("releasing lock failed", "err", err)
+			}
+		}
+	})
 }
 
 func (p *mainProcess) Serve(hooks AutoUpdateHooks) error {
