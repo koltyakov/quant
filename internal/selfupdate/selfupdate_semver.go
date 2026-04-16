@@ -32,7 +32,7 @@ func isNewer(current, latest string) bool {
 		return false
 	}
 	if lpre == "" {
-		return true
+		return !isGitDescribePrerelease(cpre)
 	}
 	return comparePrerelease(lpre, cpre) > 0
 }
@@ -76,6 +76,24 @@ func parseSemverDetails(v string) ([]int, string, bool) {
 		nums[i] = n
 	}
 	return nums, prerelease, true
+}
+
+func isGitDescribePrerelease(pre string) bool {
+	i := strings.Index(pre, "-g")
+	if i < 0 {
+		return false
+	}
+	commitCount := pre[:i]
+	for _, ch := range commitCount {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	if len(commitCount) == 0 {
+		return false
+	}
+	hash := pre[i+2:]
+	return len(hash) > 0
 }
 
 func comparePrerelease(a, b string) int {

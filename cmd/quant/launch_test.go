@@ -123,6 +123,7 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 			"-c", `mcp_servers.quant.command="/tmp/quant"`,
 			"-c", `mcp_servers.quant.args=["mcp", "--dir", "` + opts.IndexDir + `"]`,
 			"-c", `mcp_servers.quant.env={QUANT_AUTOUPDATE="true"}`,
+			"-c", `mcp_servers.quant.tools."*".approval_mode="approve"`,
 			"hello",
 		}
 		assertInvocation(t, inv, "codex", opts.WorkspaceDir, want)
@@ -152,6 +153,10 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 		if env["QUANT_AUTOUPDATE"] != "true" {
 			t.Fatalf("unexpected opencode environment: %+v", env)
 		}
+		permission := cfg["permission"].(map[string]any)
+		if permission["quant_*"] != "allow" {
+			t.Fatalf("unexpected opencode permission: %+v", permission)
+		}
 	})
 
 	t.Run("claude", func(t *testing.T) {
@@ -164,6 +169,9 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 		assertInvocation(t, inv, "claude", opts.WorkspaceDir, nil)
 		if inv.Args[0] != "--mcp-config" || !strings.Contains(inv.Args[1], `"mcpServers"`) || !strings.Contains(inv.Args[1], `"type":"stdio"`) {
 			t.Fatalf("unexpected claude args: %v", inv.Args)
+		}
+		if inv.Args[2] != "--allowedTools" || inv.Args[3] != "mcp__quant__*" {
+			t.Fatalf("missing claude quant MCP allow args: %v", inv.Args)
 		}
 		if inv.Args[len(inv.Args)-1] != "hello" {
 			t.Fatalf("missing claude pass-through args: %v", inv.Args)
@@ -202,8 +210,14 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 			t.Fatalf("buildLaunchInvocation(copilot) error = %v", err)
 		}
 		assertInvocation(t, inv, "copilot", opts.WorkspaceDir, nil)
-		if inv.Args[0] != "--additional-mcp-config" || !strings.Contains(inv.Args[1], `"mcpServers"`) || !strings.Contains(inv.Args[1], `"type":"stdio"`) {
+		if inv.Args[0] != "--additional-mcp-config" || !strings.Contains(inv.Args[1], `"mcpServers"`) || !strings.Contains(inv.Args[1], `"type":"local"`) {
 			t.Fatalf("unexpected copilot args: %v", inv.Args)
+		}
+		if !strings.Contains(inv.Args[1], `"tools":["*"]`) {
+			t.Fatalf("unexpected copilot args: %v", inv.Args)
+		}
+		if inv.Args[2] != "--allow-tool=quant" {
+			t.Fatalf("missing copilot quant MCP allow arg: %v", inv.Args)
 		}
 		if inv.Args[len(inv.Args)-1] != "hello" {
 			t.Fatalf("missing copilot pass-through args: %v", inv.Args)

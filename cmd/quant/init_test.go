@@ -80,8 +80,8 @@ func TestInitProjectCreatesClientFiles(t *testing.T) {
 		extraPath  string
 		configWant []string
 	}{
-		{client: "opencode", configPath: "opencode.json", configWant: []string{`"command": [`, `"quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"instructions"`}},
-		{client: "codex", configPath: filepath.Join(".codex", "config.toml"), configWant: []string{`command = "quant"`, `args = ["mcp", "--dir", "./data"]`, `[mcp_servers.quant.env]`}},
+		{client: "opencode", configPath: "opencode.json", configWant: []string{`"command": [`, `"quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"instructions"`, `"permission"`, `"quant_*": "allow"`}},
+		{client: "codex", configPath: filepath.Join(".codex", "config.toml"), configWant: []string{`command = "quant"`, `args = ["mcp", "--dir", "./data"]`, `[mcp_servers.quant.env]`, `[mcp_servers.quant.tools."*"]`, `approval_mode = "approve"`}},
 		{client: "claude", configPath: ".mcp.json", extraPath: "CLAUDE.md", configWant: []string{`"mcpServers"`, `"command": "quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"type": "stdio"`}},
 		{client: "cursor", configPath: filepath.Join(".cursor", "mcp.json"), configWant: []string{`"mcpServers"`, `"command": "quant"`, `"mcp"`, `"--dir"`, `"./data"`}},
 		{client: "copilot", configPath: filepath.Join(".vscode", "mcp.json"), configWant: []string{`"servers"`, `"command": "quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"type": "stdio"`}},
@@ -118,6 +118,12 @@ func TestInitProjectCreatesClientFiles(t *testing.T) {
 				extra := readFile(t, filepath.Join(dir, tt.extraPath))
 				if !strings.Contains(extra, "@AGENTS.md") {
 					t.Fatalf("%s missing AGENTS import: %q", tt.extraPath, extra)
+				}
+			}
+			if tt.client == "claude" {
+				settings := readFile(t, filepath.Join(dir, ".claude", "settings.json"))
+				if !strings.Contains(settings, `"permissions"`) || !strings.Contains(settings, `"mcp__quant__*"`) {
+					t.Fatalf("claude settings missing quant MCP allow rule:\n%s", settings)
 				}
 			}
 		})

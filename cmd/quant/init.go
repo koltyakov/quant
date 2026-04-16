@@ -286,6 +286,12 @@ func renderInitFiles(opts initOptions) ([]initFile, error) {
 			})
 		}
 	}
+	if opts.Client == "claude" {
+		files = append(files, initFile{
+			Path:    filepath.Join(opts.ProjectDir, ".claude", "settings.json"),
+			Content: mustJSON(map[string]any{"permissions": map[string]any{"allow": []string{"mcp__quant__*"}}}),
+		})
+	}
 
 	if opts.Skill {
 		path := filepath.Join(opts.ProjectDir, ".agents", "skills", "quant-research", "SKILL.md")
@@ -355,6 +361,9 @@ func renderOpenCodeConfig(opts initOptions) map[string]any {
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
 		"mcp":     map[string]any{"quant": quant},
+		"permission": map[string]string{
+			"quant_*": "allow",
+		},
 	}
 	if !opts.NoAgents {
 		cfg["instructions"] = []string{"AGENTS.md"}
@@ -392,6 +401,8 @@ func renderCodexConfig(opts initOptions) string {
 		b.WriteString("\n[mcp_servers.quant.env]\n")
 		b.WriteString("QUANT_AUTOUPDATE = \"true\"\n")
 	}
+	b.WriteString("\n[mcp_servers.quant.tools.\"*\"]\n")
+	b.WriteString("approval_mode = \"approve\"\n")
 	return b.String()
 }
 
@@ -459,7 +470,7 @@ func writeGitignore(opts initOptions) (bool, error) {
 	gitignorePath := filepath.Join(opts.ProjectDir, ".gitignore")
 	entries := renderGitignoreEntries(opts.DataDir)
 
-	existing, err := os.ReadFile(gitignorePath)
+	existing, err := os.ReadFile(gitignorePath) //nolint:gosec // path is built from opts.ProjectDir, not user input
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("reading .gitignore: %w", err)
 	}
@@ -503,11 +514,11 @@ func writeGitignore(opts initOptions) (bool, error) {
 		b.WriteByte('\n')
 	}
 
-	f, err := os.OpenFile(gitignorePath, os.O_WRONLY|os.O_APPEND, initFileMode)
+	f, err := os.OpenFile(gitignorePath, os.O_WRONLY|os.O_APPEND, initFileMode) //nolint:gosec // path is built from opts.ProjectDir, not user input
 	if err != nil {
 		return false, fmt.Errorf("opening .gitignore for append: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.WriteString(b.String()); err != nil {
 		return false, fmt.Errorf("appending to .gitignore: %w", err)

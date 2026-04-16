@@ -21,7 +21,7 @@ quant init opencode --dir ./my-research-project
 
 Supported clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `gemini`.
 
-`quant init` writes relative MCP commands such as `quant mcp --dir ./data` so the project folder stays portable. Existing files are skipped by default; use `--force` to replace generated files. Use `--no-agents` to skip `AGENTS.md`, and `--skill` to add a project skill for clients that support it (`codex` and `claude`).
+`quant init` writes relative MCP commands such as `quant mcp --dir ./data` so the project folder stays portable. Existing files are skipped by default; use `--force` to replace generated files. Use `--no-agents` to skip `AGENTS.md`, and `--skill` to add a project skill for clients that support it (`codex` and `claude`). For clients with narrow MCP permission controls, generated config also allows all `quant` MCP tools without prompting.
 
 | Client | MCP config | Instruction files |
 |---|---|---|
@@ -34,7 +34,7 @@ Supported clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `g
 
 ## Session launch
 
-Use `quant launch <client>` to start a supported agent with the `quant` MCP server injected only for that process. This does not write project or user MCP configuration.
+Use `quant launch <client>` to start a supported agent with the `quant` MCP server injected only for that process. This does not write project or user MCP configuration. For clients with session-level MCP permission flags, launch also allows all `quant` MCP tools without prompting.
 
 ```bash
 quant launch codex

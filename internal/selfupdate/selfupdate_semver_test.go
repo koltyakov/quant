@@ -52,6 +52,7 @@ func TestIsNewer_Prerelease(t *testing.T) {
 		{"1.0.0-alpha", "1.0.0-beta", true},
 		{"1.0.0-beta", "1.0.0-alpha", false},
 		{"1.0.0-alpha", "1.0.0", true},
+		{"1.0.0-2-gabc1234", "1.0.0", false},
 		{"1.0.0", "1.0.0-alpha", false},
 		{"1.0.0-alpha.1", "1.0.0-alpha.2", true},
 		{"1.0.0-alpha.2", "1.0.0-alpha.1", false},
@@ -60,6 +61,51 @@ func TestIsNewer_Prerelease(t *testing.T) {
 		got := isNewer(tt.current, tt.latest)
 		if got != tt.want {
 			t.Errorf("isNewer(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
+		}
+	}
+}
+
+func TestIsNewer_GitDescribe(t *testing.T) {
+	tests := []struct {
+		current, latest string
+		want            bool
+	}{
+		{"0.10.0-3-gecb7c99", "0.10.0", false},
+		{"0.10.0-1-gabcdef0", "0.10.0", false},
+		{"0.10.0-3-gecb7c99", "0.11.0", true},
+		{"0.10.0-3-gecb7c99", "0.9.0", false},
+		{"1.0.0-10-gdeadbeef", "1.0.1", true},
+		{"2.0.0-5-gabc1234", "1.9.9", false},
+	}
+	for _, tt := range tests {
+		got := isNewer(tt.current, tt.latest)
+		if got != tt.want {
+			t.Errorf("isNewer(%q, %q) = %v, want %v", tt.current, tt.latest, got, tt.want)
+		}
+	}
+}
+
+func TestIsGitDescribePrerelease(t *testing.T) {
+	tests := []struct {
+		pre  string
+		want bool
+	}{
+		{"3-gecb7c99", true},
+		{"1-gabcdef0", true},
+		{"0-ga", true},
+		{"10-gdeadbeef", true},
+		{"alpha", false},
+		{"rc.1", false},
+		{"3-beta", false},
+		{"gabcdef", false},
+		{"-gabcdef", false},
+		{"", false},
+		{"3-", false},
+	}
+	for _, tt := range tests {
+		got := isGitDescribePrerelease(tt.pre)
+		if got != tt.want {
+			t.Errorf("isGitDescribePrerelease(%q) = %v, want %v", tt.pre, got, tt.want)
 		}
 	}
 }

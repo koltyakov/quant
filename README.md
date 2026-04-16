@@ -121,6 +121,8 @@ For the full flag reference, environment variables, YAML config, include/exclude
 ./bin/quant update
 ```
 
+For clients with narrow MCP permission controls, `quant init` and `quant launch` also allow all `quant` MCP tools without prompting.
+
 ## MCP Tools
 
 | Tool | Description |

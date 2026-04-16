@@ -172,7 +172,7 @@ func normalizeLaunchOptions(opts *launchOptions) error {
 	info, err := os.Stat(indexDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && filepath.Base(indexDir) == defaultLaunchDataDir {
-			return fmt.Errorf("default data directory %s does not exist; run 'quant init %s', create ./data, or pass --dir .", indexDir, opts.Client)
+			return fmt.Errorf("default data directory %s does not exist; run 'quant init %s', create ./data, or pass --dir .", indexDir, opts.Client) //nolint:staticcheck // the trailing period is part of the flag example, not sentence punctuation
 		}
 		return fmt.Errorf("cannot access dir %s: %w", indexDir, err)
 	}
@@ -225,6 +225,7 @@ func buildCodexLaunchInvocation(opts launchOptions, mcp launchMCPConfig) (launch
 		"-c", "mcp_servers.quant.command=" + strconv.Quote(mcp.Command),
 		"-c", "mcp_servers.quant.args=" + tomlStringArray(mcp.Args),
 		"-c", `mcp_servers.quant.env={QUANT_AUTOUPDATE="true"}`,
+		"-c", `mcp_servers.quant.tools."*".approval_mode="approve"`,
 	}
 	args = append(args, opts.ClientArgs...)
 	return launchInvocation{Command: "codex", Args: args, Dir: opts.WorkspaceDir}, nil
@@ -243,6 +244,9 @@ func buildOpenCodeLaunchInvocation(opts launchOptions, mcp launchMCPConfig) (lau
 				"enabled":     true,
 				"environment": mcp.Env,
 			},
+		},
+		"permission": map[string]string{
+			"quant_*": "allow",
 		},
 	}
 	data, err := json.Marshal(cfg)
@@ -267,7 +271,7 @@ func buildClaudeLaunchInvocation(opts launchOptions, mcp launchMCPConfig) (launc
 	if err != nil {
 		return launchInvocation{}, fmt.Errorf("rendering claude MCP config: %w", err)
 	}
-	args := append([]string{"--mcp-config", string(data)}, opts.ClientArgs...)
+	args := append([]string{"--mcp-config", string(data), "--allowedTools", "mcp__quant__*"}, opts.ClientArgs...)
 	return launchInvocation{Command: "claude", Args: args, Dir: opts.WorkspaceDir}, nil
 }
 
@@ -275,12 +279,12 @@ func buildCopilotLaunchInvocation(opts launchOptions, mcp launchMCPConfig) (laun
 	if err := requireLaunchBinary("copilot"); err != nil {
 		return launchInvocation{}, err
 	}
-	cfg := map[string]any{"mcpServers": map[string]any{launchServerName: launchStdioServerConfig(mcp, true)}}
+	cfg := map[string]any{"mcpServers": map[string]any{launchServerName: launchCopilotServerConfig(mcp)}}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return launchInvocation{}, fmt.Errorf("rendering copilot MCP config: %w", err)
 	}
-	args := append([]string{"--additional-mcp-config", string(data)}, opts.ClientArgs...)
+	args := append([]string{"--additional-mcp-config", string(data), "--allow-tool=quant"}, opts.ClientArgs...)
 	return launchInvocation{Command: "copilot", Args: args, Dir: opts.WorkspaceDir}, nil
 }
 
@@ -349,6 +353,16 @@ func launchStdioServerConfig(mcp launchMCPConfig, includeType bool) map[string]a
 		cfg["type"] = "stdio"
 	}
 	return cfg
+}
+
+func launchCopilotServerConfig(mcp launchMCPConfig) map[string]any {
+	return map[string]any{
+		"type":    "local",
+		"command": mcp.Command,
+		"args":    mcp.Args,
+		"env":     mcp.Env,
+		"tools":   []string{"*"},
+	}
 }
 
 func requireLaunchBinary(name string) error {
