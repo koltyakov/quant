@@ -3,14 +3,14 @@ package index
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/koltyakov/quant/internal/llm"
 )
 
 func TestColbertEncodingProjectionAndSummary(t *testing.T) {
@@ -81,39 +81,17 @@ func TestColbertEncodingProjectionAndSummary(t *testing.T) {
 func TestChunkSummarizerAndBatch(t *testing.T) {
 	t.Parallel()
 
-	var bodies []string
-	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/chat" || r.Method != http.MethodPost {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		rawMessages, _ := payload["messages"].([]any)
-		if len(rawMessages) != 2 {
-			t.Fatalf("unexpected message count: %d", len(rawMessages))
-		}
-		second := rawMessages[1].(map[string]any)
-		bodies = append(bodies, second["content"].(string))
-		attempts++
-		if attempts == 1 {
-			http.Error(w, "retry later", http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		var resp ollamaChatResponse
-		resp.Message.Content = `{"summary":"brief","topics":["x","y"]}`
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+	var prompts []string
+	stub := &stubLLMCompleter{
+		fn: func(_ context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+			prompts = append(prompts, req.Messages[len(req.Messages)-1].Content)
+			return llm.CompleteResponse{Content: `{"summary":"brief","topics":["x","y"]}`}, nil
+		},
+	}
 
 	summarizer := NewChunkSummarizer(SummarizerConfig{
-		BaseURL:    server.URL,
-		Model:      "mini",
-		Timeout:    time.Second,
-		MaxRetries: 1,
+		Completer: stub,
+		Model:     "mini",
 	})
 	longContent := strings.Repeat("a", 2200)
 	result, err := summarizer.Summarize(context.Background(), longContent)
@@ -123,42 +101,42 @@ func TestChunkSummarizerAndBatch(t *testing.T) {
 	if result.Summary != "brief" || !reflect.DeepEqual(result.Topics, []string{"x", "y"}) {
 		t.Fatalf("unexpected summary result: %+v", result)
 	}
-	if attempts != 2 {
-		t.Fatalf("expected one retry, got %d attempts", attempts)
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(prompts))
 	}
-	if len(bodies) == 0 || len(bodies[0]) >= 2300 {
-		t.Fatalf("expected truncated prompt body, got length %d", len(bodies[0]))
+	if len(prompts[0]) >= 2300 {
+		t.Fatalf("expected truncated prompt body, got length %d", len(prompts[0]))
 	}
 
-	batchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode batch request: %v", err)
-		}
-		second := payload["messages"].([]any)[1].(map[string]any)
-		content := second["content"].(string)
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(content, "bad") {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var resp ollamaChatResponse
-		resp.Message.Content = `{"summary":"ok","topics":["topic"]}`
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer batchServer.Close()
-
-	batchSummarizer := NewChunkSummarizer(SummarizerConfig{BaseURL: batchServer.URL, Model: "mini", MaxRetries: -1})
-	if batchSummarizer.maxRetries != 1 {
-		t.Fatalf("expected negative retries to normalize to 1, got %d", batchSummarizer.maxRetries)
+	batchStub := &stubLLMCompleter{
+		fn: func(_ context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+			content := req.Messages[len(req.Messages)-1].Content
+			if strings.Contains(content, "bad") {
+				return llm.CompleteResponse{}, fmt.Errorf("summarizer error")
+			}
+			return llm.CompleteResponse{Content: `[{"summary":"ok","topics":["topic"]},{"summary":"ok","topics":["topic"]}]`}, nil
+		},
 	}
+
+	batchSummarizer := NewChunkSummarizer(SummarizerConfig{
+		Completer: batchStub,
+		Model:     "mini",
+	})
 	batch, err := batchSummarizer.SummarizeBatch(context.Background(), []string{"good", "bad"})
 	if err != nil {
 		t.Fatalf("SummarizeBatch returned error: %v", err)
 	}
-	if batch[0].Summary != "ok" || batch[1].Summary != "" || batch[1].Topics != nil {
-		t.Fatalf("unexpected batch results: %+v", batch)
+	if batch[0].Summary != "" || batch[1].Summary != "" {
+		t.Fatalf("expected empty summaries when batch fails: %+v", batch)
 	}
+}
+
+type stubLLMCompleter struct {
+	fn func(context.Context, llm.CompleteRequest) (llm.CompleteResponse, error)
+}
+
+func (s *stubLLMCompleter) Complete(ctx context.Context, req llm.CompleteRequest) (llm.CompleteResponse, error) {
+	return s.fn(ctx, req)
 }
 
 func TestDocEmbeddingsAndProjectionMigration(t *testing.T) {

@@ -1,16 +1,13 @@
 package index
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/koltyakov/quant/internal/llm"
 	"github.com/koltyakov/quant/internal/logx"
 )
 
@@ -19,33 +16,18 @@ type rerankPair struct {
 	document string
 }
 
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ollamaChatResponse struct {
-	Message struct {
-		Content string `json:"content"`
-	} `json:"message"`
-}
-
 type CrossEncoderReranker struct {
-	baseURL     string
+	completer   llm.Completer
 	model       string
 	topK        int
 	scoreWeight float32
-	httpClient  *http.Client
-	maxRetries  int
 }
 
 type CrossEncoderConfig struct {
-	BaseURL     string
+	Completer   llm.Completer
 	Model       string
 	TopK        int
 	ScoreWeight float32
-	Timeout     time.Duration
-	MaxRetries  int
 }
 
 func NewCrossEncoderReranker(cfg CrossEncoderConfig) *CrossEncoderReranker {
@@ -55,19 +37,11 @@ func NewCrossEncoderReranker(cfg CrossEncoderConfig) *CrossEncoderReranker {
 	if cfg.ScoreWeight <= 0 {
 		cfg.ScoreWeight = 0.5
 	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 30 * time.Second
-	}
-	if cfg.MaxRetries < 0 {
-		cfg.MaxRetries = 2
-	}
 	return &CrossEncoderReranker{
-		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
+		completer:   cfg.Completer,
 		model:       cfg.Model,
 		topK:        cfg.TopK,
 		scoreWeight: cfg.ScoreWeight,
-		httpClient:  &http.Client{Timeout: cfg.Timeout},
-		maxRetries:  cfg.MaxRetries,
 	}
 }
 
@@ -170,12 +144,6 @@ func (r *CrossEncoderReranker) scoreSubBatch(ctx context.Context, query string, 
 		Document string `json:"document"`
 	}
 
-	type chatReq struct {
-		Model    string        `json:"model"`
-		Messages []chatMessage `json:"messages"`
-		Stream   bool          `json:"stream"`
-	}
-
 	docs := make([]docEntry, len(pairs))
 	for i, p := range pairs {
 		content := p.document
@@ -193,67 +161,18 @@ func (r *CrossEncoderReranker) scoreSubBatch(ctx context.Context, query string, 
 		query, string(docsJSON),
 	)
 
-	reqBody := chatReq{
+	resp, err := r.completer.Complete(ctx, llm.CompleteRequest{
 		Model: r.model,
-		Messages: []chatMessage{
+		Messages: []llm.Message{
 			{Role: "system", Content: "You are a relevance scoring system. Output only a JSON array of float scores between 0.0 and 1.0."},
 			{Role: "user", Content: prompt},
 		},
-		Stream: false,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling rerank request: %w", err)
-	}
-
-	var chatResp ollamaChatResponse
-	for attempt := 0; attempt <= r.maxRetries; attempt++ {
-		chatResp, err = r.doRequest(ctx, body)
-		if err == nil {
-			break
-		}
-		if attempt < r.maxRetries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(500*(attempt+1)) * time.Millisecond):
-			}
-		}
-	}
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	return parseScoreArray(chatResp.Message.Content, len(pairs))
-}
-
-func (r *CrossEncoderReranker) doRequest(ctx context.Context, body []byte) (ollamaChatResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return ollamaChatResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return ollamaChatResponse{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 500 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return ollamaChatResponse{}, fmt.Errorf("ollama chat %d: %s", resp.StatusCode, string(respBody))
-	}
-	if resp.StatusCode >= 400 {
-		return ollamaChatResponse{}, fmt.Errorf("ollama chat permanent error %d", resp.StatusCode)
-	}
-
-	var chatResp ollamaChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return ollamaChatResponse{}, fmt.Errorf("decoding chat response: %w", err)
-	}
-	return chatResp, nil
+	return parseScoreArray(resp.Content, len(pairs))
 }
 
 func parseScoreArray(content string, expected int) ([]float32, error) {

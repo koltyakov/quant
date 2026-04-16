@@ -1,15 +1,12 @@
 package index
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
 
+	"github.com/koltyakov/quant/internal/llm"
 	"github.com/koltyakov/quant/internal/logx"
 )
 
@@ -19,31 +16,19 @@ type summaryJSON struct {
 }
 
 type ChunkSummarizer struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
-	maxRetries int
+	completer llm.Completer
+	model     string
 }
 
 type SummarizerConfig struct {
-	BaseURL    string
-	Model      string
-	Timeout    time.Duration
-	MaxRetries int
+	Completer llm.Completer
+	Model     string
 }
 
 func NewChunkSummarizer(cfg SummarizerConfig) *ChunkSummarizer {
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 15 * time.Second
-	}
-	if cfg.MaxRetries < 0 {
-		cfg.MaxRetries = 1
-	}
 	return &ChunkSummarizer{
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
-		model:      cfg.Model,
-		httpClient: &http.Client{Timeout: cfg.Timeout},
-		maxRetries: cfg.MaxRetries,
+		completer: cfg.Completer,
+		model:     cfg.Model,
 	}
 }
 
@@ -57,96 +42,137 @@ func (s *ChunkSummarizer) Summarize(ctx context.Context, content string) (*Summa
 		content = content[:2000]
 	}
 
-	type chatReq struct {
-		Model    string        `json:"model"`
-		Messages []chatMessage `json:"messages"`
-		Stream   bool          `json:"stream"`
-		Format   string        `json:"format,omitempty"`
-	}
-
 	prompt := fmt.Sprintf(
 		"Summarize this text in 1-2 concise sentences and extract up to 3 key topics. "+
 			"Return JSON: {\"summary\": \"...\", \"topics\": [\"...\"]}\n\nText:\n%s", content,
 	)
 
-	reqBody := chatReq{
+	resp, err := s.completer.Complete(ctx, llm.CompleteRequest{
 		Model: s.model,
-		Messages: []chatMessage{
+		Messages: []llm.Message{
 			{Role: "system", Content: "You are a text summarization system. Output only valid JSON."},
 			{Role: "user", Content: prompt},
 		},
-		Stream: false,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling summary request: %w", err)
-	}
-
-	var resp ollamaChatResponse
-	for attempt := 0; attempt <= s.maxRetries; attempt++ {
-		resp, err = s.doRequest(ctx, body)
-		if err == nil {
-			break
-		}
-		if attempt < s.maxRetries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(300*(attempt+1)) * time.Millisecond):
-			}
-		}
-	}
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	return parseSummaryResponse(resp.Message.Content)
+	return parseSummaryResponse(resp.Content)
 }
 
 func (s *ChunkSummarizer) SummarizeBatch(ctx context.Context, contents []string) ([]*SummaryResult, error) {
+	if len(contents) == 0 {
+		return nil, nil
+	}
+
+	if len(contents) == 1 {
+		result, err := s.Summarize(ctx, contents[0])
+		if err != nil {
+			return []*SummaryResult{{}}, err
+		}
+		return []*SummaryResult{result}, nil
+	}
+
+	return s.summarizeBatch(ctx, contents)
+}
+
+func (s *ChunkSummarizer) summarizeBatch(ctx context.Context, contents []string) ([]*SummaryResult, error) {
 	results := make([]*SummaryResult, len(contents))
-	for i, content := range contents {
+
+	batchSize := 4
+	for batchStart := 0; batchStart < len(contents); batchStart += batchSize {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		result, err := s.Summarize(ctx, content)
+		batchEnd := min(batchStart+batchSize, len(contents))
+		batch := contents[batchStart:batchEnd]
+
+		batchResults, err := s.summarizeSubBatch(ctx, batch)
 		if err != nil {
-			logx.Warn("chunk summarization failed", "index", i, "err", err)
-			results[i] = &SummaryResult{Summary: "", Topics: nil}
+			logx.Warn("batch summarization failed; using empty summaries", "batch_start", batchStart, "err", err)
+			for i := range batch {
+				results[batchStart+i] = &SummaryResult{}
+			}
 			continue
 		}
-		results[i] = result
+		for i, r := range batchResults {
+			results[batchStart+i] = r
+		}
+	}
+
+	return results, nil
+}
+
+func (s *ChunkSummarizer) summarizeSubBatch(ctx context.Context, contents []string) ([]*SummaryResult, error) {
+	type textEntry struct {
+		Text string `json:"text"`
+	}
+
+	entries := make([]textEntry, len(contents))
+	for i, c := range contents {
+		if len(c) > 2000 {
+			c = c[:2000]
+		}
+		entries[i] = textEntry{Text: c}
+	}
+
+	entriesJSON, _ := json.Marshal(entries)
+	prompt := fmt.Sprintf(
+		"Summarize each text in 1-2 concise sentences and extract up to 3 key topics. "+
+			"Return JSON array: [{\"summary\": \"...\", \"topics\": [\"...\"]}, ...]\n\nTexts:\n%s",
+		string(entriesJSON),
+	)
+
+	resp, err := s.completer.Complete(ctx, llm.CompleteRequest{
+		Model: s.model,
+		Messages: []llm.Message{
+			{Role: "system", Content: "You are a text summarization system. Output only a valid JSON array."},
+			{Role: "user", Content: prompt},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return parseBatchSummaryResponse(resp.Content, len(contents))
+}
+
+func parseBatchSummaryResponse(content string, expected int) ([]*SummaryResult, error) {
+	content = strings.TrimSpace(content)
+	start := strings.Index(content, "[")
+	end := strings.LastIndex(content, "]")
+	if start < 0 || end < 0 || end <= start {
+		return individualFallback(content, expected), nil
+	}
+
+	var parsed []summaryJSON
+	if err := json.Unmarshal([]byte(content[start:end+1]), &parsed); err != nil {
+		return individualFallback(content, expected), nil
+	}
+
+	results := make([]*SummaryResult, expected)
+	for i := range results {
+		if i < len(parsed) {
+			results[i] = &SummaryResult{Summary: parsed[i].Summary, Topics: parsed[i].Topics}
+		} else {
+			results[i] = &SummaryResult{}
+		}
 	}
 	return results, nil
 }
 
-func (s *ChunkSummarizer) doRequest(ctx context.Context, body []byte) (ollamaChatResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return ollamaChatResponse{}, err
+func individualFallback(content string, expected int) []*SummaryResult {
+	single, _ := parseSummaryResponse(content)
+	results := make([]*SummaryResult, expected)
+	for i := range results {
+		if i == 0 && single != nil {
+			results[i] = single
+		} else {
+			results[i] = &SummaryResult{}
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return ollamaChatResponse{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 500 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return ollamaChatResponse{}, fmt.Errorf("summarizer chat %d: %s", resp.StatusCode, string(respBody))
-	}
-	if resp.StatusCode >= 400 {
-		return ollamaChatResponse{}, fmt.Errorf("summarizer permanent error %d", resp.StatusCode)
-	}
-
-	var chatResp ollamaChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return ollamaChatResponse{}, fmt.Errorf("decoding summary response: %w", err)
-	}
-	return chatResp, nil
+	return results
 }
 
 func parseSummaryResponse(content string) (*SummaryResult, error) {

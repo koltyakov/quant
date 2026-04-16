@@ -1,37 +1,43 @@
 package index
 
 import (
+	"context"
 	"testing"
-	"time"
+
+	"github.com/koltyakov/quant/internal/llm"
 )
+
+type stubCompleter struct {
+	response string
+	err      error
+}
+
+func (s *stubCompleter) Complete(_ context.Context, _ llm.CompleteRequest) (llm.CompleteResponse, error) {
+	return llm.CompleteResponse{Content: s.response}, s.err
+}
 
 func TestNewCrossEncoderRerankerDefaults(t *testing.T) {
 	t.Parallel()
-	r := NewCrossEncoderReranker(CrossEncoderConfig{BaseURL: "http://localhost", Model: "test"})
+	r := NewCrossEncoderReranker(CrossEncoderConfig{
+		Completer: &stubCompleter{},
+		Model:     "test",
+	})
 	if r.topK != 20 {
 		t.Fatalf("expected default topK=20, got %d", r.topK)
 	}
 	if r.scoreWeight != 0.5 {
 		t.Fatalf("expected default scoreWeight=0.5, got %f", r.scoreWeight)
 	}
-	if r.maxRetries != 0 {
-		t.Fatalf("expected default maxRetries=0, got %d", r.maxRetries)
-	}
 }
 
 func TestNewCrossEncoderRerankerCustom(t *testing.T) {
 	t.Parallel()
 	r := NewCrossEncoderReranker(CrossEncoderConfig{
-		BaseURL:     "http://localhost:11434/",
+		Completer:   &stubCompleter{},
 		Model:       "llama3",
 		TopK:        10,
 		ScoreWeight: 0.7,
-		Timeout:     10 * time.Second,
-		MaxRetries:  3,
 	})
-	if r.baseURL != "http://localhost:11434" {
-		t.Fatalf("expected trimmed baseURL, got %q", r.baseURL)
-	}
 	if r.model != "llama3" {
 		t.Fatalf("expected model llama3, got %q", r.model)
 	}
@@ -41,28 +47,58 @@ func TestNewCrossEncoderRerankerCustom(t *testing.T) {
 	if r.scoreWeight != 0.7 {
 		t.Fatalf("expected scoreWeight=0.7, got %f", r.scoreWeight)
 	}
-	if r.maxRetries != 3 {
-		t.Fatalf("expected maxRetries=3, got %d", r.maxRetries)
-	}
-}
-
-func TestNewCrossEncoderRerankerNegativeMaxRetries(t *testing.T) {
-	t.Parallel()
-	r := NewCrossEncoderReranker(CrossEncoderConfig{
-		BaseURL:    "http://localhost",
-		Model:      "test",
-		MaxRetries: -1,
-	})
-	if r.maxRetries != 2 {
-		t.Fatalf("expected maxRetries=2 for negative input, got %d", r.maxRetries)
-	}
 }
 
 func TestCrossEncoderRerankerName(t *testing.T) {
 	t.Parallel()
-	r := NewCrossEncoderReranker(CrossEncoderConfig{BaseURL: "http://localhost", Model: "test"})
+	r := NewCrossEncoderReranker(CrossEncoderConfig{
+		Completer: &stubCompleter{},
+		Model:     "test",
+	})
 	if got := r.Name(); got != "cross_encoder" {
 		t.Fatalf("expected Name() = %q, got %q", "cross_encoder", got)
+	}
+}
+
+func TestCrossEncoderRerankerRerank(t *testing.T) {
+	t.Parallel()
+	completer := &stubCompleter{response: "[0.2, 0.9]"}
+	r := NewCrossEncoderReranker(CrossEncoderConfig{
+		Completer: completer,
+		Model:     "test",
+		TopK:      10,
+	})
+
+	results := []SearchResult{
+		{ChunkID: 1, Score: 0.8, ChunkContent: "first"},
+		{ChunkID: 2, Score: 0.2, ChunkContent: "second"},
+	}
+
+	out, err := r.Rerank(context.Background(), "query", nil, results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(out))
+	}
+	if out[0].ChunkID != 2 {
+		t.Fatalf("expected chunk 2 ranked first after rerank, got chunk %d", out[0].ChunkID)
+	}
+}
+
+func TestCrossEncoderRerankerSingleResult(t *testing.T) {
+	t.Parallel()
+	r := NewCrossEncoderReranker(CrossEncoderConfig{
+		Completer: &stubCompleter{},
+		Model:     "test",
+	})
+	results := []SearchResult{{ChunkID: 1, Score: 0.5}}
+	out, err := r.Rerank(context.Background(), "q", nil, results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].ChunkID != 1 {
+		t.Fatalf("single result should pass through unchanged")
 	}
 }
 

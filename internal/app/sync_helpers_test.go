@@ -2,10 +2,7 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -17,8 +14,17 @@ import (
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/llm"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 )
+
+type testLLMCompleter struct {
+	response string
+}
+
+func (t *testLLMCompleter) Complete(_ context.Context, _ llm.CompleteRequest) (llm.CompleteResponse, error) {
+	return llm.CompleteResponse{Content: t.response}, nil
+}
 
 func TestResyncCoordinatorInitialSyncAndPendingResync(t *testing.T) {
 	t.Parallel()
@@ -459,21 +465,11 @@ func TestIndexerThinControlPathsAndSummarizerAdapter(t *testing.T) {
 		t.Fatalf("expected degraded state after overflow, got %+v", snap)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var resp struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		}
-		resp.Message.Content = `{"summary":"brief","topics":["topic"]}`
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
+	stubCompleter := &testLLMCompleter{response: `{"summary":"brief","topics":["topic"]}`}
 
 	adapter := newSummarizerAdapter(index.NewChunkSummarizer(index.SummarizerConfig{
-		BaseURL: server.URL,
-		Model:   "mini",
-		Timeout: time.Second,
+		Completer: stubCompleter,
+		Model:     "mini",
 	}))
 	summaries, err := adapter.SummarizeBatch(context.Background(), []string{"hello"})
 	if err != nil {

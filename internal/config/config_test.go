@@ -137,7 +137,7 @@ func TestLoadYAML(t *testing.T) {
 	}
 
 	cfg := Default()
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestLoadYAML_AllowsZeroChunkOverlap(t *testing.T) {
 	}
 
 	cfg := Default()
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestLoadYAML_EmbedProviderAndAPIKey(t *testing.T) {
 	}
 
 	cfg := Default()
-	if err := loadYAML(cfg, cfgPath); err != nil {
+	if err := loadYAML(cfg, cfgPath, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.EmbedProvider != "openai" {
@@ -330,5 +330,71 @@ func TestParseArgs_InternalDefaults(t *testing.T) {
 	}
 	if cfg.WatchEventBuffer != 256 {
 		t.Fatalf("expected watch event buffer 256, got %d", cfg.WatchEventBuffer)
+	}
+}
+
+func TestParseArgs_CLIBeatsYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("embed_model: yaml-model\nchunk_size: 1024\n"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	cfg, err := ParseArgs([]string{"--dir", dir, "--config", cfgPath, "--embed-model", "cli-model"})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if cfg.EmbedModel != "cli-model" {
+		t.Errorf("CLI flag should beat YAML; got %s", cfg.EmbedModel)
+	}
+	if cfg.ChunkSize != 1024 {
+		t.Errorf("YAML should apply when no CLI flag is set; got %d", cfg.ChunkSize)
+	}
+}
+
+func TestLoadYAML_RerankerAndSummarizer(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "reranker: cross-encoder\nreranker_model: llama3.2\nsummarizer: true\nsummarizer_model: mistral\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	cfg := Default()
+	if err := loadYAML(cfg, cfgPath, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RerankerType != "cross-encoder" {
+		t.Errorf("expected reranker cross-encoder, got %s", cfg.RerankerType)
+	}
+	if cfg.RerankerModel != "llama3.2" {
+		t.Errorf("expected reranker model llama3.2, got %s", cfg.RerankerModel)
+	}
+	if !cfg.SummarizerEnabled {
+		t.Errorf("expected summarizer enabled")
+	}
+	if cfg.SummarizerModel != "mistral" {
+		t.Errorf("expected summarizer model mistral, got %s", cfg.SummarizerModel)
+	}
+}
+
+func TestValidate_RerankerTypeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.RerankerType = "unknown-reranker"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid reranker type")
+	}
+}
+
+func TestValidate_RerankerCrossEncoderWithoutModel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.WatchDir = dir
+	cfg.RerankerType = "cross-encoder"
+	cfg.RerankerModel = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for cross-encoder reranker without model")
 	}
 }

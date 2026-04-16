@@ -123,6 +123,14 @@ func (c *Config) Validate() error {
 	if c.EmbedBatchSize < 1 || c.EmbedBatchSize > 128 {
 		return fmt.Errorf("embed_batch_size must be between 1 and 128")
 	}
+	switch c.RerankerType {
+	case "", "cross-encoder":
+	default:
+		return fmt.Errorf("invalid reranker %q; must be \"cross-encoder\"", c.RerankerType)
+	}
+	if c.RerankerType == "cross-encoder" && c.RerankerModel == "" {
+		return fmt.Errorf("reranker cross-encoder requires --reranker-model")
+	}
 	return nil
 }
 
@@ -189,8 +197,13 @@ func ParseArgs(args []string) (*Config, error) {
 		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(flagSet.Args(), " "))
 	}
 
+	cliSet := make(map[string]bool)
+	flagSet.Visit(func(f *flag.Flag) {
+		cliSet[f.Name] = true
+	})
+
 	if cfg.ConfigFile != "" {
-		if err := loadYAML(cfg, cfg.ConfigFile); err != nil {
+		if err := loadYAML(cfg, cfg.ConfigFile, cliSet); err != nil {
 			return nil, fmt.Errorf("loading config file: %w", err)
 		}
 	}
@@ -258,7 +271,7 @@ func defaultDBPath(watchDir string) string {
 	return filepath.Join(watchDir, ".index", "quant.db")
 }
 
-func loadYAML(cfg *Config, path string) error {
+func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 	//nolint:gosec // Configuration file path is explicitly provided by the user.
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -282,6 +295,10 @@ func loadYAML(cfg *Config, path string) error {
 		IndexWorkers    *int      `yaml:"index_workers"`
 		IncludePatterns []string  `yaml:"include"`
 		ExcludePatterns []string  `yaml:"exclude"`
+		RerankerType    string    `yaml:"reranker"`
+		RerankerModel   string    `yaml:"reranker_model"`
+		Summarizer      *bool     `yaml:"summarizer"`
+		SummarizerModel string    `yaml:"summarizer_model"`
 	}
 
 	var parsed fileConfig
@@ -289,43 +306,43 @@ func loadYAML(cfg *Config, path string) error {
 		return err
 	}
 
-	if parsed.WatchDir != "" {
+	if parsed.WatchDir != "" && !cliSet["dir"] {
 		cfg.WatchDir = resolveConfigPath(baseDir, parsed.WatchDir)
 	}
-	if parsed.DBPath != "" {
+	if parsed.DBPath != "" && !cliSet["db"] {
 		cfg.DBPath = resolveConfigPath(baseDir, parsed.DBPath)
 	}
-	if parsed.Transport != "" {
+	if parsed.Transport != "" && !cliSet["transport"] {
 		cfg.Transport = parsed.Transport
 	}
-	if parsed.ListenAddr != "" {
+	if parsed.ListenAddr != "" && !cliSet["listen"] {
 		cfg.ListenAddr = parsed.ListenAddr
 	}
-	if parsed.EmbedURL != "" {
+	if parsed.EmbedURL != "" && !cliSet["embed-url"] {
 		cfg.EmbedURL = parsed.EmbedURL
 	}
-	if parsed.EmbedModel != "" {
+	if parsed.EmbedModel != "" && !cliSet["embed-model"] {
 		cfg.EmbedModel = parsed.EmbedModel
 	}
-	if parsed.EmbedProvider != "" {
+	if parsed.EmbedProvider != "" && !cliSet["embed-provider"] {
 		cfg.EmbedProvider = parsed.EmbedProvider
 	}
-	if parsed.EmbedAPIKey != "" {
+	if parsed.EmbedAPIKey != "" && !cliSet["embed-api-key"] {
 		cfg.EmbedAPIKey = parsed.EmbedAPIKey
 	}
-	if parsed.PDFOCRLang != "" {
+	if parsed.PDFOCRLang != "" && !cliSet["pdf-ocr-lang"] {
 		cfg.PDFOCRLang = parsed.PDFOCRLang
 	}
-	if parsed.ChunkSize != nil {
+	if parsed.ChunkSize != nil && !cliSet["chunk-size"] {
 		cfg.ChunkSize = *parsed.ChunkSize
 	}
-	if parsed.ChunkOverlap != nil {
+	if parsed.ChunkOverlap != nil && !cliSet["chunk-overlap"] {
 		cfg.ChunkOverlap = *parsed.ChunkOverlap
 	}
-	if parsed.IndexWorkers != nil {
+	if parsed.IndexWorkers != nil && !cliSet["index-workers"] {
 		cfg.IndexWorkers = *parsed.IndexWorkers
 	}
-	if parsed.EmbedBatchSize != nil {
+	if parsed.EmbedBatchSize != nil && !cliSet["embed-batch-size"] {
 		cfg.EmbedBatchSize = *parsed.EmbedBatchSize
 	}
 	if len(parsed.IncludePatterns) > 0 {
@@ -333,6 +350,18 @@ func loadYAML(cfg *Config, path string) error {
 	}
 	if len(parsed.ExcludePatterns) > 0 {
 		cfg.ExcludePatterns = parsed.ExcludePatterns
+	}
+	if parsed.RerankerType != "" && !cliSet["reranker"] {
+		cfg.RerankerType = parsed.RerankerType
+	}
+	if parsed.RerankerModel != "" && !cliSet["reranker-model"] {
+		cfg.RerankerModel = parsed.RerankerModel
+	}
+	if parsed.Summarizer != nil && !cliSet["summarizer"] {
+		cfg.SummarizerEnabled = *parsed.Summarizer
+	}
+	if parsed.SummarizerModel != "" && !cliSet["summarizer-model"] {
+		cfg.SummarizerModel = parsed.SummarizerModel
 	}
 
 	return nil

@@ -203,16 +203,4 @@ func TestFeedbackProfilesAndRerankers(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(out, input) || noop.Name() != "noop" {
 		t.Fatalf("unexpected noop rerank result: out=%v err=%v", out, err)
 	}
-
-	reranker := NewEmbeddingReranker(1, 0)
-	if reranker.scoreWeight != 0.3 || reranker.topK != 1 || reranker.Name() != "embedding_rerank" {
-		t.Fatalf("unexpected reranker config: %+v", reranker)
-	}
-	reranked, err := reranker.Rerank(context.Background(), "q", []float32{1, 2}, input)
-	if err != nil {
-		t.Fatalf("Rerank returned error: %v", err)
-	}
-	if len(reranked) != len(input) || reranked[1].ChunkID != 2 || reranked[0].Score <= 0 {
-		t.Fatalf("unexpected reranked results: %+v", reranked)
-	}
 }

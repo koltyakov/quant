@@ -539,7 +539,7 @@ exclude:
 	}
 
 	cfg := Default()
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -596,7 +596,7 @@ db: ./data/quant.db
 	}
 
 	cfg := Default()
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -613,7 +613,7 @@ db: ./data/quant.db
 
 func TestLoadYAML_NonexistentFile(t *testing.T) {
 	cfg := Default()
-	err := loadYAML(cfg, "/nonexistent/path/config.yaml")
+	err := loadYAML(cfg, "/nonexistent/path/config.yaml", nil)
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
 	}
@@ -627,7 +627,7 @@ func TestLoadYAML_InvalidYAML(t *testing.T) {
 	}
 
 	cfg := Default()
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
 	}
@@ -879,7 +879,7 @@ func TestLoadYAML_EmptyFile(t *testing.T) {
 
 	cfg := Default()
 	defaultChunkSize := cfg.ChunkSize
-	err := loadYAML(cfg, cfgPath)
+	err := loadYAML(cfg, cfgPath, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

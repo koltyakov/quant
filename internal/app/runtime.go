@@ -16,6 +16,7 @@ import (
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/llm"
 	"github.com/koltyakov/quant/internal/lock"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
@@ -178,8 +179,12 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	}
 
 	if cfg.RerankerType == "cross-encoder" && cfg.RerankerModel != "" {
+		rerankerCompleter := llm.NewCompleter(llm.Config{
+			BaseURL: cfg.EmbedURL,
+			APIKey:  cfg.EmbedAPIKey,
+		})
 		reranker := index.NewCrossEncoderReranker(index.CrossEncoderConfig{
-			BaseURL:     cfg.EmbedURL,
+			Completer:   rerankerCompleter,
 			Model:       cfg.RerankerModel,
 			TopK:        20,
 			ScoreWeight: 0.5,
@@ -217,9 +222,13 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 		if summModel == "" {
 			summModel = cfg.EmbedModel
 		}
-		summarizer := index.NewChunkSummarizer(index.SummarizerConfig{
+		summCompleter := llm.NewCompleter(llm.Config{
 			BaseURL: cfg.EmbedURL,
-			Model:   summModel,
+			APIKey:  cfg.EmbedAPIKey,
+		})
+		summarizer := index.NewChunkSummarizer(index.SummarizerConfig{
+			Completer: summCompleter,
+			Model:     summModel,
 		})
 		idx.pipeline.Summarizer = newSummarizerAdapter(summarizer)
 		logx.Info("chunk summarizer enabled", "model", summModel)
