@@ -76,7 +76,7 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = s.server.Shutdown(shutdownCtx)
+		_ = s.Shutdown(shutdownCtx)
 	}()
 
 	logx.Info("proxy server listening", "addr", s.addr)
@@ -85,6 +85,22 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 
 func (s *Server) Addr() string {
 	return s.addr
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	server := s.server
+	s.ready = false
+	s.mu.Unlock()
+
+	if server == nil {
+		return nil
+	}
+	return server.Shutdown(ctx)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, code int, v any) {

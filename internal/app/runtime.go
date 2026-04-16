@@ -8,21 +8,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/koltyakov/quant/internal/config"
-	"github.com/koltyakov/quant/internal/embed"
-	"github.com/koltyakov/quant/internal/extract"
-	"github.com/koltyakov/quant/internal/index"
-	"github.com/koltyakov/quant/internal/llm"
 	"github.com/koltyakov/quant/internal/lock"
 	"github.com/koltyakov/quant/internal/logx"
 	"github.com/koltyakov/quant/internal/mcp"
 	"github.com/koltyakov/quant/internal/proxy"
-	"github.com/koltyakov/quant/internal/scan"
-	"github.com/koltyakov/quant/internal/watch"
 )
 
 var ErrRestartRequired = errors.New("restart required")
@@ -106,203 +98,13 @@ func waitForLockAndRun(ctx context.Context, cfg *config.Config, version string, 
 }
 
 func runMain(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks, lk *lock.Lock) error {
-	if lk != nil {
-		defer func() {
-			if err := lk.Release(); err != nil {
-				logx.Error("releasing lock failed", "err", err)
-			}
-		}()
-	}
-
-	rawEmbedder, err := embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
-	if err != nil && isLocalURL(cfg.EmbedURL) {
-		if ollamaPath, lookErr := exec.LookPath("ollama"); lookErr == nil {
-			// Step 1: start Ollama if it isn't running.
-			if errors.Is(err, embed.ErrOllamaUnavailable) {
-				logx.Info("Ollama not running; attempting to start it automatically", "binary", ollamaPath)
-				if startErr := autoStartOllama(ctx); startErr != nil {
-					logx.Warn("auto-start Ollama failed", "err", startErr)
-				} else {
-					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
-				}
-			}
-			// Step 2: pull the model if Ollama is running but the model isn't present.
-			if errors.Is(err, embed.ErrModelNotFound) {
-				logx.Info("embedding model not found; pulling from Ollama (this may take a while)", "model", cfg.EmbedModel)
-				if pullErr := pullOllamaModel(ctx, cfg.EmbedModel); pullErr != nil {
-					logx.Warn("auto-pull model failed", "model", cfg.EmbedModel, "err", pullErr)
-				} else {
-					rawEmbedder, err = embed.NewEmbedder(ctx, embed.ProviderType(cfg.EmbedProvider), cfg.EmbedURL, cfg.EmbedModel, cfg.EmbedAPIKey)
-				}
-			}
-		}
-	}
+	proc, err := newMainProcess(ctx, cfg, version, lk)
 	if err != nil {
-		if !errors.Is(err, embed.ErrOllamaUnavailable) && !errors.Is(err, embed.ErrModelNotFound) {
-			return fmt.Errorf("error connecting to embedding backend: %w", err)
-		}
-		logx.Warn("embedding backend unavailable; MCP will start in keyword-only mode — run 'ollama serve' to enable vector search", "err", err)
-	}
-
-	var embedder embed.Embedder
-	if rawEmbedder != nil {
-		defer func() {
-			if err := rawEmbedder.Close(); err != nil {
-				logx.Error("closing embedder failed", "err", err)
-			}
-		}()
-		logx.Info("connected to embedding backend", "provider", cfg.EmbedProvider, "model", cfg.EmbedModel, "dimensions", rawEmbedder.Dimensions())
-		embedder = embed.NewCachingEmbedder(rawEmbedder, embed.CachingConfig{
-			CacheSize:           128,
-			CircuitFailureLimit: 5,
-			CircuitResetTimeout: 30 * time.Second,
-			NormalizeFunc:       index.NormalizeFloat32,
-			ModelID:             cfg.EmbedModel,
-		})
-	}
-
-	store, err := index.NewStore(cfg.DBPath)
-	if err != nil {
-		return fmt.Errorf("error opening database: %w", err)
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			logx.Error("closing store failed", "err", err)
-		}
-	}()
-
-	logx.Info("database opened", "path", cfg.DBPath)
-	store.SetMaxVectorSearchCandidates(cfg.MaxVectorCandidates)
-	store.SetHNSWParams(cfg.HNSWM, cfg.HNSWEfSearch)
-	if cfg.KeywordWeight > 0 || cfg.VectorWeight > 0 {
-		store.SetWeightOverrides(float32(cfg.KeywordWeight), float32(cfg.VectorWeight))
-	}
-
-	var featureCompleter llm.Completer
-	if cfg.RerankerType != "" || cfg.SummarizerEnabled {
-		featureCompleter, err = llm.NewCompleter(llm.Config{
-			Provider: llm.ProviderType(cfg.LLMProvider),
-			BaseURL:  cfg.LLMURL,
-			APIKey:   cfg.LLMAPIKey,
-		})
-		if err != nil {
-			return fmt.Errorf("error configuring llm backend: %w", err)
-		}
-	}
-
-	if cfg.RerankerType == "cross-encoder" {
-		rerankerModel := cfg.EffectiveRerankerModel()
-		reranker := index.NewCrossEncoderReranker(index.CrossEncoderConfig{
-			Completer:   featureCompleter,
-			Model:       rerankerModel,
-			TopK:        20,
-			ScoreWeight: 0.5,
-		})
-		store.SetReranker(reranker)
-		logx.Info("cross-encoder reranker enabled", "model", rerankerModel)
-	}
-
-	if rawEmbedder != nil {
-		rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
-			Model:      cfg.EmbedModel,
-			Dimensions: rawEmbedder.Dimensions(),
-			Normalized: true,
-		})
-		if err != nil {
-			return fmt.Errorf("error configuring embedding metadata: %w", err)
-		}
-		if rebuild {
-			logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
-		}
-	}
-
-	idx := NewIndexer(IndexerConfig{
-		Cfg:        cfg,
-		Store:      store,
-		HNSWStore:  store,
-		Embedder:   rawEmbedder,
-		Extractor:  extract.NewRouter(extract.Options{PDFOCRLang: cfg.PDFOCRLang, PDFOCRTimeout: cfg.PDFOCRTimeout}),
-		Quarantine: store,
-		DedupStore: store,
-	})
-
-	if cfg.SummarizerEnabled {
-		summModel := cfg.EffectiveSummarizerModel()
-		summarizer := index.NewChunkSummarizer(index.SummarizerConfig{
-			Completer: featureCompleter,
-			Model:     summModel,
-		})
-		idx.pipeline.Summarizer = newSummarizerAdapter(summarizer)
-		logx.Info("chunk summarizer enabled", "model", summModel)
-	}
-
-	proxyServer := proxy.NewServer(store, idx.IndexState, embedder)
-	proxyAddr, err := proxyServer.Start(ctx)
-	if err != nil {
-		return fmt.Errorf("starting proxy server: %w", err)
-	}
-
-	if lk != nil {
-		lk.UpdateProxyAddr(proxyAddr)
-	}
-
-	gi, err := scan.LoadGitIgnore(cfg.WatchDir)
-	if err != nil {
-		return fmt.Errorf("error loading gitignore: %w", err)
-	}
-
-	watcher, err := watch.New(cfg.WatchDir, gi, watch.Options{EventBuffer: cfg.WatchEventBuffer})
-	if err != nil {
-		return fmt.Errorf("error starting watcher: %w", err)
-	}
-	defer func() {
-		if err := watcher.Close(); err != nil {
-			logx.Error("closing watcher failed", "err", err)
-		}
-	}()
-
-	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(ctx)
-	defer serverCancel()
-
-	var needsRestart atomic.Bool
-	if hooks.Enabled != nil && hooks.Enabled() && hooks.StartLoop != nil {
-		go hooks.StartLoop(serverCtx, version, func() {
-			needsRestart.Store(true)
-			serverCancel()
-		})
-	}
-
-	idx.StartLiveIndexWorkers(serverCtx, &wg)
-
-	wg.Go(func() { idx.WatchLoop(serverCtx, watcher) })
-	wg.Go(func() { idx.RunInitialSync(serverCtx) })
-
-	if cfg.HNSWReoptimizeThreshold > 0 {
-		wg.Go(func() { idx.RunHNSWReoptimizer(serverCtx, store, cfg.HNSWReoptimizeThreshold) })
-	}
-
-	wg.Go(func() { idx.RunHNSWPeriodicFlush(serverCtx, store) })
-	wg.Go(func() { idx.RunPeriodicVacuum(serverCtx, store) })
-
-	mcpServer := mcp.NewServer(cfg, store, embedder, version, idx.IndexState)
-	logx.Info("starting MCP server (main)", "transport", cfg.Transport, "proxy_addr", proxyAddr)
-
-	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
-		serverCancel()
-		wg.Wait()
-		if needsRestart.Load() {
-			return ErrRestartRequired
-		}
 		return err
 	}
+	defer proc.Close()
 
-	serverCancel()
-	wg.Wait()
-	if needsRestart.Load() {
-		return ErrRestartRequired
-	}
-	return nil
+	return proc.Serve(hooks)
 }
 
 func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr string) error {
@@ -322,31 +124,10 @@ func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr
 
 	logx.Info("starting MCP server (worker)", "transport", cfg.Transport, "main_addr", mainAddr)
 
-	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(ctx)
-	defer serverCancel()
-
-	var promoted atomic.Bool
-
-	wg.Go(func() { watchMainAndPromote(serverCtx, cfg, client, mainAddr, serverCancel, &promoted) })
-
+	runner := newProcessRunner(ctx)
+	runner.Go(func() { watchMainAndPromote(runner.ctx, cfg, client, mainAddr, runner.requestRestart) })
 	mcpServer := mcp.NewServer(cfg, client, nil, version, nil)
-
-	if err := mcpServer.Serve(serverCtx, cfg); err != nil {
-		serverCancel()
-		wg.Wait()
-		if promoted.Load() {
-			return ErrRestartRequired
-		}
-		return err
-	}
-
-	serverCancel()
-	wg.Wait()
-	if promoted.Load() {
-		return ErrRestartRequired
-	}
-	return nil
+	return runner.Run(mcpServer, cfg)
 }
 
 // isLocalURL reports whether rawURL targets a loopback address (localhost or 127.x or ::1).
@@ -413,8 +194,16 @@ func ollamaLive(ctx context.Context, baseURL string) error {
 	return nil
 }
 
-func watchMainAndPromote(ctx context.Context, cfg *config.Config, client *proxy.Client, mainAddr string, cancel context.CancelFunc, promoted *atomic.Bool) {
-	ticker := time.NewTicker(5 * time.Second)
+type mainAliveChecker interface {
+	Alive(ctx context.Context) bool
+}
+
+func watchMainAndPromote(ctx context.Context, cfg *config.Config, client mainAliveChecker, mainAddr string, onRestart func()) {
+	watchMainAndPromoteInterval(ctx, cfg, client, mainAddr, onRestart, 5*time.Second)
+}
+
+func watchMainAndPromoteInterval(ctx context.Context, cfg *config.Config, client mainAliveChecker, mainAddr string, onRestart func(), interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -433,15 +222,20 @@ func watchMainAndPromote(ctx context.Context, cfg *config.Config, client *proxy.
 				if err == nil {
 					logx.Info("worker promoted to main")
 					_ = lk.Release()
-					promoted.Store(true)
-					cancel()
+					if onRestart != nil {
+						onRestart()
+					}
 					return
 				}
 			}
 
 			info, readErr := lock.ReadLock(cfg.WatchDir)
 			if readErr == nil && info.ProxyAddr != "" && info.ProxyAddr != mainAddr {
-				logx.Info("new main detected; current worker should be restarted", "new_addr", info.ProxyAddr)
+				logx.Info("new main detected; current worker restarting", "new_addr", info.ProxyAddr)
+				if onRestart != nil {
+					onRestart()
+				}
+				return
 			}
 		}
 	}
