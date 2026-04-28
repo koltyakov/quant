@@ -30,6 +30,8 @@ type Server struct {
 	shutdownErr  error
 }
 
+const maxProxyRequestBodyBytes int64 = 1 << 20
+
 func NewServer(store index.Searcher, state *runtimestate.IndexStateTracker, embedder embed.Embedder) *Server {
 	return &Server{
 		store:    store,
@@ -130,9 +132,13 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return false
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxProxyRequestBodyBytes+1))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "reading body")
+		return false
+	}
+	if int64(len(data)) > maxProxyRequestBodyBytes {
+		s.writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return false
 	}
 	if err := json.Unmarshal(data, v); err != nil {

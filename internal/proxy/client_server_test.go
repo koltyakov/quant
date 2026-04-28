@@ -189,6 +189,15 @@ func TestClientDoRequestAndServerHandlers(t *testing.T) {
 		t.Fatalf("unexpected readBody status for invalid JSON: %d", rr.Code)
 	}
 
+	req = httptest.NewRequest(http.MethodPost, "/proxy/search", strings.NewReader(`{}`+strings.Repeat(" ", int(maxProxyRequestBodyBytes))))
+	rr = httptest.NewRecorder()
+	if server.readBody(rr, req, &reqBody) {
+		t.Fatal("oversized JSON body should not be accepted")
+	}
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("unexpected readBody status for oversized body: %d", rr.Code)
+	}
+
 	rr = httptest.NewRecorder()
 	server.writeJSON(rr, http.StatusOK, func() {})
 	if rr.Code != http.StatusInternalServerError {
