@@ -16,6 +16,7 @@ func SplitWithPath(text string, path string, chunkSize int, overlapFraction floa
 	return DefaultRegistry.Split(text, path, chunkSize, overlapFraction)
 }
 
+// Chunk is a segment of extracted text with positional and structural metadata.
 type Chunk struct {
 	Content      string
 	Index        int
@@ -25,6 +26,7 @@ type Chunk struct {
 	SectionTitle string
 }
 
+// Split divides text into word-bounded chunks with configurable overlap.
 func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 	if strings.TrimSpace(text) == "" || chunkSize <= 0 {
 		return nil

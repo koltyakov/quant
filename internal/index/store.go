@@ -18,6 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Store is a SQLite-backed index holding documents, chunks, embeddings, and an HNSW graph for vector search.
 type Store struct {
 	db                        *sql.DB
 	dbPath                    string

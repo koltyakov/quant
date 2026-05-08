@@ -21,6 +21,7 @@ const (
 	maxRetryStates      = 256
 )
 
+// PathSyncTracker prevents concurrent indexing of the same file path.
 type PathSyncTracker struct {
 	mu     sync.Mutex
 	states map[string]*pathState

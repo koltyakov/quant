@@ -5,6 +5,7 @@ import (
 	"unicode"
 )
 
+// QueryAnalysis captures the parsed structure and inferred intent of a search query.
 type QueryAnalysis struct {
 	Original       string
 	Tokens         []string
@@ -15,15 +16,17 @@ type QueryAnalysis struct {
 	PathPrefix     string
 }
 
+// QueryIntent classifies the purpose of a search query.
 type QueryIntent int
 
 const (
-	IntentSearch QueryIntent = iota
-	IntentDefinition
-	IntentReference
-	IntentExploration
+	IntentSearch      QueryIntent = iota // free-text semantic search
+	IntentDefinition                     // looking for a symbol definition
+	IntentReference                      // looking for usages of a symbol
+	IntentExploration                    // broad exploratory query
 )
 
+// AnalyzeQuery tokenizes a search query and infers its intent and any embedded filters.
 func AnalyzeQuery(query string) *QueryAnalysis {
 	qa := &QueryAnalysis{Original: query}
 	tokens := strings.Fields(query)

@@ -17,6 +17,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+// Server wraps the MCP protocol server, exposing search and index tools over stdio, SSE, or HTTP.
 type Server struct {
 	cfg      *config.Config
 	store    index.Searcher
@@ -41,6 +42,7 @@ const (
 	maxConcurrentToolCalls = 4
 )
 
+// NewServer creates an MCP server wired to the given store and embedder.
 func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder, version string, state *runtimestate.IndexStateTracker) *Server {
 	version = strings.TrimSpace(version)
 	if version == "" {
@@ -72,6 +74,7 @@ type shutdownable interface {
 	Shutdown(ctx context.Context) error
 }
 
+// Serve starts the MCP server using the transport specified in cfg (stdio, SSE, or HTTP).
 func (s *Server) Serve(ctx context.Context, cfg *config.Config) error {
 	switch cfg.Transport {
 	case config.TransportStdio:

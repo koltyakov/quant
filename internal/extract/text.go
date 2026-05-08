@@ -118,6 +118,7 @@ var textBasenames = map[string]bool{
 	"readme": true, "contributing": true, "todo": true,
 }
 
+// TextExtractor handles plain-text and source-code files, identified by extension or well-known filename.
 type TextExtractor struct{}
 
 func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) {

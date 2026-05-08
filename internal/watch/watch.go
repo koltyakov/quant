@@ -13,6 +13,7 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
+// Op describes the kind of filesystem change observed.
 type Op string
 
 const (
@@ -22,16 +23,19 @@ const (
 	Resync Op = "resync"
 )
 
+// Event represents a debounced filesystem change.
 type Event struct {
 	Path  string
 	Op    Op
 	IsDir bool
 }
 
+// Options configures the Watcher.
 type Options struct {
 	EventBuffer int
 }
 
+// Watcher monitors a directory tree for filesystem changes, respecting .gitignore rules.
 type Watcher struct {
 	fsw     *fsnotify.Watcher
 	matcher *scan.GitIgnoreMatcher
@@ -53,6 +57,7 @@ const (
 	defaultResyncRetryDelay = 500 * time.Millisecond
 )
 
+// New creates a Watcher that recursively monitors dir, filtering paths through gi.
 func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -86,10 +91,12 @@ func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 	return w, nil
 }
 
+// Events returns a read-only channel of debounced filesystem events.
 func (w *Watcher) Events() <-chan Event {
 	return w.events
 }
 
+// Close stops the watcher and releases its OS resources.
 func (w *Watcher) Close() error {
 	w.mu.Lock()
 	if w.closed {

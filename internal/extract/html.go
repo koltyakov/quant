@@ -9,6 +9,7 @@ import (
 	"golang.org/x/net/html"
 )
 
+// HTMLExtractor extracts visible text from HTML files, stripping tags, scripts, and styles.
 type HTMLExtractor struct{}
 
 func (h *HTMLExtractor) Extract(ctx context.Context, path string) (string, error) {

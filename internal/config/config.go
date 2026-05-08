@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Transport identifies the MCP server transport protocol.
 type Transport string
 
 const (
@@ -26,6 +27,7 @@ const (
 	stateDirMode             = 0750
 )
 
+// Config holds all runtime configuration for the quant server.
 type Config struct {
 	WatchDir        string    `yaml:"dir"`
 	DBPath          string    `yaml:"db"`
@@ -67,6 +69,7 @@ type Config struct {
 	pathMatcher *PathMatcher
 }
 
+// Default returns a Config populated with sensible defaults.
 func Default() *Config {
 	return &Config{
 		Transport:      TransportStdio,
@@ -96,6 +99,7 @@ func Default() *Config {
 	}
 }
 
+// Validate checks that all configuration values are within acceptable ranges and that required paths exist.
 func (c *Config) Validate() error {
 	info, err := os.Stat(c.WatchDir)
 	if err != nil {

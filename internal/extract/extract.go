@@ -6,20 +6,24 @@ import (
 	"time"
 )
 
+// Extractor extracts plain text from a file for indexing.
 type Extractor interface {
 	Extract(ctx context.Context, path string) (string, error)
 	Supports(path string) bool
 }
 
+// Options configures optional extraction behavior such as PDF OCR.
 type Options struct {
 	PDFOCRLang    string
 	PDFOCRTimeout time.Duration
 }
 
+// Router dispatches extraction to the first Extractor that supports a given file path.
 type Router struct {
 	extractors []Extractor
 }
 
+// NewRouter creates a Router with all built-in extractors (text, HTML, PDF, OOXML, ODF, RTF, notebook).
 func NewRouter(opts ...Options) *Router {
 	var cfg Options
 	if len(opts) > 0 {

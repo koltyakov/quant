@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// ProviderType identifies the embedding backend (Ollama or OpenAI-compatible).
 type ProviderType string
 
 const (
@@ -15,6 +16,7 @@ const (
 	ProviderUnknown ProviderType = ""
 )
 
+// DetectProvider infers the embedding provider from the URL hostname.
 func DetectProvider(embedURL string) ProviderType {
 	host := strings.ToLower(embedURL)
 	if strings.Contains(host, "openai.com") {
@@ -23,6 +25,7 @@ func DetectProvider(embedURL string) ProviderType {
 	return ProviderOllama
 }
 
+// NewEmbedder creates an Embedder for the given provider, auto-detecting from the URL when provider is unknown.
 func NewEmbedder(ctx context.Context, provider ProviderType, baseURL, model, apiKey string) (Embedder, error) {
 	if provider == ProviderUnknown {
 		p, err := inferProvider(baseURL)

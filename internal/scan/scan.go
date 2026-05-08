@@ -13,11 +13,13 @@ import (
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
+// Result describes a discovered file and its last modification time.
 type Result struct {
 	Path       string
 	ModifiedAt time.Time
 }
 
+// Visitor is called for each file discovered during a scan.
 type Visitor func(Result) error
 
 // Scan walks the directory tree, respecting .gitignore files at every level

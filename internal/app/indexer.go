@@ -24,6 +24,7 @@ import (
 var ErrOCRFailed = extract.ErrOCRFailed
 var ErrFileTooLarge = extract.ErrFileTooLarge
 
+// IndexAction describes the outcome of a single file sync operation.
 type IndexAction string
 
 const (
@@ -32,6 +33,7 @@ const (
 	IndexRemoved IndexAction = "removed"
 )
 
+// IndexerConfig holds the dependencies needed to construct an Indexer.
 type IndexerConfig struct {
 	Cfg        *config.Config
 	Store      index.DocumentWriter
@@ -43,6 +45,7 @@ type IndexerConfig struct {
 	Summarizer ingest.ChunkSummarizer
 }
 
+// Indexer coordinates file extraction, chunking, embedding, and storage for the index.
 type Indexer struct {
 	cfg        *config.Config
 	store      index.DocumentWriter
