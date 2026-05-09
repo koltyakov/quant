@@ -21,7 +21,7 @@ import (
 )
 
 // TestIntegration_IndexAndSearch exercises the full pipeline:
-// write files → extract → chunk → embed → store → search via MCP tool handlers.
+// write files, extract, chunk, embed, store, and search via MCP tool handlers.
 func TestIntegration_IndexAndSearch(t *testing.T) {
 	logx.SetOutput(io.Discard)
 	t.Cleanup(func() { logx.SetOutput(io.Discard) })
@@ -86,13 +86,6 @@ a directory and automatically indexes supported file types.</p>
 
 	tracker := runtimestate.NewIndexStateTracker()
 	tracker.Set(runtimestate.IndexStateReady, "integration test")
-
-	srv := NewServer(&config.Config{
-		WatchDir:   dir,
-		DBPath:     dbPath,
-		EmbedModel: "test-model",
-	}, store, embedder, "test", tracker)
-	_ = srv // ensure NewServer wires tools
 
 	s := &Server{
 		cfg: &config.Config{
@@ -394,7 +387,10 @@ func indexFiles(t *testing.T, store *index.Store, extractor extract.Extractor, p
 			t.Fatalf("embedding chunks for %s: %v", relPath, err)
 		}
 
-		info, _ := os.Stat(absPath)
+		info, err := os.Stat(absPath)
+		if err != nil {
+			t.Fatalf("stat %s: %v", relPath, err)
+		}
 		doc := &index.Document{
 			Path:       relPath,
 			Hash:       relPath + "-hash",
@@ -408,7 +404,7 @@ func indexFiles(t *testing.T, store *index.Store, extractor extract.Extractor, p
 }
 
 // TestIntegration_ChunkBoundaries verifies that search works correctly across
-// chunk boundaries — content split across two chunks should still be findable.
+// chunk boundaries; content split across two chunks should still be findable.
 func TestIntegration_ChunkBoundaries(t *testing.T) {
 	logx.SetOutput(io.Discard)
 	t.Cleanup(func() { logx.SetOutput(io.Discard) })
@@ -424,12 +420,17 @@ func TestIntegration_ChunkBoundaries(t *testing.T) {
 
 	embedder := &testutil.QueryCountingEmbedder{}
 
-	longText := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 200)
-	longText += "UNIQUE_SENTINEL_PHRASE appears only here."
+	longText := strings.Join([]string{
+		"one two three four five six seven ALPHA_BOUNDARY",
+		"OMEGA_BOUNDARY eight nine ten eleven twelve thirteen fourteen",
+	}, "\n\n")
 
-	chunks := chunk.Split(longText, 64, 0.15)
+	chunks := chunk.Split(longText, 8, 0)
 	if len(chunks) < 2 {
 		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	if !strings.Contains(chunks[0].Content, "ALPHA_BOUNDARY") || !strings.Contains(chunks[1].Content, "OMEGA_BOUNDARY") {
+		t.Fatalf("expected sentinel terms in adjacent chunks, got: %#v", chunks)
 	}
 
 	records := make([]index.ChunkRecord, len(chunks))
@@ -466,7 +467,7 @@ func TestIntegration_ChunkBoundaries(t *testing.T) {
 	result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
 		Params: mcplib.CallToolParams{
 			Name:      "search",
-			Arguments: map[string]any{"query": "UNIQUE_SENTINEL_PHRASE"},
+			Arguments: map[string]any{"query": "ALPHA_BOUNDARY OMEGA_BOUNDARY", "limit": float64(10)},
 		},
 	})
 	if err != nil {
@@ -480,12 +481,23 @@ func TestIntegration_ChunkBoundaries(t *testing.T) {
 
 	found := false
 	for _, r := range structured.Results {
-		if strings.Contains(r.ChunkContent, "UNIQUE_SENTINEL_PHRASE") {
+		if strings.Contains(r.ChunkContent, "ALPHA_BOUNDARY") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("sentinel phrase not found in any result chunk content")
+		t.Error("first boundary sentinel not found in any result chunk content")
+	}
+
+	found = false
+	for _, r := range structured.Results {
+		if strings.Contains(r.ChunkContent, "OMEGA_BOUNDARY") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("second boundary sentinel not found in any result chunk content")
 	}
 }
