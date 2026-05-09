@@ -43,6 +43,12 @@ curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/instal
 
 It installs `quant` to `~/.local/bin`. The installer checks whether `ollama` is on `PATH`; if it is missing, it asks whether to install Ollama with the official shell installer and prints manual setup guidance if skipped.
 
+To uninstall the release binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/uninstall.sh | sh
+```
+
 ### Windows
 
 On Windows, use the PowerShell installer:
@@ -52,6 +58,12 @@ irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.ps1 |
 ```
 
 It installs `quant.exe` to `%LOCALAPPDATA%\Programs\quant` and adds it to your user `PATH`. The installer also checks for Ollama and offers to install it via `winget`.
+
+To uninstall the release binary and remove the install directory from your user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/uninstall.ps1 | iex
+```
 
 ### Alternative: Go install
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.12.1 (2026-05-08)
+
+### Improvements
+
+- **Dependency updates** - Updated project dependencies to keep the release current with upstream fixes and improvements.
+- **Uninstall scripts** - New `scripts/uninstall.sh` and `scripts/uninstall.ps1` remove release-installed binaries while leaving user data, MCP client configuration, and Ollama untouched.
+
 ## v0.12.0 (2026-04-16)
 
 ### Features
