@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -355,12 +356,12 @@ func TestParseArgs_RejectsUnexpectedPositionalArgs(t *testing.T) {
 
 func TestParseArgs_AcceptsPDFOCRTimeoutFlag(t *testing.T) {
 	dir := t.TempDir()
-	cfg, err := ParseArgs([]string{"--dir", dir})
+	cfg, err := ParseArgs([]string{"--dir", dir, "--pdf-ocr-timeout", "5m"})
 	if err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-	if cfg.PDFOCRTimeout != 2*time.Minute {
-		t.Fatalf("expected OCR timeout 2m (internal default), got %s", cfg.PDFOCRTimeout)
+	if cfg.PDFOCRTimeout != 5*time.Minute {
+		t.Fatalf("expected OCR timeout 5m, got %s", cfg.PDFOCRTimeout)
 	}
 }
 
@@ -375,6 +376,32 @@ func TestParseArgs_InternalDefaults(t *testing.T) {
 	}
 	if cfg.WatchEventBuffer != 256 {
 		t.Fatalf("expected watch event buffer 256, got %d", cfg.WatchEventBuffer)
+	}
+}
+
+func TestParseArgs_ExposesDocumentedRuntimeFlags(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := ParseArgs([]string{
+		"--dir", dir,
+		"--max-vector-candidates", "123",
+		"--max-concurrent-tools", "7",
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if cfg.MaxVectorCandidates != 123 {
+		t.Fatalf("MaxVectorCandidates = %d, want 123", cfg.MaxVectorCandidates)
+	}
+	if cfg.MaxConcurrentTools != 7 {
+		t.Fatalf("MaxConcurrentTools = %d, want 7", cfg.MaxConcurrentTools)
+	}
+}
+
+func TestParseArgs_RejectsInvalidEmbedProvider(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ParseArgs([]string{"--dir", dir, "--embed-provider", "wat"})
+	if err == nil || !strings.Contains(err.Error(), "invalid embed_provider") {
+		t.Fatalf("expected invalid embed_provider error, got %v", err)
 	}
 }
 

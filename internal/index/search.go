@@ -56,14 +56,14 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding
 	}
 
 	var docFilter map[string]float32
-	if queryEmbedding != nil {
+	if queryEmbedding != nil && pathPrefix == "" && metadataWhere == "" {
 		docFilter = s.docEmbeds.topDocPaths(queryEmbedding, docFilterTopK)
 	}
 
 	var vectorOnlyCandidates map[int]*searchCandidate
 	if queryEmbedding != nil {
 		var err error
-		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter)
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter, metadataWhere, metadataArgs)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +169,7 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 	return results, nil
 }
 
-func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bool, error) {
+func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string, metadataWhere string, metadataArgs []any) (bool, error) {
 	if s.maxVectorSearchCandidates == 0 {
 		logx.Info("skipping brute-force vector fallback", "reason", "max_vector_candidates=0")
 		return false, nil
@@ -179,20 +179,17 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bo
 	}
 
 	var count int
+	query := `SELECT COUNT(*) FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
+	args := make([]any, 0, 1+len(metadataArgs))
 	if pathPrefix != "" {
 		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path LIKE ? ESCAPE '\'`,
-			pathPattern,
-		).Scan(&count)
-		if err != nil {
-			return false, err
-		}
-	} else {
-		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&count)
-		if err != nil {
-			return false, err
-		}
+		query += ` AND d.path LIKE ? ESCAPE '\'`
+		args = append(args, pathPattern)
+	}
+	query += metadataWhere // #nosec G202
+	args = append(args, metadataArgs...)
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return false, err
 	}
 
 	if count > s.maxVectorSearchCandidates {
@@ -204,19 +201,19 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string) (bo
 
 // collectVectorCandidates gathers vector-only candidates (not already in keywordCandidates)
 // and returns them keyed by chunk ID for unified RRF fusion.
-func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, docFilter map[string]float32) (map[int]*searchCandidate, error) {
+func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, docFilter map[string]float32, metadataWhere string, metadataArgs []any) (map[int]*searchCandidate, error) {
 	vectorOnly := make(map[int]*searchCandidate)
 
 	if s.hnsw != nil && s.hnsw.ready.Load() {
-		if pathPrefix == "" {
+		if pathPrefix == "" && metadataWhere == "" {
 			s.collectHNSWCandidates(ctx, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 		} else {
-			s.collectHNSWCandidatesWithPrefix(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, vectorOnly, docFilter)
+			s.collectHNSWCandidatesWithDBFilter(ctx, queryEmbedding, limit, pathPrefix, metadataWhere, metadataArgs, keywordCandidates, vectorOnly)
 		}
 		return vectorOnly, nil
 	}
 
-	if ok, err := s.canRunVectorFallback(ctx, pathPrefix); err != nil {
+	if ok, err := s.canRunVectorFallback(ctx, pathPrefix, metadataWhere, metadataArgs); err != nil {
 		return nil, err
 	} else if !ok {
 		return vectorOnly, nil
@@ -224,23 +221,23 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 
 	var rows *sql.Rows
 	var err error
-	if pathPrefix != "" {
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
-			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id
-			 WHERE d.path LIKE ? ESCAPE '\'`,
-			pathPattern,
-		)
-	} else if len(docFilter) > 0 {
+	if pathPrefix == "" && len(docFilter) > 0 && metadataWhere == "" {
 		rows, err = s.queryChunksByDocPaths(ctx, docFilter)
 	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
 			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id`,
-		)
+			 JOIN documents d ON c.document_id = d.id
+			 WHERE 1=1`
+		args := make([]any, 0, 1+len(metadataArgs))
+
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		if pathPrefix != "" {
+			query += ` AND d.path LIKE ? ESCAPE '\'`
+			args = append(args, pathPattern)
+		}
+		query += metadataWhere // #nosec G202
+		args = append(args, metadataArgs...)
+		rows, err = s.db.QueryContext(ctx, query, args...)
 	}
 	if err != nil {
 		return nil, err
@@ -432,60 +429,71 @@ func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []floa
 	s.loadHNSWChunkRows(ctx, ids, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
 }
 
-func (s *Store) collectHNSWCandidatesWithPrefix(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
-	// Get chunk IDs matching the prefix from SQLite (cheap index scan).
-	pathPattern := sqlLikePrefixPattern(pathPrefix)
-	prefixRows, err := s.db.QueryContext(ctx,
-		`SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.path LIKE ? ESCAPE '\'`,
-		pathPattern,
-	)
+func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, metadataWhere string, metadataArgs []any, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+	query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
+	args := make([]any, 0, 1+len(metadataArgs))
+	if pathPrefix != "" {
+		pathPattern := sqlLikePrefixPattern(pathPrefix)
+		query += ` AND d.path LIKE ? ESCAPE '\'`
+		args = append(args, pathPattern)
+	}
+	query += metadataWhere // #nosec G202
+	args = append(args, metadataArgs...)
+
+	filterRows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return
 	}
-	prefixSet := make(map[int]bool)
-	for prefixRows.Next() {
+	filterSet := make(map[int]bool)
+	for filterRows.Next() {
 		var id int
-		if prefixRows.Scan(&id) == nil {
-			prefixSet[id] = true
+		if filterRows.Scan(&id) == nil {
+			filterSet[id] = true
 		}
 	}
-	_ = prefixRows.Close()
-	if prefixRows.Err() != nil {
+	_ = filterRows.Close()
+	if filterRows.Err() != nil {
 		return
 	}
-	if len(prefixSet) == 0 {
+	if len(filterSet) == 0 {
 		return
 	}
 
-	// Ask HNSW for nearest neighbors and intersect with prefix set.
-	fetchK := limit*3 + len(keywordCandidates) + len(prefixSet)
+	// Ask HNSW for nearest neighbors and intersect with the SQLite filter set.
+	fetchK := limit*3 + len(keywordCandidates) + len(filterSet)
 	hnswIDs := s.hnsw.Search(queryEmbedding, fetchK)
 
 	var filtered []int
 	for _, id := range hnswIDs {
-		if prefixSet[id] {
+		if filterSet[id] {
 			filtered = append(filtered, id)
 		}
 	}
 
-	// If HNSW intersection yielded enough results, load their full rows.
 	if len(filtered) >= limit {
-		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
+		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
 		return
 	}
 
-	if s.maxVectorSearchCandidates > 0 && len(prefixSet) > s.maxVectorSearchCandidates {
-		logx.Info("skipping brute-force prefix vector fallback", "prefix_chunks", len(prefixSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
+	if s.maxVectorSearchCandidates == 0 {
+		logx.Info("skipping brute-force filtered vector fallback", "reason", "max_vector_candidates=0", "path_prefix", pathPrefix)
 		return
 	}
-	allPrefixIDs := make([]int, 0, len(prefixSet))
-	for id := range prefixSet {
-		allPrefixIDs = append(allPrefixIDs, id)
+	if s.maxVectorSearchCandidates > 0 && len(filterSet) > s.maxVectorSearchCandidates {
+		logx.Info("skipping brute-force filtered vector fallback", "matching_chunks", len(filterSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
+		return
 	}
-	s.loadHNSWChunkRows(ctx, allPrefixIDs, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
+	allFilteredIDs := make([]int, 0, len(filterSet))
+	for id := range filterSet {
+		allFilteredIDs = append(allFilteredIDs, id)
+	}
+	s.loadHNSWChunkRows(ctx, allFilteredIDs, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
 }
 
 func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
+	if len(ids) == 0 {
+		return
+	}
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {

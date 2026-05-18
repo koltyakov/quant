@@ -154,7 +154,38 @@ func (s *Store) MigrateEmbeddingsWithProjection(ctx context.Context, proj *Proje
 		}
 	}
 
+	if err := s.finalizeProjectionMigration(ctx, *meta, proj.outDims); err != nil {
+		return err
+	}
+
 	logx.Info("projection migration complete", "total_migrated", migrated)
+	return nil
+}
+
+func (s *Store) finalizeProjectionMigration(ctx context.Context, meta EmbeddingMetadata, dims int) error {
+	meta.Dimensions = dims
+	meta.Normalized = true
+	if err := s.putEmbeddingMetadata(ctx, meta); err != nil {
+		return fmt.Errorf("updating embedding metadata after projection migration: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning projection finalization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET doc_embedding = NULL`); err != nil {
+		return fmt.Errorf("clearing projected document embeddings: %w", err)
+	}
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing projection finalization: %w", err)
+	}
+
+	s.resetRuntimeIndexes(true)
 	return nil
 }
 

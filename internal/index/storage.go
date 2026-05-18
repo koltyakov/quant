@@ -136,6 +136,7 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing reset transaction: %w", err)
 	}
+	s.resetRuntimeIndexes(true)
 	return nil
 }
 

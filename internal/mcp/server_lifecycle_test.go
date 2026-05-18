@@ -100,7 +100,7 @@ func TestHandleSearch_WithFileTypeFilter(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	if err := store.ReindexDocument(context.Background(), &index.Document{
-		Path: "test.txt", Hash: "test-hash", ModifiedAt: testTime(),
+		Path: "test.txt", Hash: "test-hash", ModifiedAt: testTime(), FileType: "txt",
 	}, []index.ChunkRecord{{
 		Content: "unique searchable content", ChunkIndex: 0,
 		Embedding: index.EncodeFloat32(index.NormalizeFloat32([]float32{1})),

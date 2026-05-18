@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -199,6 +200,22 @@ func (s *Store) SetWeightOverrides(keyword, vector float32) {
 
 func (s *Store) SetReranker(r Reranker) {
 	s.reranker = r
+}
+
+func (s *Store) resetRuntimeIndexes(removeGraphFile bool) {
+	if s.hnsw != nil {
+		s.hnsw.ready.Store(false)
+		s.hnsw.mu.Lock()
+		s.hnsw.graph = newGraph(s.hnswM, s.hnswEfSearch)
+		s.hnsw.mu.Unlock()
+		s.hnsw.resetMods()
+	}
+	if s.docEmbeds != nil {
+		s.docEmbeds.Clear()
+	}
+	if removeGraphFile && s.hnswGraphPath != "" {
+		_ = os.Remove(s.hnswGraphPath)
+	}
 }
 
 func (s *Store) migrate() error {
@@ -457,12 +474,13 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		inserted = append(inserted, insertedChunk{id: newID, embedding: chunk.Embedding})
 	}
 
-	if dims > 0 && len(chunks) > 0 {
-		docEmb := computeDocEmbedding(chunks, dims)
-		if docEmb != nil {
-			if err := s.updateDocEmbeddingTx(ctx, tx, docID, docEmb); err != nil {
-				logx.Warn("failed to store document embedding", "doc_id", docID, "err", err)
-			}
+	var docEmb []byte
+	if dims > 0 {
+		if len(chunks) > 0 {
+			docEmb = computeDocEmbedding(chunks, dims)
+		}
+		if err := s.updateDocEmbeddingTx(ctx, tx, docID, docEmb); err != nil {
+			logx.Warn("failed to store document embedding", "doc_id", docID, "err", err)
 		}
 	}
 
@@ -490,13 +508,14 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		}
 	}
 
-	if dims > 0 && len(chunks) > 0 {
-		docEmb := computeDocEmbedding(chunks, dims)
+	if dims > 0 {
 		if docEmb != nil {
 			vec := decodeEmbeddingForHNSW(docEmb, dims)
 			if len(vec) > 0 {
 				s.docEmbeds.Set(docID, doc.Path, NormalizeFloat32(vec))
 			}
+		} else {
+			s.docEmbeds.Remove(docID, doc.Path)
 		}
 	}
 
@@ -612,6 +631,7 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 	defer s.writeMu.Unlock()
 
 	prefix = filepath.Clean(prefix)
+	likePrefix := sqlLikePrefixPattern(prefix + string(filepath.Separator))
 	if prefix == "." || prefix == "" {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -635,11 +655,7 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 			return fmt.Errorf("committing delete-all transaction: %w", err)
 		}
 
-		if s.hnsw != nil && s.hnsw.ready.Load() {
-			s.hnsw.mu.Lock()
-			s.hnsw.graph = newGraph(s.hnswM, s.hnswEfSearch)
-			s.hnsw.mu.Unlock()
-		}
+		s.resetRuntimeIndexes(true)
 		return nil
 	}
 
@@ -650,7 +666,7 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id
 			 WHERE d.path = ? OR d.path LIKE ? ESCAPE '\'`,
-			prefix, sqlLikePrefixPattern(prefix),
+			prefix, likePrefix,
 		)
 		if err == nil {
 			for rows.Next() {
@@ -666,7 +682,6 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		}
 	}
 
-	likePrefix := prefix + string(filepath.Separator) + "%"
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning delete-by-prefix transaction: %w", err)
@@ -700,6 +715,12 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 
 	if len(hnswDeleteIDs) > 0 {
 		s.hnsw.BatchDelete(hnswDeleteIDs)
+	}
+	if s.docEmbeds != nil {
+		s.docEmbeds.Clear()
+		if err := s.LoadDocEmbeddings(ctx); err != nil {
+			logx.Warn("failed to reload document embeddings after prefix delete", "err", err)
+		}
 	}
 	return nil
 }
@@ -983,6 +1004,10 @@ func (s *Store) CollectionStats(ctx context.Context, collection string) (docCoun
 func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	collection = strings.TrimSpace(collection)
+	if collection == "" {
+		return fmt.Errorf("collection is required")
+	}
 
 	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
@@ -1023,12 +1048,21 @@ func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
 		return err
 	}
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing delete-collection transaction: %w", err)
 	}
 
 	if len(hnswDeleteIDs) > 0 {
 		s.hnsw.BatchDelete(hnswDeleteIDs)
+	}
+	if s.docEmbeds != nil {
+		s.docEmbeds.Clear()
+		if err := s.LoadDocEmbeddings(ctx); err != nil {
+			logx.Warn("failed to reload document embeddings after collection delete", "err", err)
+		}
 	}
 	return nil
 }

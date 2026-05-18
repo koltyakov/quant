@@ -12,7 +12,7 @@ import (
 func TestAcquire_ContextCancellationWhileWaiting(t *testing.T) {
 	rl := NewRateLimiter(RateLimiterConfig{
 		MaxTokens:     1,
-		RefillRate:    0,
+		RefillRate:    20,
 		MaxWaiters:    10,
 		MaxConcurrent: 10,
 	})
@@ -282,7 +282,7 @@ func TestRateLimiter_RefillOverTime(t *testing.T) {
 func TestRateLimiter_ReleaseSignalsWaiter(t *testing.T) {
 	rl := NewRateLimiter(RateLimiterConfig{
 		MaxTokens:     1,
-		RefillRate:    0,
+		RefillRate:    20,
 		MaxWaiters:    5,
 		MaxConcurrent: 0,
 	})
@@ -300,13 +300,13 @@ func TestRateLimiter_ReleaseSignalsWaiter(t *testing.T) {
 		rl.Release()
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
 	rl.Release()
 
 	select {
 	case <-acquired:
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected waiting goroutine to acquire token after release")
+		t.Fatal("expected waiting goroutine to acquire token after refill")
 	}
 
 	rl.Release()

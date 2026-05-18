@@ -165,6 +165,18 @@ func TestHandleDeleteCollection_WrongMethod(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteCollection_EmptyCollection(t *testing.T) {
+	t.Parallel()
+	store := &fakeSearcher{}
+	s := NewServer(store, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/proxy/delete_collection", strings.NewReader(`{"collection":""}`))
+	rec := httptest.NewRecorder()
+	s.handleDeleteCollection(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d; body: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleDeleteCollection_StoreError(t *testing.T) {
 	t.Parallel()
 	store := &deleteCollErrorSearcher{err: errors.New("db fail")}

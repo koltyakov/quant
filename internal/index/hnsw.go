@@ -189,7 +189,7 @@ func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
 }
 
 func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
-	loaded := s.loadHNSWGraphFromFile()
+	loaded := s.loadHNSWGraphFromFile(ctx)
 	if !loaded {
 		loaded = s.loadHNSWFromSQLite(ctx)
 	}
@@ -202,8 +202,33 @@ func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
 	return loaded
 }
 
-func (s *Store) loadHNSWGraphFromFile() bool {
+func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 	if s.hnswGraphPath == "" {
+		return false
+	}
+
+	var nodeCount int
+	var storedModel string
+	var storedDims int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT node_count, model, dimensions FROM hnsw_state WHERE id = 1`,
+	).Scan(&nodeCount, &storedModel, &storedDims); err != nil || nodeCount == 0 {
+		return false
+	}
+
+	meta, err := s.embeddingMetadata(ctx)
+	if err != nil || meta == nil || meta.Dimensions == 0 {
+		return false
+	}
+	if storedModel != meta.Model || storedDims != meta.Dimensions {
+		logx.Info("hnsw file metadata mismatch, skipping graph file",
+			"stored_model", storedModel, "current_model", meta.Model,
+			"stored_dims", storedDims, "current_dims", meta.Dimensions)
+		return false
+	}
+
+	var chunkCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount); err != nil || chunkCount != nodeCount {
 		return false
 	}
 
@@ -246,6 +271,10 @@ func (s *Store) loadHNSWGraphFromFile() bool {
 	g := newGraph(s.hnswM, s.hnswEfSearch)
 	if err := g.Import(bufio.NewReader(f)); err != nil {
 		logx.Warn("failed to import hnsw graph file", "path", s.hnswGraphPath, "err", err)
+		return false
+	}
+	if g.Len() != nodeCount {
+		logx.Warn("hnsw graph file node count mismatch", "path", s.hnswGraphPath, "file_nodes", g.Len(), "state_nodes", nodeCount)
 		return false
 	}
 

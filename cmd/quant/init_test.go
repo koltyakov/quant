@@ -80,7 +80,7 @@ func TestInitProjectCreatesClientFiles(t *testing.T) {
 		extraPath  string
 		configWant []string
 	}{
-		{client: "opencode", configPath: "opencode.json", configWant: []string{`"command": [`, `"quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"instructions"`, `"permission"`, `"quant_*": "allow"`}},
+		{client: "opencode", configPath: "opencode.json", configWant: []string{`"command": [`, `"quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"environment"`, `"QUANT_AUTOUPDATE": "true"`, `"instructions"`, `"permission"`, `"quant_*": "allow"`}},
 		{client: "codex", configPath: filepath.Join(".codex", "config.toml"), configWant: []string{`command = "quant"`, `args = ["mcp", "--dir", "./data"]`, `[mcp_servers.quant.env]`, `[mcp_servers.quant.tools."*"]`, `approval_mode = "approve"`}},
 		{client: "claude", configPath: ".mcp.json", extraPath: "CLAUDE.md", configWant: []string{`"mcpServers"`, `"command": "quant"`, `"mcp"`, `"--dir"`, `"./data"`, `"type": "stdio"`}},
 		{client: "cursor", configPath: filepath.Join(".cursor", "mcp.json"), configWant: []string{`"mcpServers"`, `"command": "quant"`, `"mcp"`, `"--dir"`, `"./data"`}},
@@ -202,6 +202,19 @@ func TestInitProjectNoAgents(t *testing.T) {
 	config := readFile(t, filepath.Join(dir, ".gemini", "settings.json"))
 	if strings.Contains(config, "contextFileName") {
 		t.Fatalf("gemini config should not include contextFileName with --no-agents:\n%s", config)
+	}
+}
+
+func TestCommandPartsPreservesQuotedPath(t *testing.T) {
+	parts := commandParts(`"/Applications/Quant App/quant" --profile test`)
+	want := []string{"/Applications/Quant App/quant", "--profile", "test"}
+	if len(parts) != len(want) {
+		t.Fatalf("parts = %v, want %v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("parts = %v, want %v", parts, want)
+		}
 	}
 }
 

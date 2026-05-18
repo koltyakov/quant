@@ -157,7 +157,7 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 
 **`summarize_matches`** runs a search and returns a high-level overview of which documents matched and what they contain, without returning individual chunks. Useful when you want a quick map of what the index knows about a subject.
 
-All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback. Tool concurrency is bounded by `--max-concurrent-tools` (default 4).
+All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback. Tool concurrency is bounded by `--max-concurrent-tools` (auto-tuned by CPU by default).
 
 ## Supported File Types
 

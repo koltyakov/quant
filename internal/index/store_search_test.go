@@ -1100,6 +1100,45 @@ func TestLoadHNSWFromState(t *testing.T) {
 	}
 }
 
+func TestLoadHNSWFromState_RejectsStaleGraphFile(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "stale-graph", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	doc := &Document{Path: "stale/a.txt", Hash: "h1", ModifiedAt: time.Now()}
+	if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{
+		Content:    "stale graph content",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}}); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	if err := store.FlushHNSW(); err != nil {
+		t.Fatalf("FlushHNSW() error: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE hnsw_state SET node_count = 99 WHERE id = 1`); err != nil {
+		t.Fatalf("corrupting hnsw_state: %v", err)
+	}
+	store.resetRuntimeIndexes(false)
+
+	if loaded := store.LoadHNSWFromState(ctx); loaded {
+		t.Fatal("expected stale HNSW graph file to be rejected")
+	}
+	if store.HNSWReady() {
+		t.Fatal("expected HNSW to remain not ready after stale load")
+	}
+}
+
 func TestReindexDocumentWithDeferredHNSW_Callback(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(filepath.Join(dir, "quant.db"))
@@ -1319,7 +1358,7 @@ func TestCanRunVectorFallback_ZeroCap(t *testing.T) {
 	store.SetMaxVectorSearchCandidates(0)
 
 	ctx := context.Background()
-	ok, err := store.canRunVectorFallback(ctx, "")
+	ok, err := store.canRunVectorFallback(ctx, "", "", nil)
 	if err != nil {
 		t.Fatalf("canRunVectorFallback() error: %v", err)
 	}

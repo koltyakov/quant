@@ -37,6 +37,13 @@ func (d *docEmbeddingIndex) Remove(docID int64, path string) {
 	delete(d.byPath, path)
 }
 
+func (d *docEmbeddingIndex) Clear() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.byDocID = make(map[int64][]float32)
+	d.byPath = make(map[string]int64)
+}
+
 func (d *docEmbeddingIndex) Len() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

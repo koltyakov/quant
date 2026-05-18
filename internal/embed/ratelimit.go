@@ -70,33 +70,19 @@ func NewRateLimiter(cfg RateLimiterConfig) *RateLimiter {
 // It blocks until a token is available or the context is cancelled.
 // Returns an error if the context is cancelled or max waiters is exceeded.
 func (r *RateLimiter) Acquire(ctx context.Context) error {
-	// First, handle concurrency limiting if configured
-	if r.concurrencyCh != nil {
-		select {
-		case r.concurrencyCh <- struct{}{}:
-			// Got a concurrency slot
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
 	for {
 		r.mu.Lock()
 		r.refill()
 
 		if r.tokens >= 1 {
 			r.tokens--
-			r.concurrency++
 			r.mu.Unlock()
-			return nil
+			break
 		}
 
 		// Check if we can wait
 		if r.waiters >= r.maxWaiters {
 			r.mu.Unlock()
-			if r.concurrencyCh != nil {
-				<-r.concurrencyCh // Release concurrency slot
-			}
 			return ErrRateLimitExceeded
 		}
 
@@ -109,9 +95,6 @@ func (r *RateLimiter) Acquire(ctx context.Context) error {
 			r.mu.Lock()
 			r.waiters--
 			r.mu.Unlock()
-			if r.concurrencyCh != nil {
-				<-r.concurrencyCh // Release concurrency slot
-			}
 			return ctx.Err()
 		case <-r.waiterCh:
 			r.mu.Lock()
@@ -125,18 +108,28 @@ func (r *RateLimiter) Acquire(ctx context.Context) error {
 			// Tokens may have refilled, try again
 		}
 	}
+
+	if r.concurrencyCh != nil {
+		select {
+		case r.concurrencyCh <- struct{}{}:
+			// Got a concurrency slot.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	r.mu.Lock()
+	r.concurrency++
+	r.mu.Unlock()
+	return nil
 }
 
-// Release releases a token back to the pool.
+// Release releases a concurrency slot back to the pool.
 // Should be called after the embedding request completes.
 func (r *RateLimiter) Release() {
 	r.mu.Lock()
 	if r.concurrency > 0 {
 		r.concurrency--
-	}
-	r.tokens++
-	if r.tokens > r.maxTokens {
-		r.tokens = r.maxTokens
 	}
 	r.mu.Unlock()
 

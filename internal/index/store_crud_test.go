@@ -853,6 +853,127 @@ func TestSearchFiltered_WithCollectionFilter(t *testing.T) {
 	}
 }
 
+func TestSearchFiltered_VectorCandidatesRespectCollectionFilter(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "filter-vector", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+
+	for _, item := range []struct {
+		path       string
+		collection string
+		vec        []float32
+	}{
+		{path: "filtered/alpha.txt", collection: "alpha", vec: NormalizeFloat32([]float32{1, 0})},
+		{path: "filtered/beta.txt", collection: "beta", vec: NormalizeFloat32([]float32{0, 1})},
+	} {
+		doc := &Document{Path: item.path, Hash: item.path, ModifiedAt: time.Now(), Collection: item.collection}
+		if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{Content: item.path, ChunkIndex: 0, Embedding: EncodeFloat32(item.vec)}}); err != nil {
+			t.Fatalf("ReindexDocument(%s) error: %v", item.path, err)
+		}
+	}
+
+	query := NormalizeFloat32([]float32{0, 1})
+	results, err := store.SearchFiltered(ctx, "", query, 1, "", SearchFilter{Collection: "alpha"})
+	if err != nil {
+		t.Fatalf("SearchFiltered() error: %v", err)
+	}
+	if len(results) != 1 || results[0].DocumentPath != "filtered/alpha.txt" {
+		t.Fatalf("expected alpha result only, got %+v", results)
+	}
+
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	results, err = store.SearchFiltered(ctx, "", query, 1, "", SearchFilter{Collection: "alpha"})
+	if err != nil {
+		t.Fatalf("SearchFiltered() with HNSW error: %v", err)
+	}
+	if len(results) != 1 || results[0].DocumentPath != "filtered/alpha.txt" {
+		t.Fatalf("expected alpha HNSW result only, got %+v", results)
+	}
+}
+
+func TestDeleteDocumentsByPrefix_HNSWPreservesSiblingPrefixes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "prefix-hnsw", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	for _, item := range []struct {
+		path string
+		vec  []float32
+	}{
+		{path: "foo/a.txt", vec: NormalizeFloat32([]float32{1, 0})},
+		{path: "foo-bar/a.txt", vec: NormalizeFloat32([]float32{0, 1})},
+	} {
+		doc := &Document{Path: item.path, Hash: item.path, ModifiedAt: time.Now()}
+		if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{Content: item.path, ChunkIndex: 0, Embedding: EncodeFloat32(item.vec)}}); err != nil {
+			t.Fatalf("ReindexDocument(%s) error: %v", item.path, err)
+		}
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+
+	if err := store.DeleteDocumentsByPrefix(ctx, "foo"); err != nil {
+		t.Fatalf("DeleteDocumentsByPrefix() error: %v", err)
+	}
+	if got := store.HNSWLen(); got != 1 {
+		t.Fatalf("expected one HNSW node to remain, got %d", got)
+	}
+	if doc, err := store.GetDocumentByPath(ctx, "foo-bar/a.txt"); err != nil || doc == nil {
+		t.Fatalf("expected sibling prefix document to remain, doc=%+v err=%v", doc, err)
+	}
+}
+
+func TestDeleteDocumentsByPrefix_ClearAllResetsRuntimeIndexes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "clear-runtime", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	doc := &Document{Path: "runtime/a.txt", Hash: "h", ModifiedAt: time.Now()}
+	if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{Content: "runtime", ChunkIndex: 0, Embedding: EncodeFloat32(NormalizeFloat32([]float32{1, 0}))}}); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	if store.docEmbeds.Len() == 0 || !store.HNSWReady() {
+		t.Fatal("expected runtime indexes to be populated before delete-all")
+	}
+
+	if err := store.DeleteDocumentsByPrefix(ctx, "."); err != nil {
+		t.Fatalf("DeleteDocumentsByPrefix(.) error: %v", err)
+	}
+	if store.docEmbeds.Len() != 0 {
+		t.Fatalf("expected document embedding cache to be cleared, got %d", store.docEmbeds.Len())
+	}
+	if store.HNSWReady() {
+		t.Fatal("expected HNSW to be marked not ready after delete-all")
+	}
+}
+
 func TestEncodeDecodeTokenEmbeddings(t *testing.T) {
 	tokenEmbs := [][]float32{{0.1, 0.2, 0.3}, {0.4, 0.5, 0.6}}
 	encoded := EncodeTokenEmbeddings(tokenEmbs)
@@ -1781,6 +1902,13 @@ func TestMigrateEmbeddingsWithProjection(t *testing.T) {
 
 	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "proj-test", Dimensions: 2, Normalized: true}); err != nil {
 		t.Fatalf("EnsureEmbeddingMetadata() after projection error: %v", err)
+	}
+	docCount, chunkCount, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if docCount != 1 || chunkCount != 1 {
+		t.Fatalf("projection metadata update should not reset migrated data, got %d docs and %d chunks", docCount, chunkCount)
 	}
 }
 

@@ -120,6 +120,9 @@ func (c *Config) Validate() error {
 	if err := validateHTTPURL("embed_url", c.EmbedURL); err != nil {
 		return err
 	}
+	if err := validateEmbedProvider(c.EmbedProvider); err != nil {
+		return err
+	}
 	if err := validateLLMProvider(c.LLMProvider); err != nil {
 		return err
 	}
@@ -134,6 +137,15 @@ func (c *Config) Validate() error {
 	}
 	if c.EmbedBatchSize < 1 || c.EmbedBatchSize > 128 {
 		return fmt.Errorf("embed_batch_size must be between 1 and 128")
+	}
+	if c.PDFOCRTimeout <= 0 {
+		return fmt.Errorf("pdf_ocr_timeout must be greater than 0")
+	}
+	if c.MaxVectorCandidates < -1 {
+		return fmt.Errorf("max_vector_candidates must be -1, 0, or greater")
+	}
+	if c.MaxConcurrentTools < 0 {
+		return fmt.Errorf("max_concurrent_tools must be 0 or greater")
 	}
 	switch c.RerankerType {
 	case "", "cross-encoder":
@@ -202,6 +214,15 @@ func validateHTTPURL(name, raw string) error {
 
 func validateEmbedURL(raw string) error {
 	return validateHTTPURL("embed_url", raw)
+}
+
+func validateEmbedProvider(provider string) error {
+	switch provider {
+	case "", "ollama", "openai":
+		return nil
+	default:
+		return fmt.Errorf("invalid embed_provider %q; must be \"ollama\" or \"openai\"", provider)
+	}
 }
 
 func validateLLMProvider(provider string) error {
@@ -300,6 +321,9 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flagSet.StringVar(&cfg.EmbedProvider, "embed-provider", cfg.EmbedProvider, "Embedding backend: ollama or openai (auto-detected from URL when not set)")
 	flagSet.StringVar(&cfg.EmbedAPIKey, "embed-api-key", cfg.EmbedAPIKey, "API key for the embedding backend (OpenAI-compatible providers)")
+	flagSet.DurationVar(&cfg.PDFOCRTimeout, "pdf-ocr-timeout", cfg.PDFOCRTimeout, "OCR timeout per PDF file")
+	flagSet.IntVar(&cfg.MaxVectorCandidates, "max-vector-candidates", cfg.MaxVectorCandidates, "Maximum chunks for brute-force vector fallback (-1 unlimited, 0 disabled)")
+	flagSet.IntVar(&cfg.MaxConcurrentTools, "max-concurrent-tools", cfg.MaxConcurrentTools, "Maximum concurrent MCP tool calls (0 uses default)")
 	flagSet.StringVar(&cfg.LLMURL, "llm-url", cfg.LLMURL, "LLM API URL for reranking and summarization")
 	flagSet.StringVar(&cfg.LLMModel, "llm-model", cfg.LLMModel, "Default LLM model for reranking and summarization")
 	flagSet.StringVar(&cfg.LLMProvider, "llm-provider", cfg.LLMProvider, "LLM backend: ollama or openai (auto-detected from URL when not set)")

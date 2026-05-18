@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -297,6 +298,11 @@ func (s *Server) handleCollectionStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteCollection(w http.ResponseWriter, r *http.Request) {
 	var req DeleteCollectionRequest
 	if !s.readBody(w, r, &req) {
+		return
+	}
+	req.Collection = strings.TrimSpace(req.Collection)
+	if req.Collection == "" {
+		s.writeError(w, http.StatusBadRequest, "collection is required")
 		return
 	}
 	if err := s.store.DeleteCollection(r.Context(), req.Collection); err != nil {

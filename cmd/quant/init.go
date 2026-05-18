@@ -352,7 +352,7 @@ func renderOpenCodeConfig(opts initOptions) map[string]any {
 		"enabled": true,
 	}
 	if opts.Autoupdate {
-		quant["env"] = map[string]string{"QUANT_AUTOUPDATE": "true"}
+		quant["environment"] = map[string]string{"QUANT_AUTOUPDATE": "true"}
 	}
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
@@ -523,7 +523,41 @@ func writeGitignore(opts initOptions) (bool, error) {
 }
 
 func commandParts(command string) []string {
-	return strings.Fields(strings.TrimSpace(command))
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return []string{"quant"}
+	}
+
+	var parts []string
+	var current strings.Builder
+	var quote rune
+	for _, r := range command {
+		if quote == 0 && (r == ' ' || r == '\t' || r == '\n') {
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			if quote == 0 {
+				quote = r
+				continue
+			}
+			if quote == r {
+				quote = 0
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	if len(parts) == 0 {
+		return []string{"quant"}
+	}
+	return parts
 }
 
 func dataDirArg(dataDir string) string {

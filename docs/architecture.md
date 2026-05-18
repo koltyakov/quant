@@ -52,4 +52,4 @@ flowchart TD
 
 **Graceful degradation.** If the embedding backend is unavailable at startup, `quant` attempts automatic recovery: it tries to start Ollama (`ollama serve`) if the binary is on PATH and the URL is local, then pulls the configured model if the server is reachable but the model is missing. If both recovery steps fail, `quant` starts in keyword-only mode — the MCP server remains fully operational and `index_status` reports the embedding status and the fix required. At query time, the circuit breaker (5 consecutive failures, 30-second window) provides a second layer of fallback. The embedding status is included in search responses so agents know when results are limited.
 
-**Concurrency control.** MCP tool calls are bounded by a semaphore (`--max-concurrent-tools`, default 4) to prevent resource exhaustion when multiple agents query simultaneously.
+**Concurrency control.** MCP tool calls are bounded by a semaphore (`--max-concurrent-tools`, auto-tuned by CPU by default) to prevent resource exhaustion when multiple agents query simultaneously.

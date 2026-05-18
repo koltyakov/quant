@@ -87,6 +87,29 @@ func TestRateLimiterAcquireReleaseAndStats(t *testing.T) {
 	}
 }
 
+func TestRateLimiterReleaseDoesNotRefillRateToken(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(RateLimiterConfig{
+		MaxTokens:     1,
+		RefillRate:    0,
+		MaxWaiters:    1,
+		MaxConcurrent: 0,
+	})
+
+	if err := rl.Acquire(context.Background()); err != nil {
+		t.Fatalf("first Acquire() error = %v", err)
+	}
+	rl.Release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := rl.Acquire(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Acquire() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+}
+
 func TestRateLimiterAcquireHonorsContextCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -245,8 +268,8 @@ func TestRateLimitedEmbedderForwardsCallsAndReleasesSlotsOnError(t *testing.T) {
 	if stats.Concurrency != 0 {
 		t.Fatalf("Concurrency after forwarded calls = %d, want 0", stats.Concurrency)
 	}
-	if stats.AvailableTokens != 3 {
-		t.Fatalf("AvailableTokens after two calls = %v, want 3", stats.AvailableTokens)
+	if stats.AvailableTokens != 1 {
+		t.Fatalf("AvailableTokens after two calls = %v, want 1", stats.AvailableTokens)
 	}
 }
 
