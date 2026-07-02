@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"strings"
 	"testing"
 )
 
@@ -55,6 +56,98 @@ func benchmarkSearch(b *testing.B, numDocs, chunksPerDoc int) {
 	for b.Loop() {
 		_, err := store.Search(ctx, "searchable content topic", queryVec, 5, "")
 		if err != nil {
+			b.Fatalf("unexpected search error: %v", err)
+		}
+	}
+}
+
+// BenchmarkSearch_HNSW exercises the production search path: HNSW graph
+// ready, int8-quantized embeddings, and realistically sized chunk bodies.
+func BenchmarkSearch_HNSW(b *testing.B) {
+	dir := b.TempDir()
+	store, err := NewStore(dir + "/bench.db")
+	if err != nil {
+		b.Fatalf("unexpected store error: %v", err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+
+	const dims = 384
+	const numDocs, chunksPerDoc = 200, 20
+	ctx := context.Background()
+
+	filler := strings.Repeat("lorem ipsum dolor sit amet consectetur adipiscing elit ", 25) // ~1.4KB
+	for d := range numDocs {
+		doc := &Document{
+			Path: fmt.Sprintf("dir%d/doc%d.txt", d%10, d),
+			Hash: fmt.Sprintf("hash%d", d),
+		}
+		chunks := make([]ChunkRecord, chunksPerDoc)
+		for c := range chunksPerDoc {
+			chunks[c] = ChunkRecord{
+				Content:    fmt.Sprintf("chunk %d of document %d about topic %d\n%s", c, d, d%10, filler),
+				ChunkIndex: c,
+				Embedding:  EncodeInt8(NormalizeFloat32(randomVector(dims))),
+			}
+		}
+		if err := store.ReindexDocument(ctx, doc, chunks); err != nil {
+			b.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		b.Fatalf("unexpected hnsw build error: %v", err)
+	}
+
+	queryVec := NormalizeFloat32(randomVector(dims))
+
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := store.Search(ctx, "searchable content topic", queryVec, 5, ""); err != nil {
+			b.Fatalf("unexpected search error: %v", err)
+		}
+	}
+}
+
+// BenchmarkSearch_HNSW_PathFilter is the same corpus searched with a path
+// prefix, exercising the filtered vector path.
+func BenchmarkSearch_HNSW_PathFilter(b *testing.B) {
+	dir := b.TempDir()
+	store, err := NewStore(dir + "/bench.db")
+	if err != nil {
+		b.Fatalf("unexpected store error: %v", err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+
+	const dims = 384
+	const numDocs, chunksPerDoc = 200, 20
+	ctx := context.Background()
+
+	filler := strings.Repeat("lorem ipsum dolor sit amet consectetur adipiscing elit ", 25)
+	for d := range numDocs {
+		doc := &Document{
+			Path: fmt.Sprintf("dir%d/doc%d.txt", d%10, d),
+			Hash: fmt.Sprintf("hash%d", d),
+		}
+		chunks := make([]ChunkRecord, chunksPerDoc)
+		for c := range chunksPerDoc {
+			chunks[c] = ChunkRecord{
+				Content:    fmt.Sprintf("chunk %d of document %d about topic %d\n%s", c, d, d%10, filler),
+				ChunkIndex: c,
+				Embedding:  EncodeInt8(NormalizeFloat32(randomVector(dims))),
+			}
+		}
+		if err := store.ReindexDocument(ctx, doc, chunks); err != nil {
+			b.Fatalf("unexpected seed error: %v", err)
+		}
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		b.Fatalf("unexpected hnsw build error: %v", err)
+	}
+
+	queryVec := NormalizeFloat32(randomVector(dims))
+
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := store.Search(ctx, "searchable content topic", queryVec, 5, "dir3/"); err != nil {
 			b.Fatalf("unexpected search error: %v", err)
 		}
 	}

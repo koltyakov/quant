@@ -1,6 +1,7 @@
 package index
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"sync"
@@ -10,15 +11,20 @@ import (
 
 const docFilterTopK = 100
 
+type docEmbedding struct {
+	path string
+	vec  []float32
+}
+
 type docEmbeddingIndex struct {
 	mu      sync.RWMutex
-	byDocID map[int64][]float32
+	byDocID map[int64]docEmbedding
 	byPath  map[string]int64
 }
 
 func newDocEmbeddingIndex() *docEmbeddingIndex {
 	return &docEmbeddingIndex{
-		byDocID: make(map[int64][]float32),
+		byDocID: make(map[int64]docEmbedding),
 		byPath:  make(map[string]int64),
 	}
 }
@@ -26,7 +32,7 @@ func newDocEmbeddingIndex() *docEmbeddingIndex {
 func (d *docEmbeddingIndex) Set(docID int64, path string, vec []float32) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.byDocID[docID] = vec
+	d.byDocID[docID] = docEmbedding{path: path, vec: vec}
 	d.byPath[path] = docID
 }
 
@@ -40,7 +46,7 @@ func (d *docEmbeddingIndex) Remove(docID int64, path string) {
 func (d *docEmbeddingIndex) Clear() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.byDocID = make(map[int64][]float32)
+	d.byDocID = make(map[int64]docEmbedding)
 	d.byPath = make(map[string]int64)
 }
 
@@ -58,40 +64,21 @@ func (d *docEmbeddingIndex) topDocPaths(queryEmbed []float32, topK int) map[stri
 		return nil
 	}
 
-	type scored struct {
-		path string
-		vec  []float32
-		dot  float32
-	}
-
-	idToPath := make(map[int64]string, len(d.byPath))
-	for p, id := range d.byPath {
-		idToPath[id] = p
-	}
-
-	all := make([]scored, 0, len(d.byDocID))
-	for docID, vec := range d.byDocID {
-		path := idToPath[docID]
-		if path == "" {
-			continue
-		}
-		dot := dotProduct(queryEmbed, vec)
-		all = append(all, scored{path: path, vec: vec, dot: dot})
-	}
-
-	topK = min(topK, len(all))
-
-	for i := range topK {
-		for j := len(all) - 1; j > i; j-- {
-			if all[j].dot > all[j-1].dot {
-				all[j], all[j-1] = all[j-1], all[j]
-			}
+	topK = min(topK, len(d.byDocID))
+	top := make(candidateHeap, 0, topK)
+	for _, doc := range d.byDocID {
+		dot := dotProduct(queryEmbed, doc.vec)
+		if len(top) < topK {
+			heap.Push(&top, scoredResult{path: doc.path, score: dot})
+		} else if dot > top[0].score {
+			top[0] = scoredResult{path: doc.path, score: dot}
+			heap.Fix(&top, 0)
 		}
 	}
 
-	result := make(map[string]float32, topK)
-	for i := range topK {
-		result[all[i].path] = all[i].dot
+	result := make(map[string]float32, len(top))
+	for _, sr := range top {
+		result[sr.path] = sr.score
 	}
 	return result
 }

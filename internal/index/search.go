@@ -72,6 +72,8 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding
 	weights := classifyQueryWeights(query, s.keywordWeightOverride, s.vectorWeightOverride)
 	results := unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights)
 
+	s.hydrateResultContents(ctx, results)
+
 	if s.reranker != nil {
 		reranked, err := s.reranker.Rerank(ctx, query, queryEmbedding, results)
 		if err == nil && len(reranked) > 0 {
@@ -166,7 +168,51 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 		c.result.ScoreKind = "similar"
 		results = append(results, c.result)
 	}
+	s.hydrateResultContents(ctx, results)
 	return results, nil
+}
+
+// hydrateResultContents fills ChunkContent for final results. Candidate
+// collection deliberately skips the content column so that scoring never
+// drags full chunk bodies out of SQLite for rows that get discarded; only
+// the chunks that survive ranking are loaded here.
+func (s *Store) hydrateResultContents(ctx context.Context, results []SearchResult) {
+	if len(results) == 0 {
+		return
+	}
+	placeholders := make([]string, len(results))
+	args := make([]any, len(results))
+	for i := range results {
+		placeholders[i] = "?"
+		args[i] = results[i].ChunkID
+	}
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+	query := `SELECT id, content FROM chunks WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		logx.Warn("search: loading result contents failed", "err", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	contents := make(map[int64]string, len(results))
+	for rows.Next() {
+		var id int64
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			logx.Warn("search: scanning result contents failed", "err", err)
+			return
+		}
+		contents[id] = content
+	}
+	if err := rows.Err(); err != nil {
+		logx.Warn("search: reading result contents failed", "err", err)
+	}
+	for i := range results {
+		if content, ok := contents[results[i].ChunkID]; ok {
+			results[i].ChunkContent = content
+		}
+	}
 }
 
 func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string, metadataWhere string, metadataArgs []any) (bool, error) {
@@ -224,7 +270,7 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 	if pathPrefix == "" && len(docFilter) > 0 && metadataWhere == "" {
 		rows, err = s.queryChunksByDocPaths(ctx, docFilter)
 	} else {
-		query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+		query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
 			 FROM chunks c
 			 JOIN documents d ON c.document_id = d.id
 			 WHERE 1=1`
@@ -290,7 +336,7 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 }
 
 func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery string, queryEmbedding []float32, candidateLimit int, pathPrefix string, rankOffset int, candidates map[int]*searchCandidate, metadataWhere string, metadataArgs []any) (int, error) {
-	baseQuery := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+	baseQuery := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
 			 FROM chunks_fts
 			 JOIN chunks c ON c.id = chunks_fts.rowid
 			 JOIN documents d ON c.document_id = d.id
@@ -321,7 +367,6 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 	rank := 0
 	for rows.Next() {
 		var id int
-		var content string
 		var chunkIndex int
 		var embeddingBytes []byte
 		var docPath string
@@ -329,7 +374,7 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 		var parentID *int64
 		var depth int
 		var sectionTitle string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt, &parentID, &depth, &sectionTitle); err != nil {
+		if err := rows.Scan(&id, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt, &parentID, &depth, &sectionTitle); err != nil {
 			return 0, err
 		}
 		rank++
@@ -344,7 +389,6 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 			id: id,
 			result: SearchResult{
 				DocumentPath: docPath,
-				ChunkContent: content,
 				ChunkIndex:   chunkIndex,
 				ScoreKind:    "rrf",
 				ParentID:     parentID,
@@ -360,65 +404,7 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 }
 
 func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) (map[int]*searchCandidate, error) {
-	top := make(candidateHeap, 0, limit)
-	for rows.Next() {
-		var id int
-		var content string
-		var chunkIndex int
-		var embeddingBytes []byte
-		var docPath string
-		var modifiedAt time.Time
-		var parentID *int64
-		var depth int
-		var sectionTitle string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt, &parentID, &depth, &sectionTitle); err != nil {
-			return nil, err
-		}
-		if _, ok := keywordCandidates[id]; ok {
-			continue
-		}
-
-		score := dotProductEncoded(queryEmbedding, embeddingBytes)
-		candidate := scoredResult{
-			id:           id,
-			path:         docPath,
-			score:        score,
-			content:      content,
-			chunkIndex:   chunkIndex,
-			modifiedAt:   modifiedAt,
-			parentID:     parentID,
-			depth:        depth,
-			sectionTitle: sectionTitle,
-		}
-
-		if len(top) < limit {
-			heap.Push(&top, candidate)
-		} else if candidate.score > top[0].score {
-			top[0] = candidate
-			heap.Fix(&top, 0)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	for _, sr := range top {
-		vectorOnly[sr.id] = &searchCandidate{
-			id: sr.id,
-			result: SearchResult{
-				DocumentPath: sr.path,
-				ChunkContent: sr.content,
-				ChunkIndex:   sr.chunkIndex,
-				ScoreKind:    "rrf",
-				ParentID:     sr.parentID,
-				Depth:        sr.depth,
-				SectionTitle: sr.sectionTitle,
-			},
-			vectorScore: sr.score,
-			modifiedAt:  sr.modifiedAt,
-		}
-	}
-	return vectorOnly, nil
+	return s.scanVectorRowsWithDocFilter(rows, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
 }
 
 func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
@@ -432,6 +418,24 @@ func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []floa
 }
 
 func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbedding []float32, limit int, pathPrefix string, metadataWhere string, metadataArgs []any, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate) {
+	// Fast path: probe the global nearest neighbors and keep those that pass
+	// the SQL filter. When the filter is broad (a repo-root path prefix, a
+	// common file type) enough survive, and the survivors are exactly the
+	// nearest filtered chunks — the full filter-set id scan below is skipped.
+	probeK := limit*3 + len(keywordCandidates) + 10
+	probeIDs := s.hnsw.Search(queryEmbedding, probeK)
+	if len(probeIDs) > 0 {
+		survivors, err := s.filterChunkIDs(ctx, probeIDs, pathPrefix, metadataWhere, metadataArgs)
+		if err != nil {
+			logx.Warn("filtered vector search: probe filter query failed; returning keyword-only results", "err", err)
+			return
+		}
+		if len(survivors) >= limit {
+			s.loadHNSWChunkRows(ctx, survivors, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
+			return
+		}
+	}
+
 	query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
 	args := make([]any, 0, 1+len(metadataArgs))
 	if pathPrefix != "" {
@@ -494,6 +498,43 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	s.loadHNSWChunkRows(ctx, allFilteredIDs, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
 }
 
+// filterChunkIDs returns the subset of ids whose chunks pass the path-prefix
+// and metadata filters. Result order is unspecified; callers re-score by exact
+// dot product anyway.
+func (s *Store) filterChunkIDs(ctx context.Context, ids []int, pathPrefix string, metadataWhere string, metadataArgs []any) ([]int, error) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1+len(metadataArgs))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+	query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id
+	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
+	if pathPrefix != "" {
+		query += ` AND d.path LIKE ? ESCAPE '\'`
+		args = append(args, sqlLikePrefixPattern(pathPrefix))
+	}
+	query += metadataWhere // #nosec G202
+	args = append(args, metadataArgs...)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]int, 0, len(ids))
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
 	if len(ids) == 0 {
 		return
@@ -505,7 +546,7 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 		args[i] = id
 	}
 	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+	query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
 	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -532,7 +573,7 @@ func (s *Store) queryChunksByDocPaths(ctx context.Context, docPaths map[string]f
 		placeholders[i] = "?"
 		args[i] = p
 	}
-	query := `SELECT c.id, c.content, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+	query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
 	          WHERE d.path IN (` + strings.Join(placeholders, ",") + `)`
 	return s.db.QueryContext(ctx, query, args...)
@@ -542,7 +583,6 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 	top := make(candidateHeap, 0, limit)
 	for rows.Next() {
 		var id int
-		var content string
 		var chunkIndex int
 		var embeddingBytes []byte
 		var docPath string
@@ -550,7 +590,7 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 		var parentID *int64
 		var depth int
 		var sectionTitle string
-		if err := rows.Scan(&id, &content, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt, &parentID, &depth, &sectionTitle); err != nil {
+		if err := rows.Scan(&id, &chunkIndex, &embeddingBytes, &docPath, &modifiedAt, &parentID, &depth, &sectionTitle); err != nil {
 			return nil, err
 		}
 		if _, ok := keywordCandidates[id]; ok {
@@ -567,7 +607,6 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 			id:           id,
 			path:         docPath,
 			score:        score,
-			content:      content,
 			chunkIndex:   chunkIndex,
 			modifiedAt:   modifiedAt,
 			parentID:     parentID,
@@ -591,7 +630,6 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 			id: sr.id,
 			result: SearchResult{
 				DocumentPath: sr.path,
-				ChunkContent: sr.content,
 				ChunkIndex:   sr.chunkIndex,
 				ScoreKind:    "rrf",
 				ParentID:     sr.parentID,

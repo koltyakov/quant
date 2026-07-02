@@ -332,7 +332,6 @@ type scoredResult struct {
 	score        float32
 	id           int
 	path         string
-	content      string
 	chunkIndex   int
 	modifiedAt   time.Time
 	parentID     *int64
