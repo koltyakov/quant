@@ -33,7 +33,6 @@ type Store struct {
 	vectorWeightOverride      float32
 	docEmbeds                 *docEmbeddingIndex
 	reranker                  Reranker
-	colbert                   *ColBERTIndex
 
 	writeMu sync.Mutex
 }
@@ -294,10 +293,7 @@ func (s *Store) migrate() error {
 	if err := s.migrateDocumentMetadata(); err != nil {
 		return err
 	}
-	if err := s.migrateCollectionColumn(); err != nil {
-		return err
-	}
-	return s.MigrateColBERTColumn()
+	return s.migrateCollectionColumn()
 }
 
 func (s *Store) migrateCollectionColumn() error {
@@ -424,7 +420,9 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 	var hnswDeleteIDs []int
 	if s.hnsw != nil && s.hnsw.ready.Load() {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
-		if err == nil {
+		if err != nil {
+			logx.Warn("failed to collect chunk ids for hnsw delete; graph may retain stale nodes", "doc_id", docID, "err", err)
+		} else {
 			for rows.Next() {
 				var id int
 				if rows.Scan(&id) == nil {
@@ -432,7 +430,8 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 				}
 			}
 			_ = rows.Close()
-			if rows.Err() != nil {
+			if rowsErr := rows.Err(); rowsErr != nil {
+				logx.Warn("failed to read chunk ids for hnsw delete; graph may retain stale nodes", "doc_id", docID, "err", rowsErr)
 				hnswDeleteIDs = nil
 			}
 		}
@@ -440,10 +439,6 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting existing chunks: %w", err)
-	}
-
-	if len(hnswDeleteIDs) > 0 {
-		s.hnsw.BatchDelete(hnswDeleteIDs)
 	}
 
 	meta, _ := s.embeddingMetadata(ctx)
@@ -488,6 +483,12 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
+	// HNSW mutations happen only after the transaction commits, so a failed
+	// commit never leaves the graph out of sync with the database.
+	if len(hnswDeleteIDs) > 0 {
+		s.hnsw.BatchDelete(hnswDeleteIDs)
+	}
+
 	if deferredHNSW != nil {
 		deferredHNSW()
 	}
@@ -526,7 +527,7 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 // keyed by a compound of content and chunk index. Used for incremental reindex diffing.
 func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[string]ChunkRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.chunk_index, c.content, c.embedding, c.parent_id, c.depth, c.section_title
+		`SELECT c.id, c.chunk_index, c.content, c.embedding, c.parent_id, c.depth, c.section_title, c.summary
 		 FROM chunks c
 		 JOIN documents d ON c.document_id = d.id
 		 WHERE d.path = ?`,
@@ -540,7 +541,7 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 	result := make(map[string]ChunkRecord)
 	for rows.Next() {
 		var cr ChunkRecord
-		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding, &cr.ParentID, &cr.Depth, &cr.SectionTitle); err != nil {
+		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding, &cr.ParentID, &cr.Depth, &cr.SectionTitle, &cr.Summary); err != nil {
 			return nil, err
 		}
 		key := ChunkDiffKey(cr.Content)

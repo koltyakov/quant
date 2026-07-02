@@ -2,7 +2,6 @@ package index
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -13,60 +12,8 @@ import (
 	"github.com/koltyakov/quant/internal/llm"
 )
 
-func TestColbertEncodingProjectionAndSummary(t *testing.T) {
+func TestParseSummaryResponse(t *testing.T) {
 	t.Parallel()
-
-	colbert := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 1})
-	colbert.Add(1, [][]float32{{1, 0}, {0.2, 0.8}})
-	colbert.Add(2, [][]float32{{0, 1}})
-	if colbert.Len() != 2 {
-		t.Fatalf("unexpected colbert len: %d", colbert.Len())
-	}
-	if got := colbert.Search([][]float32{{1, 0}}, 2); got != nil {
-		t.Fatalf("expected nil results before ready, got %+v", got)
-	}
-	colbert.SetReady(true)
-	results := colbert.Search([][]float32{{1, 0}}, 2)
-	if len(results) != 2 || results[0].ChunkID != 1 || results[0].Score <= results[1].Score {
-		t.Fatalf("unexpected colbert search results: %+v", results)
-	}
-	colbert.Remove(2)
-	if colbert.Len() != 1 || !colbert.Ready() {
-		t.Fatalf("unexpected colbert state after remove: len=%d ready=%v", colbert.Len(), colbert.Ready())
-	}
-
-	encodedTokens := EncodeTokenEmbeddings([][]float32{{1, 2}, {3, 4}})
-	decodedTokens := DecodeTokenEmbeddings(encodedTokens)
-	if len(decodedTokens) != 2 || len(decodedTokens[0]) != 2 || decodedTokens[1][1] != 4 {
-		t.Fatalf("unexpected decoded token embeddings: %+v", decodedTokens)
-	}
-	if DecodeTokenEmbeddings([]byte("bad")) != nil {
-		t.Fatal("expected invalid token embeddings to decode as nil")
-	}
-
-	proj := &ProjectionLayer{
-		weight:  []float32{1, 0, 0, 2},
-		bias:    []float32{0.5, -0.5},
-		inDims:  2,
-		outDims: 2,
-	}
-	projected := proj.Project([]float32{3, 4})
-	if len(projected) != 2 {
-		t.Fatalf("unexpected projected dims: %v", projected)
-	}
-	if proj.Project([]float32{1}) != nil {
-		t.Fatal("expected nil for mismatched projection dims")
-	}
-	roundTrip, err := LoadProjection(proj.Encode())
-	if err != nil {
-		t.Fatalf("LoadProjection returned error: %v", err)
-	}
-	if !reflect.DeepEqual(roundTrip.weight, proj.weight) || !reflect.DeepEqual(roundTrip.bias, proj.bias) {
-		t.Fatalf("projection roundtrip mismatch: got %+v want %+v", roundTrip, proj)
-	}
-	if _, err := LoadProjection([]byte{1, 2, 3}); err == nil {
-		t.Fatal("expected short projection decode to fail")
-	}
 
 	plain, err := parseSummaryResponse("plain text summary")
 	if err != nil || plain.Summary != "plain text summary" || plain.Topics != nil {
@@ -147,7 +94,7 @@ func (s *stubLLMCompleter) Complete(ctx context.Context, req llm.CompleteRequest
 	return s.fn(ctx, req)
 }
 
-func TestDocEmbeddingsAndProjectionMigration(t *testing.T) {
+func TestDocEmbeddings(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -223,38 +170,5 @@ func TestDocEmbeddingsAndProjectionMigration(t *testing.T) {
 	}
 	if store.docEmbeds.Len() != 1 {
 		t.Fatalf("expected one loaded document embedding, got %d", store.docEmbeds.Len())
-	}
-
-	if err := store.SaveProjection(ctx, &ProjectionLayer{
-		weight:  []float32{1, 0, 0, 1},
-		bias:    []float32{0, 0},
-		inDims:  2,
-		outDims: 2,
-	}); err != nil {
-		t.Fatalf("SaveProjection returned error: %v", err)
-	}
-	loadedProj, err := store.LoadProjection(ctx)
-	if err != nil {
-		t.Fatalf("LoadProjection returned error: %v", err)
-	}
-	if loadedProj.InDims() != 2 || loadedProj.OutDims() != 2 {
-		t.Fatalf("unexpected stored projection dims: in=%d out=%d", loadedProj.InDims(), loadedProj.OutDims())
-	}
-
-	if err := store.MigrateEmbeddingsWithProjection(ctx, loadedProj); err != nil {
-		t.Fatalf("MigrateEmbeddingsWithProjection returned error: %v", err)
-	}
-	var embedding []byte
-	if err := store.db.QueryRowContext(ctx, `SELECT embedding FROM chunks WHERE chunk_index = 0`).Scan(&embedding); err != nil {
-		t.Fatalf("query migrated embedding: %v", err)
-	}
-	if len(embedding) == 0 {
-		t.Fatal("expected migrated embedding bytes")
-	}
-	if got, want := len(embedding), 8+loadedProj.OutDims(); got != want {
-		t.Fatalf("unexpected encoded embedding length: got %d want %d", got, want)
-	}
-	if scale := binary.LittleEndian.Uint32(embedding[4:8]); scale == 0 {
-		t.Fatal("expected non-zero quantization scale after migration")
 	}
 }

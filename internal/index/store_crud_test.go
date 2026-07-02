@@ -241,152 +241,6 @@ func TestClassifyQueryWeights(t *testing.T) {
 	}
 }
 
-func TestNewColBERTIndex(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true})
-	if idx == nil {
-		t.Fatal("expected non-nil ColBERTIndex")
-	}
-	if !idx.config.Enabled {
-		t.Fatal("expected enabled config")
-	}
-	if idx.config.MaxTokens != colBERTMaxTokens {
-		t.Fatalf("expected default MaxTokens %d, got %d", colBERTMaxTokens, idx.config.MaxTokens)
-	}
-}
-
-func TestNewColBERTIndex_DefaultMaxTokens(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 0})
-	if idx.config.MaxTokens != colBERTMaxTokens {
-		t.Fatalf("expected default MaxTokens %d when set to 0, got %d", colBERTMaxTokens, idx.config.MaxTokens)
-	}
-}
-
-func TestNewColBERTIndex_CustomMaxTokens(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 64})
-	if idx.config.MaxTokens != 64 {
-		t.Fatalf("expected MaxTokens 64, got %d", idx.config.MaxTokens)
-	}
-}
-
-func TestNewColBERTIndex_AddSearchRemove(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 10})
-	idx.SetReady(true)
-
-	tokens := [][]float32{{0.1, 0.2}, {0.3, 0.4}}
-	idx.Add(1, tokens)
-	if idx.Len() != 1 {
-		t.Fatalf("expected len 1 after Add, got %d", idx.Len())
-	}
-
-	results := idx.Search([][]float32{{0.1, 0.2}}, 5)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 search result, got %d", len(results))
-	}
-	if results[0].ChunkID != 1 {
-		t.Fatalf("expected ChunkID 1, got %d", results[0].ChunkID)
-	}
-
-	idx.Remove(1)
-	if idx.Len() != 0 {
-		t.Fatalf("expected len 0 after Remove, got %d", idx.Len())
-	}
-}
-
-func TestColBERT_Disabled(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: false})
-	idx.Add(1, [][]float32{{0.1, 0.2}})
-	if idx.Len() != 0 {
-		t.Fatalf("expected len 0 when disabled, got %d", idx.Len())
-	}
-}
-
-func TestColBERT_SearchNotReady(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 10})
-	results := idx.Search([][]float32{{0.1, 0.2}}, 5)
-	if results != nil {
-		t.Fatalf("expected nil results when not ready, got %v", results)
-	}
-}
-
-func TestColBERT_SearchEmptyQuery(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 10})
-	idx.SetReady(true)
-	results := idx.Search(nil, 5)
-	if results != nil {
-		t.Fatalf("expected nil results for nil query, got %v", results)
-	}
-}
-
-func TestNewFeedbackStore(t *testing.T) {
-	fs := NewFeedbackStore(100)
-	if fs == nil {
-		t.Fatal("expected non-nil FeedbackStore")
-	}
-	totalEvents, totalSelected := fs.Stats()
-	if totalEvents != 0 || totalSelected != 0 {
-		t.Fatalf("expected empty store, got %d events, %d selected", totalEvents, totalSelected)
-	}
-}
-
-func TestNewFeedbackStore_DefaultCapacity(t *testing.T) {
-	fs := NewFeedbackStore(0)
-	if fs == nil {
-		t.Fatal("expected non-nil FeedbackStore")
-	}
-	if fs.maxCap != 10000 {
-		t.Fatalf("expected default maxCap 10000, got %d", fs.maxCap)
-	}
-}
-
-func TestFeedbackStore_RecordAndStats(t *testing.T) {
-	fs := NewFeedbackStore(100)
-
-	fs.Record(FeedbackEvent{Query: "test", DocPath: "a.go", Selected: true, Position: 1})
-	fs.Record(FeedbackEvent{Query: "test", DocPath: "b.go", Selected: false, Position: 2})
-
-	totalEvents, totalSelected := fs.Stats()
-	if totalEvents != 2 {
-		t.Fatalf("expected 2 events, got %d", totalEvents)
-	}
-	if totalSelected != 1 {
-		t.Fatalf("expected 1 selected, got %d", totalSelected)
-	}
-}
-
-func TestFeedbackStore_ComputePathBoosts(t *testing.T) {
-	fs := NewFeedbackStore(100)
-
-	boosts := fs.ComputePathBoosts()
-	if boosts != nil {
-		t.Fatal("expected nil boosts with no events")
-	}
-
-	fs.Record(FeedbackEvent{Query: "q", DocPath: "a.go", Selected: true})
-	fs.Record(FeedbackEvent{Query: "q", DocPath: "a.go", Selected: true})
-	fs.Record(FeedbackEvent{Query: "q", DocPath: "b.go", Selected: false})
-
-	boosts = fs.ComputePathBoosts()
-	if len(boosts) != 1 {
-		t.Fatalf("expected 1 boost entry, got %d", len(boosts))
-	}
-	if boosts[0].Path != "a.go" {
-		t.Fatalf("expected path a.go, got %s", boosts[0].Path)
-	}
-}
-
-func TestFeedbackStore_CapacityOverflow(t *testing.T) {
-	fs := NewFeedbackStore(2)
-
-	fs.Record(FeedbackEvent{Query: "q1", DocPath: "a.go", Selected: true})
-	fs.Record(FeedbackEvent{Query: "q2", DocPath: "b.go", Selected: true})
-	fs.Record(FeedbackEvent{Query: "q3", DocPath: "c.go", Selected: false})
-
-	totalEvents, _ := fs.Stats()
-	if totalEvents != 2 {
-		t.Fatalf("expected 2 events after overflow, got %d", totalEvents)
-	}
-}
-
 func TestHNSWLen_NotReady(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(filepath.Join(dir, "quant.db"))
@@ -974,56 +828,6 @@ func TestDeleteDocumentsByPrefix_ClearAllResetsRuntimeIndexes(t *testing.T) {
 	}
 }
 
-func TestEncodeDecodeTokenEmbeddings(t *testing.T) {
-	tokenEmbs := [][]float32{{0.1, 0.2, 0.3}, {0.4, 0.5, 0.6}}
-	encoded := EncodeTokenEmbeddings(tokenEmbs)
-	if len(encoded) == 0 {
-		t.Fatal("expected non-empty encoded data")
-	}
-
-	decoded := DecodeTokenEmbeddings(encoded)
-	if decoded == nil {
-		t.Fatal("expected non-nil decoded data")
-	}
-	if len(decoded) != 2 {
-		t.Fatalf("expected 2 tokens, got %d", len(decoded))
-	}
-	if len(decoded[0]) != 3 {
-		t.Fatalf("expected 3 dims per token, got %d", len(decoded[0]))
-	}
-}
-
-func TestDecodeTokenEmbeddings_InvalidData(t *testing.T) {
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		{"nil data", nil},
-		{"too short", []byte{0, 0, 0}},
-		{"bad magic", []byte{0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}},
-		{"bad version", []byte{0x42, 0x4C, 0x4F, 0x43, 0x02, 0, 0, 0, 1, 0, 0, 0}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := DecodeTokenEmbeddings(tt.data)
-			if result != nil {
-				t.Fatalf("expected nil for %s, got %v", tt.name, result)
-			}
-		})
-	}
-}
-
-func TestEncodeTokenEmbeddings_Empty(t *testing.T) {
-	result := EncodeTokenEmbeddings(nil)
-	if result != nil {
-		t.Fatalf("expected nil for empty token embeddings, got %v", result)
-	}
-	result = EncodeTokenEmbeddings([][]float32{})
-	if result != nil {
-		t.Fatalf("expected nil for empty slice, got %v", result)
-	}
-}
-
 func TestEnrichWithParentContext(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(filepath.Join(dir, "quant.db"))
@@ -1315,16 +1119,6 @@ func TestReindexDocumentWithDeferredHNSW_NilCallback(t *testing.T) {
 	}
 	if docCount != 1 || chunkCount != 1 {
 		t.Fatalf("expected 1 doc, 1 chunk, got %d docs, %d chunks", docCount, chunkCount)
-	}
-}
-
-func TestFeedbackStore_RecordAutoTimestamp(t *testing.T) {
-	fs := NewFeedbackStore(100)
-
-	fs.Record(FeedbackEvent{Query: "q", DocPath: "a.go"})
-	totalEvents, _ := fs.Stats()
-	if totalEvents != 1 {
-		t.Fatalf("expected 1 event, got %d", totalEvents)
 	}
 }
 
@@ -1673,54 +1467,6 @@ func TestSortByScore(t *testing.T) {
 	}
 }
 
-func TestProjectionLayer_RoundTrip(t *testing.T) {
-	proj := NewRandomProjection(4, 2)
-	if proj.InDims() != 4 {
-		t.Fatalf("expected InDims 4, got %d", proj.InDims())
-	}
-	if proj.OutDims() != 2 {
-		t.Fatalf("expected OutDims 2, got %d", proj.OutDims())
-	}
-
-	encoded := proj.Encode()
-	loaded, err := LoadProjection(encoded)
-	if err != nil {
-		t.Fatalf("LoadProjection() error: %v", err)
-	}
-	if loaded.InDims() != 4 {
-		t.Fatalf("expected loaded InDims 4, got %d", loaded.InDims())
-	}
-	if loaded.OutDims() != 2 {
-		t.Fatalf("expected loaded OutDims 2, got %d", loaded.OutDims())
-	}
-
-	input := []float32{0.5, 0.3, 0.1, -0.2}
-	output := loaded.Project(input)
-	if len(output) != 2 {
-		t.Fatalf("expected 2 output dims, got %d", len(output))
-	}
-}
-
-func TestProjection_LayerProjectWrongDims(t *testing.T) {
-	proj := NewRandomProjection(4, 2)
-	result := proj.Project([]float32{1, 2})
-	if result != nil {
-		t.Fatalf("expected nil for wrong dims, got %v", result)
-	}
-}
-
-func TestLoadProjection_Errors(t *testing.T) {
-	_, err := LoadProjection([]byte{0, 0, 0})
-	if err == nil {
-		t.Fatal("expected error for too-small data")
-	}
-
-	_, err = LoadProjection([]byte{4, 0, 0, 0, 2, 0, 0, 0})
-	if err == nil {
-		t.Fatal("expected error for truncated data")
-	}
-}
-
 func TestVectorSignal_WeightOverride(t *testing.T) {
 	vs := &VectorSignal{WeightOverride: 2.0}
 	if vs.Weight() != 2.0 {
@@ -1749,68 +1495,6 @@ func TestPathMatchSignal_WeightOverride(t *testing.T) {
 	ps := &PathMatchSignal{WeightOverride: 0.5}
 	if ps.Weight() != 0.5 {
 		t.Fatalf("expected 0.5, got %f", ps.Weight())
-	}
-}
-
-func TestColBERT_SearchWithMultipleTokens(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 128})
-	idx.SetReady(true)
-
-	idx.Add(1, [][]float32{{0.5, 0.5}, {0.3, 0.7}})
-	idx.Add(2, [][]float32{{0.1, 0.9}, {0.8, 0.2}})
-
-	results := idx.Search([][]float32{{0.5, 0.5}}, 5)
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
-	}
-}
-
-func TestColBERT_RemoveNonexistent(t *testing.T) {
-	idx := NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 10})
-	idx.Remove(999)
-	if idx.Len() != 0 {
-		t.Fatalf("expected len 0 after removing nonexistent, got %d", idx.Len())
-	}
-}
-
-func TestProjection_SaveAndLoad(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "quant.db"))
-	if err != nil {
-		t.Fatalf("NewStore() error: %v", err)
-	}
-	mustCloseStore(t, store)
-
-	ctx := context.Background()
-	proj := NewRandomProjection(4, 2)
-	if err := store.SaveProjection(ctx, proj); err != nil {
-		t.Fatalf("SaveProjection() error: %v", err)
-	}
-
-	loaded, err := store.LoadProjection(ctx)
-	if err != nil {
-		t.Fatalf("LoadProjection() error: %v", err)
-	}
-	if loaded.InDims() != 4 {
-		t.Fatalf("expected InDims 4, got %d", loaded.InDims())
-	}
-	if loaded.OutDims() != 2 {
-		t.Fatalf("expected OutDims 2, got %d", loaded.OutDims())
-	}
-}
-
-func TestLoadProjection_NotFound(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "quant.db"))
-	if err != nil {
-		t.Fatalf("NewStore() error: %v", err)
-	}
-	mustCloseStore(t, store)
-
-	ctx := context.Background()
-	_, err = store.LoadProjection(ctx)
-	if err == nil {
-		t.Fatal("expected error when no projection exists")
 	}
 }
 
@@ -1870,65 +1554,6 @@ func TestEncodeInt8_Format(t *testing.T) {
 	}
 	if len(encoded) != 8+len(vec) {
 		t.Fatalf("expected %d bytes, got %d", 8+len(vec), len(encoded))
-	}
-}
-
-func TestMigrateEmbeddingsWithProjection(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "quant.db"))
-	if err != nil {
-		t.Fatalf("NewStore() error: %v", err)
-	}
-	mustCloseStore(t, store)
-
-	ctx := context.Background()
-	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "proj-test", Dimensions: 4, Normalized: true}); err != nil {
-		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
-	}
-
-	doc := &Document{Path: "proj/a.txt", Hash: "h1", ModifiedAt: time.Now()}
-	if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{
-		Content:    "projection test content",
-		ChunkIndex: 0,
-		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{1, 0, 0, 0})),
-	}}); err != nil {
-		t.Fatalf("ReindexDocument() error: %v", err)
-	}
-
-	proj := NewRandomProjection(4, 2)
-	if err := store.MigrateEmbeddingsWithProjection(ctx, proj); err != nil {
-		t.Fatalf("MigrateEmbeddingsWithProjection() error: %v", err)
-	}
-
-	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "proj-test", Dimensions: 2, Normalized: true}); err != nil {
-		t.Fatalf("EnsureEmbeddingMetadata() after projection error: %v", err)
-	}
-	docCount, chunkCount, err := store.Stats(ctx)
-	if err != nil {
-		t.Fatalf("Stats() error: %v", err)
-	}
-	if docCount != 1 || chunkCount != 1 {
-		t.Fatalf("projection metadata update should not reset migrated data, got %d docs and %d chunks", docCount, chunkCount)
-	}
-}
-
-func TestMigrateEmbeddingsWithProjection_DimsMismatch(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStore(filepath.Join(dir, "quant.db"))
-	if err != nil {
-		t.Fatalf("NewStore() error: %v", err)
-	}
-	mustCloseStore(t, store)
-
-	ctx := context.Background()
-	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "proj-mismatch", Dimensions: 4, Normalized: true}); err != nil {
-		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
-	}
-
-	proj := NewRandomProjection(8, 2)
-	err = store.MigrateEmbeddingsWithProjection(ctx, proj)
-	if err == nil {
-		t.Fatal("expected error for dims mismatch")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"github.com/koltyakov/quant/internal/chunk"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/logx"
 )
 
 type ContentDedupStore interface {
@@ -48,16 +49,21 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 		key := index.ChunkDiffKey(c.Content)
 		if existingRecord, ok := existing[key]; ok {
 			records = append(records, index.ChunkRecord{
-				Content:    c.Content,
-				ChunkIndex: c.Index,
-				Embedding:  existingRecord.Embedding,
+				Content:      c.Content,
+				ChunkIndex:   c.Index,
+				Embedding:    existingRecord.Embedding,
+				Depth:        c.Depth,
+				SectionTitle: c.SectionTitle,
+				Summary:      existingRecord.Summary,
 			})
 		} else if p.DedupStore != nil {
 			if embedding, found := p.DedupStore.LookupContentDedup(ctx, key); found {
 				records = append(records, index.ChunkRecord{
-					Content:    c.Content,
-					ChunkIndex: c.Index,
-					Embedding:  embedding,
+					Content:      c.Content,
+					ChunkIndex:   c.Index,
+					Embedding:    embedding,
+					Depth:        c.Depth,
+					SectionTitle: c.SectionTitle,
 				})
 			} else {
 				positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
@@ -73,7 +79,7 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 	return records, toEmbed, positions, nil
 }
 
-func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
+func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
 	if len(toEmbed) == 0 {
 		return nil
 	}
@@ -108,7 +114,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 			batch := toEmbed[batchStart:batchEnd]
 			texts := make([]string, len(batch))
 			for i, c := range batch {
-				texts[i] = BuildEmbedInput(docKey, c.Heading, c.Content)
+				texts[i] = BuildEmbedInput(c.Heading, c.Content)
 			}
 			embeddings, err := p.Embedder.EmbedBatch(ctx, texts)
 			select {
@@ -140,7 +146,8 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 			var sumErr error
 			summaries, sumErr = p.Summarizer.SummarizeBatch(ctx, contents)
 			if sumErr != nil {
-				// Log but don't fail indexing on summary errors
+				// Summaries are best-effort; indexing proceeds without them.
+				logx.Warn("chunk summarization failed", "chunks", len(contents), "err", sumErr)
 				summaries = nil
 			}
 		}
@@ -169,7 +176,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, docKey string, toEmbed []chu
 	return ctx.Err()
 }
 
-func BuildEmbedInput(docKey, heading string, content string) string {
+func BuildEmbedInput(heading, content string) string {
 	if heading != "" {
 		return heading + "\n\n" + content
 	}
@@ -194,7 +201,7 @@ func PrepareChunks(text, filePath string, chunkSize int, overlap float64) []chun
 
 func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
 	contentBudget := max(embedContentBudget(c.Heading), 1)
-	if utf8.RuneCountInString(BuildEmbedInput("", c.Heading, c.Content)) <= embed.MaxInputRunes {
+	if utf8.RuneCountInString(BuildEmbedInput(c.Heading, c.Content)) <= embed.MaxInputRunes {
 		return []chunk.Chunk{c}
 	}
 

@@ -151,51 +151,8 @@ func TestSignalRegistryAndHelpers(t *testing.T) {
 	}
 }
 
-func TestFeedbackProfilesAndRerankers(t *testing.T) {
+func TestNoopReranker(t *testing.T) {
 	t.Parallel()
-
-	store := NewFeedbackStore(2)
-	first := FeedbackEvent{DocPath: "docs/a.md", Selected: true, Timestamp: time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)}
-	store.Record(first)
-	store.Record(FeedbackEvent{DocPath: "docs/a.md", Selected: true})
-	store.Record(FeedbackEvent{DocPath: "docs/b.md", Selected: false})
-
-	total, selected := store.Stats()
-	if total != 2 || selected != 1 {
-		t.Fatalf("unexpected stats: total=%d selected=%d", total, selected)
-	}
-	boosts := store.ComputePathBoosts()
-	if len(boosts) != 0 {
-		t.Fatalf("expected no boosts after capacity eviction, got %+v", boosts)
-	}
-
-	store = NewFeedbackStore(10)
-	store.Record(FeedbackEvent{DocPath: "docs/a.md", Selected: true})
-	store.Record(FeedbackEvent{DocPath: "docs/a.md", Selected: true})
-	store.Record(FeedbackEvent{DocPath: "docs/b.md", Selected: true})
-	boosts = store.ComputePathBoosts()
-	if len(boosts) != 1 || boosts[0].Path != "docs/a.md" || boosts[0].Boost != 1 {
-		t.Fatalf("unexpected boosts: %+v", boosts)
-	}
-
-	profile, err := GetWeightProfile("code")
-	if err != nil {
-		t.Fatalf("GetWeightProfile returned error: %v", err)
-	}
-	weights := QuerySignalWeights{Keyword: 1, Vector: 1}
-	profile.ApplyWeights(&weights)
-	if weights.Keyword != ProfileCode.KeywordWeight || weights.Vector != ProfileCode.VectorWeight {
-		t.Fatalf("unexpected applied weights: %+v", weights)
-	}
-	if _, err := GetWeightProfile("missing"); err == nil {
-		t.Fatal("expected unknown profile error")
-	}
-	names := ListWeightProfiles()
-	for _, want := range []string{"balanced", "code", "mixed", "prose"} {
-		if !slices.Contains(names, want) {
-			t.Fatalf("missing weight profile %q in %v", want, names)
-		}
-	}
 
 	noop := &NoopReranker{}
 	input := []SearchResult{{ChunkID: 1, Score: 0.2}, {ChunkID: 2, Score: 0.8}}

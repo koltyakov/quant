@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.14.0 (2026-07-02)
+
+### Features
+
+- **Expanded runtime configuration flags** - Added CLI coverage for PDF OCR timeout, vector fallback candidate limits, and MCP tool concurrency limits, with validation for embedding providers and runtime bounds.
+- **More robust filtered hybrid search** - Vector fallback and HNSW candidate collection now honor metadata filters consistently, including path, file type, language, tags, and collection filters.
+
+### Improvements
+
+- **HNSW graph persistence hardening** - HNSW graph files are validated against stored model metadata, dimensions, and embedded chunk counts before loading; unchanged graphs skip redundant saves and exports are protected against concurrent mutation.
+- **Cleaner index consistency after deletes and rewrites** - Document, prefix, and collection deletion paths now clear stale HNSW state and reload document embeddings so runtime indexes stay aligned with SQLite after mutations.
+- **Safer incremental reindexing** - HNSW updates are deferred until after document transactions commit, and reused chunks preserve depth, section titles, and summaries during deduplication.
+- **Exact tag filtering** - Tag filters now use SQLite JSON matching instead of substring patterns, avoiding wildcard and JSON-escaping false positives.
+- **Embedding input cleanup** - Chunk embedding inputs now use heading and content only, avoiding document-path noise while keeping heading context.
+- **Multibyte truncation fix** - Ollama input truncation now counts rune offsets correctly for multibyte text, preventing over-budget prefixes and panics.
+- **Rate limiter accounting fix** - Embedding rate limiting now treats tokens and concurrency slots separately, so completed requests no longer refund consumed rate-limit tokens.
+- **Client initialization polish** - `quant init` preserves quoted command paths with spaces and emits the current OpenCode `environment` field for auto-update configuration.
+- **Collection delete validation** - Empty collection names are rejected before delete operations in both proxy and store paths.
+
+### Removed
+
+- **Unused experimental ranking components** - Removed dormant ColBERT, feedback boost, weight profile, and projection migration code and tests to simplify the index package around the active hybrid search path.
+
 ## v0.12.1 (2026-05-08)
 
 ### Improvements

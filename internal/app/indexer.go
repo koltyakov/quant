@@ -824,7 +824,7 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		return IndexNoop, err
 	}
 
-	if err := idx.getPipeline().EmbedChunks(ctx, ref.Key, toEmbed, embedPositions, chunkRecords); err != nil {
+	if err := idx.getPipeline().EmbedChunks(ctx, toEmbed, embedPositions, chunkRecords); err != nil {
 		return IndexNoop, err
 	}
 

@@ -134,6 +134,36 @@ func TestDiffChunks_ReusesExisting(t *testing.T) {
 	}
 }
 
+func TestDiffChunks_ReusePreservesMetadata(t *testing.T) {
+	t.Parallel()
+	dedup := newMockDedupStore()
+	dedup.store[index.ChunkDiffKey("beta")] = []byte("dedup-emb")
+	p := &Pipeline{ChunkSize: 100, Overlap: 0.15, DedupStore: dedup}
+	chunks := []chunk.Chunk{
+		{Content: "alpha", Index: 0, Depth: 2, SectionTitle: "Section A"},
+		{Content: "beta", Index: 1, Depth: 1, SectionTitle: "Section B"},
+	}
+	existing := map[string]index.ChunkRecord{
+		index.ChunkDiffKey("alpha"): {Content: "alpha", Embedding: []byte{1, 2, 3}, Summary: "alpha summary"},
+	}
+	records, toEmbed, _, err := p.DiffChunks(context.Background(), chunks, existing)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(toEmbed) != 0 {
+		t.Fatalf("expected 0 to embed, got %d", len(toEmbed))
+	}
+	if records[0].Depth != 2 || records[0].SectionTitle != "Section A" {
+		t.Errorf("reused record lost depth/section title: %+v", records[0])
+	}
+	if records[0].Summary != "alpha summary" {
+		t.Errorf("reused record lost summary, got %q", records[0].Summary)
+	}
+	if records[1].Depth != 1 || records[1].SectionTitle != "Section B" {
+		t.Errorf("dedup record lost depth/section title: %+v", records[1])
+	}
+}
+
 func TestDiffChunks_DedupHit(t *testing.T) {
 	t.Parallel()
 	dedup := newMockDedupStore()
@@ -246,7 +276,7 @@ func TestDiffChunks_MixedExistingAndNew(t *testing.T) {
 func TestEmbedChunks_Empty(t *testing.T) {
 	t.Parallel()
 	p := &Pipeline{Embedder: &mockEmbedder{}}
-	err := p.EmbedChunks(context.Background(), "doc", nil, nil, nil)
+	err := p.EmbedChunks(context.Background(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error for empty embed: %v", err)
 	}
@@ -257,7 +287,7 @@ func TestEmbedChunks_NoEmbedder(t *testing.T) {
 	p := &Pipeline{Embedder: nil}
 	chunks := []chunk.Chunk{{Content: "text", Index: 0}}
 	records := make([]index.ChunkRecord, 1)
-	err := p.EmbedChunks(context.Background(), "doc", chunks, []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}, records)
+	err := p.EmbedChunks(context.Background(), chunks, []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}, records)
 	if err != nil {
 		t.Fatalf("expected no error when no embedder, got %v", err)
 	}
@@ -278,7 +308,7 @@ func TestEmbedChunks_ShortBatch(t *testing.T) {
 		{ChunkIdx: 1, BatchPos: 1},
 	}
 	records := make([]index.ChunkRecord, 2)
-	err := p.EmbedChunks(context.Background(), "key", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -302,7 +332,7 @@ func TestEmbedChunks_WithDepthAndSectionTitle(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -326,7 +356,7 @@ func TestEmbedChunks_WithDedupStore(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -348,7 +378,7 @@ func TestEmbedChunks_DedupStoreError_SilentlyIgnored(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("dedup store error should be silently ignored: %v", err)
 	}
@@ -364,7 +394,7 @@ func TestEmbedChunks_EmbedderError(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err == nil {
 		t.Fatal("expected error from embedder")
 	}
@@ -397,7 +427,7 @@ func TestEmbedChunks_MismatchedEmbeddingCount(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}, {ChunkIdx: 1, BatchPos: 1}}
 	records := make([]index.ChunkRecord, 2)
 
-	err := p.EmbedChunks(ctx, "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(ctx, chunks, positions, records)
 	if err == nil {
 		t.Fatal("expected error for embedding count mismatch")
 	}
@@ -417,7 +447,7 @@ func TestEmbedChunks_WithSummarizer(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -437,7 +467,7 @@ func TestEmbedChunks_SummarizerError_DoesNotFailEmbed(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("summarizer error should not fail embedding: %v", err)
 	}
@@ -456,7 +486,7 @@ func TestEmbedChunks_ContextCancellation(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err == nil {
 		t.Fatal("expected error from context cancellation")
 	}
@@ -470,7 +500,7 @@ func TestEmbedChunks_DefaultBatchSize(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(context.Background(), "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(context.Background(), chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -489,7 +519,7 @@ func TestEmbedChunks_EmbedInputWithHeading(t *testing.T) {
 	positions := []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}
 	records := make([]index.ChunkRecord, 1)
 
-	err := p.EmbedChunks(ctx, "doc.txt", chunks, positions, records)
+	err := p.EmbedChunks(ctx, chunks, positions, records)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -498,17 +528,17 @@ func TestEmbedChunks_EmbedInputWithHeading(t *testing.T) {
 func TestBuildEmbedInput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		docKey, heading, content, want string
+		heading, content, want string
 	}{
-		{"k", "h", "c", "h\n\nc"},
-		{"k", "", "c", "c"},
-		{"", "", "just text", "just text"},
-		{"", "H", "c", "H\n\nc"},
+		{"h", "c", "h\n\nc"},
+		{"", "c", "c"},
+		{"", "just text", "just text"},
+		{"H", "c", "H\n\nc"},
 	}
 	for _, tt := range tests {
-		got := BuildEmbedInput(tt.docKey, tt.heading, tt.content)
+		got := BuildEmbedInput(tt.heading, tt.content)
 		if got != tt.want {
-			t.Errorf("BuildEmbedInput(%q, %q, %q) = %q, want %q", tt.docKey, tt.heading, tt.content, got, tt.want)
+			t.Errorf("BuildEmbedInput(%q, %q) = %q, want %q", tt.heading, tt.content, got, tt.want)
 		}
 	}
 }
@@ -565,7 +595,7 @@ func TestPrepareChunks_RespectsEmbeddingBudget(t *testing.T) {
 		t.Fatalf("expected oversized chunk to be split for embedding budget, got %d chunk(s)", len(chunks))
 	}
 	for i, c := range chunks {
-		input := BuildEmbedInput("doc", c.Heading, c.Content)
+		input := BuildEmbedInput(c.Heading, c.Content)
 		if len([]rune(input)) > embed.MaxInputRunes {
 			t.Fatalf("chunk %d exceeds embedding budget: %d", i, len([]rune(input)))
 		}

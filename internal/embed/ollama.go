@@ -315,7 +315,9 @@ func PrefixWithinInputBudget(text string, maxChars int) (string, int) {
 
 	for _, marker := range []string{"\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "} {
 		if idx := strings.LastIndex(window, marker); idx >= 0 {
-			consumed := windowStart + idx + len([]rune(marker))
+			// idx is a byte offset into window; convert to runes before mixing
+			// with rune-based offsets, or multibyte text overruns the budget.
+			consumed := windowStart + utf8.RuneCountInString(window[:idx]) + len([]rune(marker))
 			candidate := strings.TrimSpace(string(runes[:consumed]))
 			if utf8.RuneCountInString(candidate) >= maxChars/2 {
 				return candidate, consumed

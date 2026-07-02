@@ -20,6 +20,9 @@ type hnswIndex struct {
 	graph *hnsw.Graph[int]
 	ready atomic.Bool
 	mods  atomic.Int64
+	// flushedMods is the mods value at the time of the last successful graph
+	// file save; periodic flushes are skipped while the two are equal.
+	flushedMods atomic.Int64
 }
 
 func newHNSWIndex() *hnswIndex {
@@ -32,6 +35,9 @@ func (h *hnswIndex) modCount() int64 {
 
 func (h *hnswIndex) resetMods() {
 	h.mods.Store(0)
+	// Mark the graph dirty so the next save is never skipped: a rebuilt or
+	// reconstructed graph may not match whatever graph file is on disk.
+	h.flushedMods.Store(-1)
 }
 
 func (h *hnswIndex) Add(id int, vec []float32) {
@@ -228,7 +234,7 @@ func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 	}
 
 	var chunkCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount); err != nil || chunkCount != nodeCount {
+	if err := s.db.QueryRowContext(ctx, embeddedChunkCountQuery).Scan(&chunkCount); err != nil || chunkCount != nodeCount {
 		return false
 	}
 
@@ -283,6 +289,8 @@ func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 	s.hnsw.mu.Unlock()
 	s.hnsw.ready.Store(true)
 	s.hnsw.resetMods()
+	// The in-memory graph came from the file, so the two are in sync.
+	s.hnsw.flushedMods.Store(0)
 	logx.Info("hnsw graph loaded from file", "path", s.hnswGraphPath, "nodes", g.Len())
 	return true
 }
@@ -314,7 +322,7 @@ func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 	}
 
 	var chunkCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkCount); err != nil {
+	if err := s.db.QueryRowContext(ctx, embeddedChunkCountQuery).Scan(&chunkCount); err != nil {
 		return false
 	}
 	if chunkCount != nodeCount {
@@ -364,17 +372,25 @@ func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 const hnswGraphFileMagic uint32 = 0x514E5347 // "QNSG"
 const hnswGraphFileVersion uint32 = 1
 
+// embeddedChunkCountQuery counts only chunks that carry an embedding: chunks
+// indexed during keyword-only fallback have none and are never HNSW nodes, so
+// comparing against the total chunk count would force a rebuild every start.
+const embeddedChunkCountQuery = `SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL AND length(embedding) > 0`
+
 func (s *Store) saveHNSWGraphToFile() error {
 	if s.hnswGraphPath == "" {
 		return nil
 	}
-	s.hnsw.mu.RLock()
-	g := s.hnsw.graph
-	ready := s.hnsw.ready.Load()
-	s.hnsw.mu.RUnlock()
-
-	if !ready || g == nil {
+	if !s.hnsw.ready.Load() {
 		return nil
+	}
+
+	// Skip the export when nothing changed since the last successful save and
+	// the graph file is still on disk.
+	if s.hnsw.flushedMods.Load() == s.hnsw.modCount() {
+		if _, err := os.Stat(s.hnswGraphPath); err == nil {
+			return nil
+		}
 	}
 
 	f, err := os.CreateTemp(filepath.Dir(s.hnswGraphPath), ".quant-hnsw-*")
@@ -394,10 +410,27 @@ func (s *Store) saveHNSWGraphToFile() error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := g.Export(w); err != nil {
+
+	// Hold the read lock for the whole export: BatchAdd/BatchDelete mutate the
+	// graph under the write lock, and exporting concurrently is a data race.
+	s.hnsw.mu.RLock()
+	g := s.hnsw.graph
+	modsAtExport := s.hnsw.modCount()
+	var exportErr error
+	if g != nil {
+		exportErr = g.Export(w)
+	}
+	s.hnsw.mu.RUnlock()
+
+	if g == nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("exporting hnsw graph: %w", err)
+		return nil
+	}
+	if exportErr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("exporting hnsw graph: %w", exportErr)
 	}
 	if err := w.Flush(); err != nil {
 		_ = f.Close()
@@ -412,6 +445,7 @@ func (s *Store) saveHNSWGraphToFile() error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
+	s.hnsw.flushedMods.Store(modsAtExport)
 	return nil
 }
 

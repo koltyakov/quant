@@ -159,7 +159,7 @@ func TestBuildMetadataFilter(t *testing.T) {
 			name:     "tags only",
 			filter:   SearchFilter{Tags: map[string]string{"framework": "react"}},
 			wantIn:   []string{"d.tags"},
-			wantArgs: 1,
+			wantArgs: 2,
 		},
 		{
 			name:     "collection only",
@@ -250,6 +250,61 @@ func TestSearchFiltered_WithFileTypeFilter(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected src/main.go in search results")
+	}
+}
+
+func TestSearchFiltered_WithTagsFilter(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+
+	// doc3 has no tags at all (stored as '') and must not break the filter.
+	doc1 := &Document{Path: "svc/prod.md", Hash: "h1", ModifiedAt: time.Now(), Tags: map[string]string{"env": "prod"}}
+	doc2 := &Document{Path: "svc/dev.md", Hash: "h2", ModifiedAt: time.Now(), Tags: map[string]string{"env": "dev_x"}}
+	doc3 := &Document{Path: "svc/none.md", Hash: "h3", ModifiedAt: time.Now()}
+
+	ids := make([]int64, 0, 3)
+	for _, d := range []*Document{doc1, doc2, doc3} {
+		id, err := store.UpsertDocument(ctx, d)
+		if err != nil {
+			t.Fatalf("UpsertDocument() error = %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	embedding := NormalizeFloat32([]float32{1})
+	for _, id := range ids {
+		if err := store.InsertChunk(ctx, &ChunkRecord{DocumentID: id, Content: "deployment environment notes", ChunkIndex: 0, Embedding: EncodeFloat32(embedding)}); err != nil {
+			t.Fatalf("InsertChunk() error = %v", err)
+		}
+	}
+
+	results, err := store.SearchFiltered(ctx, "deployment", embedding, 10, "", SearchFilter{Tags: map[string]string{"env": "prod"}})
+	if err != nil {
+		t.Fatalf("SearchFiltered() error = %v", err)
+	}
+	for _, r := range results {
+		if r.DocumentPath != "svc/prod.md" {
+			t.Fatalf("expected only svc/prod.md, got %q", r.DocumentPath)
+		}
+	}
+	if len(results) == 0 {
+		t.Fatal("expected svc/prod.md in search results")
+	}
+
+	// LIKE wildcards in the tag value must be matched literally: "env_%" is
+	// not a tag on any document and must return nothing.
+	results, err = store.SearchFiltered(ctx, "deployment", embedding, 10, "", SearchFilter{Tags: map[string]string{"env": "env_%"}})
+	if err != nil {
+		t.Fatalf("SearchFiltered() error = %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected no results for wildcard tag value, got %d", len(results))
 	}
 }
 

@@ -107,6 +107,29 @@ func TestPrefixWithinInputBudget_ReturnsConsumedRunes(t *testing.T) {
 	}
 }
 
+func TestPrefixWithinInputBudget_MultibyteRespectsBudget(t *testing.T) {
+	// Two-byte runes with word boundaries: byte offsets diverge from rune
+	// offsets inside the boundary-search window.
+	text := strings.Repeat("привет ", 600) // 4200 runes
+	prefix, consumed := PrefixWithinInputBudget(text, MaxInputRunes)
+	if n := len([]rune(prefix)); n > MaxInputRunes {
+		t.Fatalf("expected prefix to fit budget %d, got %d runes", MaxInputRunes, n)
+	}
+	if consumed <= 0 || consumed > len([]rune(text)) {
+		t.Fatalf("expected consumed runes within bounds, got %d", consumed)
+	}
+}
+
+func TestPrefixWithinInputBudget_MultibyteDoesNotPanic(t *testing.T) {
+	// Three-byte runes just over the budget used to push the computed cut
+	// point past the end of the rune slice and panic.
+	text := strings.Repeat("你好世界这是测试 ", 445) + "尾" // 4006 runes
+	prefix, _ := PrefixWithinInputBudget(text, MaxInputRunes)
+	if n := len([]rune(prefix)); n > MaxInputRunes {
+		t.Fatalf("expected prefix to fit budget %d, got %d runes", MaxInputRunes, n)
+	}
+}
+
 func TestOllamaEmbedBatchValidatesResponseCount(t *testing.T) {
 	o := &Ollama{
 		baseURL: "http://ollama.test",

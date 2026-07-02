@@ -383,7 +383,7 @@ func indexFiles(t *testing.T, store *index.Store, extractor extract.Extractor, p
 			_ = c
 		}
 
-		if err := pipeline.EmbedChunks(ctx, relPath, toEmbed, positions, records); err != nil {
+		if err := pipeline.EmbedChunks(ctx, toEmbed, positions, records); err != nil {
 			t.Fatalf("embedding chunks for %s: %v", relPath, err)
 		}
 

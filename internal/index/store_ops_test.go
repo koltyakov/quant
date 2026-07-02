@@ -110,26 +110,6 @@ func TestStoreChunkLookupCollectionsAndQuarantine(t *testing.T) {
 		t.Fatal("expected HNSW reoptimization to be needed after mutations")
 	}
 
-	store.colbert = NewColBERTIndex(ColBERTConfig{Enabled: true, MaxTokens: 4})
-	store.colbert.SetReady(true)
-	store.colbert.Add(int(firstChunk.ID), [][]float32{{1, 0}})
-	for key, chunk := range chunks {
-		if key == ChunkDiffKey(firstChunk.Content) {
-			continue
-		}
-		store.colbert.Add(int(chunk.ID), [][]float32{{0.8, 0.2}})
-	}
-	colbertResults, err := store.SearchColBERT(ctx, [][]float32{{1, 0}}, 2)
-	if err != nil {
-		t.Fatalf("SearchColBERT returned error: %v", err)
-	}
-	if len(colbertResults) == 0 || colbertResults[0].ChunkID != firstChunk.ID {
-		t.Fatalf("unexpected ColBERT results: %+v", colbertResults)
-	}
-	if joined := joinInts([]int{1, 2, 3}, ","); joined != "1,2,3" {
-		t.Fatalf("unexpected joinInts result: %q", joined)
-	}
-
 	collections, err := store.ListCollections(ctx)
 	if err != nil {
 		t.Fatalf("ListCollections returned error: %v", err)

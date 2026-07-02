@@ -273,10 +273,12 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 		conds = append(conds, "d.language IN ("+strings.Join(placeholders, ",")+")")
 	}
 
+	// Tags are stored as a JSON object ('' when absent). json_each matches
+	// key/value pairs exactly, unlike a substring LIKE which is confused by
+	// wildcard characters and JSON escaping.
 	for k, v := range filter.Tags {
-		conds = append(conds, `d.tags LIKE ?`)
-		pattern := `%"` + k + `":"` + v + `"%`
-		args = append(args, pattern)
+		conds = append(conds, `(json_valid(d.tags) AND EXISTS (SELECT 1 FROM json_each(d.tags) WHERE json_each.key = ? AND json_each.value = ?))`)
+		args = append(args, k, v)
 	}
 
 	if filter.Collection != "" {
@@ -442,6 +444,7 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 
 	filterRows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		logx.Warn("filtered vector search: candidate query failed; returning keyword-only results", "err", err)
 		return
 	}
 	filterSet := make(map[int]bool)
@@ -452,7 +455,8 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 		}
 	}
 	_ = filterRows.Close()
-	if filterRows.Err() != nil {
+	if rowsErr := filterRows.Err(); rowsErr != nil {
+		logx.Warn("filtered vector search: candidate scan failed; returning keyword-only results", "err", rowsErr)
 		return
 	}
 	if len(filterSet) == 0 {
@@ -506,11 +510,13 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		logx.Warn("vector search: loading hnsw candidate chunks failed", "err", err)
 		return
 	}
 	defer func() { _ = rows.Close() }()
 
 	if _, err := s.scanVectorRowsWithDocFilter(rows, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter); err != nil {
+		logx.Warn("vector search: scanning hnsw candidate chunks failed", "err", err)
 		return
 	}
 }
