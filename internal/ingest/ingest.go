@@ -83,8 +83,27 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 	if len(toEmbed) == 0 {
 		return nil
 	}
+	if len(positions) != len(toEmbed) {
+		return fmt.Errorf("embedding %d chunks with %d positions", len(toEmbed), len(positions))
+	}
+	for _, position := range positions {
+		if position.ChunkIdx < 0 || position.ChunkIdx >= len(records) {
+			return fmt.Errorf("embedding chunk position %d outside %d records", position.ChunkIdx, len(records))
+		}
+	}
 	if p.Embedder == nil {
 		// No embedding backend available; chunks are stored keyword-searchable only.
+		for _, c := range toEmbed {
+			globalIdx := positions[0].ChunkIdx
+			positions = positions[1:]
+			records[globalIdx] = index.ChunkRecord{
+				Content:      c.Content,
+				ChunkIndex:   c.Index,
+				Embedding:    []byte{},
+				Depth:        c.Depth,
+				SectionTitle: c.SectionTitle,
+			}
+		}
 		return nil
 	}
 

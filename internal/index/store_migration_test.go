@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +99,96 @@ func TestMigrate_OldSchemaToNew(t *testing.T) {
 	}
 	if doc.Collection != "testcol" {
 		t.Fatalf("expected collection 'testcol', got %q", doc.Collection)
+	}
+}
+
+func TestNewStore_DoesNotRecoverArbitraryOpenFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	if err := os.Mkdir(dbPath, 0750); err != nil {
+		t.Fatalf("Mkdir(database path): %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("NewStore() unexpectedly succeeded for a directory path")
+	}
+	info, statErr := os.Stat(dbPath)
+	if statErr != nil {
+		t.Fatalf("database path was removed: %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("database path was destructively replaced: mode=%v", info.Mode())
+	}
+	if _, statErr := os.Stat(dbPath + ".bak"); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected backup after non-recoverable open failure: %v", statErr)
+	}
+}
+
+func TestNewStore_RecoversSchemaIncompatibility(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE VIEW documents AS SELECT 1 AS id`); err != nil {
+		t.Fatalf("create incompatible schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close incompatible database: %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() recovery error: %v", err)
+	}
+	mustCloseStore(t, store)
+	if store.backup != dbPath+".bak" {
+		t.Fatalf("backup path = %q, want %q", store.backup, dbPath+".bak")
+	}
+	if _, err := os.Stat(store.backup); err != nil {
+		t.Fatalf("stat recovered backup: %v", err)
+	}
+	if _, _, err := store.Stats(context.Background()); err != nil {
+		t.Fatalf("fresh store Stats() error: %v", err)
+	}
+}
+
+func TestNewStore_ReturnsBackupRemovalError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	original := []byte("not a sqlite database")
+	if err := os.WriteFile(dbPath, original, 0600); err != nil {
+		t.Fatalf("WriteFile(database): %v", err)
+	}
+	if err := os.Mkdir(dbPath+".bak", 0750); err != nil {
+		t.Fatalf("Mkdir(stale backup): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dbPath+".bak", "keep"), []byte("keep"), 0600); err != nil {
+		t.Fatalf("WriteFile(stale backup content): %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("NewStore() unexpectedly ignored stale backup removal failure")
+	}
+	if !strings.Contains(err.Error(), "removing stale backup") {
+		t.Fatalf("NewStore() error = %v, want stale backup removal context", err)
+	}
+	got, readErr := os.ReadFile(dbPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(original database): %v", readErr)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("original database changed: got %q, want %q", got, original)
+	}
+}
+
+func TestBackupStoreFiles_ReturnsRenameError(t *testing.T) {
+	dir := t.TempDir()
+	err := backupStoreFiles(filepath.Join(dir, "missing.db"), filepath.Join(dir, "backup.db"))
+	if err == nil || !strings.Contains(err.Error(), "renaming") {
+		t.Fatalf("backupStoreFiles() error = %v, want rename error", err)
 	}
 }
 
@@ -389,6 +481,10 @@ func TestEnsureEmbeddingMetadata_DifferentMetaTriggersReset(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertChunk() error: %v", err)
 	}
+	dedupHash := ChunkDiffKey("before meta change")
+	if err := store.StoreContentDedup(ctx, dedupHash, EncodeFloat32([]float32{1})); err != nil {
+		t.Fatalf("StoreContentDedup() error: %v", err)
+	}
 
 	meta1 := EmbeddingMetadata{Model: "model-a", Dimensions: 2, Normalized: true}
 	_, err = store.EnsureEmbeddingMetadata(ctx, meta1)
@@ -411,6 +507,9 @@ func TestEnsureEmbeddingMetadata_DifferentMetaTriggersReset(t *testing.T) {
 	}
 	if docCount != 0 || chunkCount != 0 {
 		t.Fatalf("expected 0 docs, 0 chunks after reset, got %d, %d", docCount, chunkCount)
+	}
+	if _, found := store.LookupContentDedup(ctx, dedupHash); found {
+		t.Fatal("expected embedding metadata reset to invalidate content dedup")
 	}
 }
 

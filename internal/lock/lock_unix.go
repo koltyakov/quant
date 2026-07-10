@@ -45,6 +45,10 @@ func (l *unixLockFile) writeInfo(info LockInfo) error {
 	return nil
 }
 
+func (l *unixLockFile) clearInfo() error {
+	return syscall.Ftruncate(l.fd, 0)
+}
+
 func (l *unixLockFile) close() error {
 	return syscall.Close(l.fd)
 }

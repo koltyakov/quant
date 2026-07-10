@@ -692,8 +692,8 @@ func TestTransport_Constants(t *testing.T) {
 
 func TestDefault_Values(t *testing.T) {
 	cfg := Default()
-	if cfg.ListenAddr != ":8080" {
-		t.Errorf("expected :8080, got %s", cfg.ListenAddr)
+	if cfg.ListenAddr != "127.0.0.1:8080" {
+		t.Errorf("expected 127.0.0.1:8080, got %s", cfg.ListenAddr)
 	}
 	if cfg.EmbedURL != "http://localhost:11434" {
 		t.Errorf("expected http://localhost:11434, got %s", cfg.EmbedURL)

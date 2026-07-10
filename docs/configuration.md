@@ -11,7 +11,7 @@ All flags apply to `quant mcp`.
 | `--dir` | current working directory | Directory to watch and index |
 | `--db` | `<dir>/.index/quant.db` | SQLite database path |
 | `--transport` | `stdio` | MCP transport: `stdio`, `sse`, `http` |
-| `--listen` | `:8080` | Listen address for SSE/HTTP transport |
+| `--listen` | `127.0.0.1:8080` | Listen address for SSE/HTTP transport |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
 | `--embed-model` | `nomic-embed-text` | Embedding model name |
 | `--embed-provider` | auto-detected | Embedding backend: `ollama` or `openai`. Auto-detected from URL when not set. |
@@ -123,7 +123,7 @@ Pass a config file with `--config <path>`. Relative paths in the file are resolv
 dir: ./my-project
 db: ./.index/quant.db
 transport: stdio
-listen: ":8080"
+listen: "127.0.0.1:8080"
 embed_url: http://localhost:11434
 embed_model: nomic-embed-text
 embed_provider: ollama   # ollama (default) or openai
@@ -144,6 +144,8 @@ exclude:
   - "vendor/**"
   - "node_modules/**"
 ```
+
+SSE and HTTP transports do not provide request authentication. The default listen address is loopback-only; binding to a non-loopback address exposes the MCP endpoint to that network and should only be done behind an authenticated, trusted proxy or equivalent access control. This does not affect the default `stdio` transport.
 
 ### Include/exclude patterns
 

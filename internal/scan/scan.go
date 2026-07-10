@@ -51,6 +51,10 @@ func Walk(dir string, gi *ignore.GitIgnore, visit Visitor) error {
 			return nil
 		}
 
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+
 		if d.IsDir() {
 			if path == dir {
 				return nil

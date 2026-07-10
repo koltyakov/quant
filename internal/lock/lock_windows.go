@@ -19,7 +19,7 @@ func openLockFile(path string) (lockFile, error) {
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
-		windows.CREATE_ALWAYS,
+		windows.OPEN_ALWAYS,
 		windows.FILE_ATTRIBUTE_NORMAL,
 		0,
 	)
@@ -48,10 +48,18 @@ func (l *windowsLockFile) writeInfo(info LockInfo) error {
 	if err != nil {
 		return err
 	}
-	var overlapped windows.Overlapped
-	overlapped.Offset = 0
+	if _, err := windows.SetFilePointer(l.handle, 0, nil, windows.FILE_BEGIN); err != nil {
+		return err
+	}
 	var written uint32
-	if err := windows.WriteFile(l.handle, data, &written, &overlapped); err != nil {
+	if err := windows.WriteFile(l.handle, data, &written, nil); err != nil {
+		return err
+	}
+	return windows.SetEndOfFile(l.handle)
+}
+
+func (l *windowsLockFile) clearInfo() error {
+	if _, err := windows.SetFilePointer(l.handle, 0, nil, windows.FILE_BEGIN); err != nil {
 		return err
 	}
 	return windows.SetEndOfFile(l.handle)

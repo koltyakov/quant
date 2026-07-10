@@ -51,6 +51,42 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 	}
 }
 
+func TestScan_SkipsSymlinkEntries(t *testing.T) {
+	dir := t.TempDir()
+	externalDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "regular.txt"), "regular")
+	mustWriteFile(t, filepath.Join(dir, "target.txt"), "internal")
+	mustWriteFile(t, filepath.Join(externalDir, "secret.txt"), "external")
+
+	for link, target := range map[string]string{
+		"internal-link.txt": filepath.Join(dir, "target.txt"),
+		"external-link.txt": filepath.Join(externalDir, "secret.txt"),
+		"external-dir":      externalDir,
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+
+	results, err := Scan(dir, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	paths := make(map[string]bool, len(results))
+	for _, result := range results {
+		paths[filepath.Base(result.Path)] = true
+	}
+	if !paths["regular.txt"] || !paths["target.txt"] {
+		t.Fatalf("expected regular files to be indexed, got %v", paths)
+	}
+	for _, link := range []string{"internal-link.txt", "external-link.txt", "external-dir"} {
+		if paths[link] {
+			t.Errorf("expected symlink %s to be skipped", link)
+		}
+	}
+}
+
 func TestScan_GitIgnore(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".gitignore"), "*.log\nbuild/\n")

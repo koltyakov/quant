@@ -175,7 +175,7 @@ The `contextFileName` field tells Gemini CLI to load `AGENTS.md` as system conte
 When using `sse` or `http`, start `quant` with `--transport` and `--listen`:
 
 ```bash
-quant mcp --dir ./my-project --transport sse --listen :9090
+quant mcp --dir ./my-project --transport sse --listen 127.0.0.1:9090
 ```
 
 ### Endpoints

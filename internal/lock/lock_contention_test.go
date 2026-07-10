@@ -4,11 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
-func TestStealLock(t *testing.T) {
+func TestTryAcquireReusesUnlockedLockFile(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := LockPath(dir)
 	lockDir := filepath.Dir(lockPath)
@@ -26,9 +25,9 @@ func TestStealLock(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	lk, err := stealLock(lockPath, dir, "new-instance", "new-addr")
+	lk, err := TryAcquire(dir, "new-instance", "new-addr")
 	if err != nil {
-		t.Fatalf("stealLock() error = %v", err)
+		t.Fatalf("TryAcquire() error = %v", err)
 	}
 	t.Cleanup(func() { _ = lk.Release() })
 
@@ -64,11 +63,7 @@ func TestIsStale_ZeroPID(t *testing.T) {
 	}
 }
 
-func TestTryAcquire_StealsStaleLock(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("lock stealing not supported on windows")
-	}
-
+func TestTryAcquire_ReusesStaleLockFile(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := LockPath(dir)
 	lockDir := filepath.Dir(lockPath)

@@ -220,6 +220,66 @@ func TestProcessLiveIndexRequestDirect_Indexes(t *testing.T) {
 	}
 }
 
+func TestIndexer_KeywordOnlyPersistsMetadataAndSupportsFilters(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "main.go")
+	writeFile(t, path, "package main\n\n// KeywordOnlySentinel is searchable.\nfunc KeywordOnlySentinel() {}")
+
+	store, err := index.NewStore(filepath.Join(root, "index.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	idx := newTestIndexer(root, store, extract.NewRouter(), nil)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+	if action, err := idx.IndexFile(context.Background(), path, info.ModTime()); err != nil || action != IndexUpdated {
+		t.Fatalf("IndexFile() = %q, %v; want %q, nil", action, err, IndexUpdated)
+	}
+
+	doc, err := store.GetDocumentByPath(context.Background(), "main.go")
+	if err != nil {
+		t.Fatalf("GetDocumentByPath() error: %v", err)
+	}
+	if doc == nil || doc.FileType != "go" || doc.Language != "go" {
+		t.Fatalf("persisted document metadata mismatch: %+v", doc)
+	}
+	chunks, err := store.GetDocumentChunksByPath(context.Background(), "main.go")
+	if err != nil {
+		t.Fatalf("GetDocumentChunksByPath() error: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected one persisted chunk, got %d", len(chunks))
+	}
+	for _, record := range chunks {
+		// ReindexDocument succeeding proves the empty embedding satisfied the
+		// database's NOT NULL constraint; SQLite scans an empty blob as nil.
+		if record.Content == "" || record.ChunkIndex != 0 || len(record.Embedding) != 0 {
+			t.Fatalf("persisted keyword-only chunk mismatch: %+v, embedding=%#v", record, record.Embedding)
+		}
+	}
+
+	results, err := store.SearchFiltered(context.Background(), "KeywordOnlySentinel", nil, 10, "", index.SearchFilter{
+		FileTypes: []string{"go"}, Languages: []string{"go"},
+	})
+	if err != nil {
+		t.Fatalf("SearchFiltered() error: %v", err)
+	}
+	if len(results) != 1 || results[0].DocumentPath != "main.go" {
+		t.Fatalf("filtered keyword search results mismatch: %+v", results)
+	}
+}
+
+func TestDocumentMetadata_NonCodeHasNoLanguage(t *testing.T) {
+	fileType, language := documentMetadata("guide.pdf")
+	if fileType != "pdf" || language != "" {
+		t.Fatalf("documentMetadata() = %q, %q; want %q, empty", fileType, language, "pdf")
+	}
+}
+
 func TestProcessLiveIndexRequestDirect_FileNotFound(t *testing.T) {
 	root := t.TempDir()
 	store := &trackingDocumentStore{}

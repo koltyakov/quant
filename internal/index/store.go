@@ -13,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/hnsw"
 	"github.com/koltyakov/quant/internal/logx"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Store is a SQLite-backed index holding documents, chunks, embeddings, and an HNSW graph for vector search.
@@ -57,20 +59,20 @@ func NewStore(dbPath string) (*Store, error) {
 	if err == nil {
 		return s, nil
 	}
-
-	// If the file doesn't exist the error is not recoverable by recreating.
-	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+	if !isRecoverableStoreError(err) {
 		return nil, err
+	}
+
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("stating database before recovery: %w", statErr))
 	}
 
 	// Back up the broken DB and start fresh.
 	backupPath := dbPath + ".bak"
 	logx.Warn("migration failed; backing up existing database", "backup_path", backupPath, "err", err)
 
-	// Remove stale backup if present, then rename current DB + WAL/SHM files.
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		_ = os.Remove(backupPath + suffix)
-		_ = os.Rename(dbPath+suffix, backupPath+suffix)
+	if err := backupStoreFiles(dbPath, backupPath); err != nil {
+		return nil, fmt.Errorf("backing up database after migration failure: %w", err)
 	}
 
 	s, err = openStore(dbPath)
@@ -79,6 +81,47 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 	s.backup = backupPath
 	return s, nil
+}
+
+func isRecoverableStoreError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+
+	switch sqliteErr.Code() & 0xff {
+	case sqlite3.SQLITE_ERROR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_SCHEMA, sqlite3.SQLITE_NOTADB:
+		return true
+	default:
+		return false
+	}
+}
+
+func backupStoreFiles(dbPath, backupPath string) error {
+	suffixes := []string{"", "-wal", "-shm"}
+	for _, suffix := range suffixes {
+		if err := os.Remove(backupPath + suffix); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale backup %q: %w", backupPath+suffix, err)
+		}
+	}
+	renamed := make([]string, 0, len(suffixes))
+	for _, suffix := range suffixes {
+		if err := os.Rename(dbPath+suffix, backupPath+suffix); err != nil {
+			if suffix != "" && os.IsNotExist(err) {
+				continue
+			}
+			backupErr := fmt.Errorf("renaming %q to %q: %w", dbPath+suffix, backupPath+suffix, err)
+			for i := len(renamed) - 1; i >= 0; i-- {
+				movedSuffix := renamed[i]
+				if rollbackErr := os.Rename(backupPath+movedSuffix, dbPath+movedSuffix); rollbackErr != nil {
+					backupErr = errors.Join(backupErr, fmt.Errorf("restoring %q: %w", dbPath+movedSuffix, rollbackErr))
+				}
+			}
+			return backupErr
+		}
+		renamed = append(renamed, suffix)
+	}
+	return nil
 }
 
 // RemoveBackup deletes the backup created during NewStore, if any.
@@ -1110,24 +1153,30 @@ func (s *Store) GetParentChunk(ctx context.Context, chunkID int64) (*SearchResul
 }
 
 func (s *Store) EnrichWithParentContext(ctx context.Context, results []SearchResult) []SearchResult {
-	needsParent := make(map[int64]int)
+	needsParent := make(map[int64][]int)
 	for i, r := range results {
 		if r.ParentID != nil && r.ParentContext == "" {
-			needsParent[*r.ParentID] = i
+			needsParent[*r.ParentID] = append(needsParent[*r.ParentID], i)
 		}
 	}
 	if len(needsParent) == 0 {
 		return results
 	}
 
-	for parentID, resultIdx := range needsParent {
+	for parentID, resultIndexes := range needsParent {
 		parent, err := s.GetChunkByID(ctx, parentID)
 		if err == nil && parent != nil {
 			content := parent.ChunkContent
 			if len(content) > 500 {
-				content = content[:500] + "..."
+				end := 500
+				for end > 0 && !utf8.RuneStart(content[end]) {
+					end--
+				}
+				content = content[:end] + "..."
 			}
-			results[resultIdx].ParentContext = content
+			for _, resultIdx := range resultIndexes {
+				results[resultIdx].ParentContext = content
+			}
 		}
 	}
 	return results

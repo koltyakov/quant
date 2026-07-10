@@ -73,7 +73,7 @@ type Config struct {
 func Default() *Config {
 	return &Config{
 		Transport:      TransportStdio,
-		ListenAddr:     ":8080",
+		ListenAddr:     "127.0.0.1:8080",
 		EmbedURL:       "http://localhost:11434",
 		EmbedModel:     "nomic-embed-text",
 		LLMURL:         "http://localhost:11434",

@@ -1,9 +1,38 @@
 package index
 
 import (
+	"path/filepath"
 	"strings"
 	"unicode"
 )
+
+var fileTypeExtensions = map[string]string{
+	"go": ".go", "python": ".py", "py": ".py",
+	"javascript": ".js", "js": ".js", "typescript": ".ts", "ts": ".ts",
+	"rust": ".rs", "rs": ".rs", "java": ".java",
+	"ruby": ".rb", "rb": ".rb", "cpp": ".cpp", "c": ".c",
+	"swift": ".swift", "kotlin": ".kt", "kt": ".kt",
+	"markdown": ".md", "md": ".md",
+}
+
+var canonicalFileTypes = func() map[string]string {
+	types := make(map[string]string, len(fileTypeExtensions))
+	for name, ext := range fileTypeExtensions {
+		if _, exists := types[ext]; !exists || len(name) > len(types[ext]) {
+			types[ext] = name
+		}
+	}
+	return types
+}()
+
+// DocumentFileType returns the canonical filter value for a file path.
+func DocumentFileType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if fileType := canonicalFileTypes[ext]; fileType != "" {
+		return fileType
+	}
+	return strings.TrimPrefix(ext, ".")
+}
 
 // QueryAnalysis captures the parsed structure and inferred intent of a search query.
 type QueryAnalysis struct {
@@ -85,20 +114,11 @@ func isIdentifierToken(token string) bool {
 }
 
 func extractFileTypeFilters(tokens []string) []string {
-	extMap := map[string]string{
-		"go": ".go", "python": ".py", "py": ".py",
-		"javascript": ".js", "js": ".js", "typescript": ".ts", "ts": ".ts",
-		"rust": ".rs", "rs": ".rs", "java": ".java",
-		"ruby": ".rb", "rb": ".rb", "cpp": ".cpp", "c": ".c",
-		"swift": ".swift", "kotlin": ".kt", "kt": ".kt",
-		"markdown": ".md", "md": ".md",
-	}
-
 	var filters []string
 	seen := make(map[string]bool)
 	for _, tok := range tokens {
 		lower := strings.ToLower(strings.TrimSuffix(strings.TrimSuffix(tok, ","), "."))
-		if ext, ok := extMap[lower]; ok && !seen[ext] {
+		if ext, ok := fileTypeExtensions[lower]; ok && !seen[ext] {
 			seen[ext] = true
 			filters = append(filters, ext)
 		}

@@ -37,6 +37,12 @@ func TestHelperLockHolder(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "write: %v\n", err)
 		os.Exit(1)
 	}
+	if os.Getenv("LOCK_METADATA") == "corrupt" {
+		if err := os.WriteFile(lockPath, []byte("not json"), lockFileMode); err != nil {
+			fmt.Fprintf(os.Stderr, "corrupt metadata: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	fmt.Println("READY")
 	select {}
 }
@@ -88,7 +94,45 @@ func TestTryAcquire_HeldByAnotherProcess(t *testing.T) {
 	}
 }
 
-func TestStealLock_StaleLock(t *testing.T) {
+func TestTryAcquire_CorruptedMetadataHeldByAnotherProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix inode lock regression test")
+	}
+
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperLockHolder$")
+	cmd.Env = append(os.Environ(), "LOCK_HELPER=hold", "LOCK_DIR="+dir, "LOCK_METADATA=corrupt")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() {
+		t.Fatal("helper did not produce output")
+	}
+
+	_, err = TryAcquire(dir, "competing", "competing:9000")
+	if !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("TryAcquire() error = %v, want ErrLockHeld", err)
+	}
+	data, err := os.ReadFile(LockPath(dir))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "not json" {
+		t.Fatalf("lock metadata = %q, want unchanged corrupted metadata", data)
+	}
+}
+
+func TestTryAcquire_ExistingUnlockedLock(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -107,9 +151,9 @@ func TestStealLock_StaleLock(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	lk, err := stealLock(lockPath, dir, "fresh", "fresh:9000")
+	lk, err := TryAcquire(dir, "fresh", "fresh:9000")
 	if err != nil {
-		t.Fatalf("stealLock() error = %v", err)
+		t.Fatalf("TryAcquire() error = %v", err)
 	}
 	t.Cleanup(func() { _ = lk.Release() })
 
@@ -213,8 +257,12 @@ func TestLock_Release(t *testing.T) {
 		t.Fatalf("Release() error = %v", err)
 	}
 
-	if _, err := os.Stat(LockPath(dir)); !os.IsNotExist(err) {
-		t.Fatal("lock file still exists after release")
+	stat, err := os.Stat(LockPath(dir))
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if stat.Size() != 0 {
+		t.Fatalf("lock file size = %d, want 0", stat.Size())
 	}
 
 	if err := lk.Release(); err != nil {

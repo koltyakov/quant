@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/koltyakov/quant/internal/chunk"
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/embed"
 	"github.com/koltyakov/quant/internal/extract"
@@ -828,10 +829,13 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		return IndexNoop, err
 	}
 
+	fileType, language := documentMetadata(ref.AbsPath)
 	indexedDoc := &index.Document{
 		Path:       ref.Key,
 		Hash:       hash,
 		ModifiedAt: modTime,
+		FileType:   fileType,
+		Language:   language,
 	}
 
 	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
@@ -839,6 +843,21 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 	}
 
 	return IndexUpdated, nil
+}
+
+func documentMetadata(path string) (fileType, language string) {
+	fileType = index.DocumentFileType(path)
+	if chunker := chunk.DefaultRegistry.Get(path); chunker != nil {
+		name := chunker.Name()
+		switch name {
+		case "generic", "semantic":
+		case "code":
+			language = fileType
+		default:
+			language = name
+		}
+	}
+	return fileType, language
 }
 
 func (idx *Indexer) shouldIgnorePath(path string) bool {

@@ -3,8 +3,10 @@ package index
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestGetParentChunk(t *testing.T) {
@@ -104,6 +106,54 @@ func TestGetParentChunk_NonexistentChunk(t *testing.T) {
 	result, _ := store.GetParentChunk(ctx, 999999)
 	if result != nil {
 		t.Fatal("expected nil for nonexistent chunk")
+	}
+}
+
+func TestEnrichWithParentContext_SharedParentAndUTF8Truncation(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	docID, err := store.UpsertDocument(ctx, &Document{
+		Path: "parent/shared.txt", Hash: "h1", ModifiedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertDocument() error: %v", err)
+	}
+	parentContent := strings.Repeat("a", 498) + "€tail"
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: docID, Content: parentContent, ChunkIndex: 0, Embedding: EncodeFloat32([]float32{1}),
+	}); err != nil {
+		t.Fatalf("InsertChunk(parent) error: %v", err)
+	}
+	chunks, err := store.GetDocumentChunksByPath(ctx, "parent/shared.txt")
+	if err != nil {
+		t.Fatalf("GetDocumentChunksByPath() error: %v", err)
+	}
+	var parentID int64
+	for _, chunk := range chunks {
+		parentID = chunk.ID
+	}
+
+	results := store.EnrichWithParentContext(ctx, []SearchResult{
+		{ChunkID: 101, ParentID: &parentID},
+		{ChunkID: 102, ParentID: &parentID},
+		{ChunkID: 103, ParentID: &parentID, ParentContext: "already set"},
+	})
+	want := strings.Repeat("a", 498) + "..."
+	for i := 0; i < 2; i++ {
+		if results[i].ParentContext != want {
+			t.Fatalf("result %d parent context = %q, want %q", i, results[i].ParentContext, want)
+		}
+		if !utf8.ValidString(results[i].ParentContext) {
+			t.Fatalf("result %d parent context is invalid UTF-8", i)
+		}
+	}
+	if results[2].ParentContext != "already set" {
+		t.Fatalf("existing parent context was overwritten: %q", results[2].ParentContext)
 	}
 }
 

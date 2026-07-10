@@ -29,8 +29,6 @@ type LockInfo struct {
 }
 
 type Lock struct {
-	dir        string
-	lockPath   string
 	instanceID string
 	info       LockInfo
 
@@ -56,11 +54,7 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	if err := lf.tryLock(); err != nil {
-		existing, readErr := readLockInfo(lockPath)
 		_ = lf.close()
-		if readErr != nil || isStale(existing) {
-			return stealLock(lockPath, dir, instanceID, proxyAddr)
-		}
 		return nil, ErrLockHeld
 	}
 
@@ -77,8 +71,6 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	l := &Lock{
-		dir:        dir,
-		lockPath:   lockPath,
 		instanceID: instanceID,
 		info:       info,
 		lf:         lf,
@@ -86,43 +78,6 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	logx.Info("acquired main lock", "instance", instanceID, "pid", os.Getpid(), "proxy", proxyAddr)
-	return l, nil
-}
-
-func stealLock(lockPath, dir, instanceID, proxyAddr string) (*Lock, error) {
-	_ = os.Remove(lockPath)
-	lf, err := openLockFile(lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening lock file for steal: %w", err)
-	}
-
-	if err := lf.tryLock(); err != nil {
-		_ = lf.close()
-		return nil, ErrLockHeld
-	}
-
-	info := LockInfo{
-		InstanceID: instanceID,
-		PID:        os.Getpid(),
-		ProxyAddr:  proxyAddr,
-	}
-
-	if err := lf.writeInfo(info); err != nil {
-		_ = lf.unlock()
-		_ = lf.close()
-		return nil, fmt.Errorf("writing lock file: %w", err)
-	}
-
-	l := &Lock{
-		dir:        dir,
-		lockPath:   lockPath,
-		instanceID: instanceID,
-		info:       info,
-		lf:         lf,
-		held:       true,
-	}
-
-	logx.Info("stole stale lock", "instance", instanceID, "pid", os.Getpid(), "proxy", proxyAddr)
 	return l, nil
 }
 
@@ -171,9 +126,9 @@ func (l *Lock) Release() error {
 	}
 	l.held = false
 
+	_ = l.lf.clearInfo()
 	_ = l.lf.unlock()
 	_ = l.lf.close()
-	_ = os.Remove(l.lockPath)
 
 	logx.Info("released main lock", "instance", l.instanceID)
 	return nil

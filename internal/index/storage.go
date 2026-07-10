@@ -126,6 +126,9 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 		return fmt.Errorf("clearing documents: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM content_dedup`); err != nil {
+		return fmt.Errorf("clearing content dedup: %w", err)
+	}
 	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
 		return err
 	}

@@ -13,10 +13,11 @@ type fakeLockFile struct {
 	writeErr   error
 }
 
-func (f *fakeLockFile) tryLock() error { return nil }
-func (f *fakeLockFile) unlock() error  { return nil }
-func (f *fakeLockFile) close() error   { return nil }
-func (f *fakeLockFile) fdInt() int     { return 0 }
+func (f *fakeLockFile) tryLock() error   { return nil }
+func (f *fakeLockFile) unlock() error    { return nil }
+func (f *fakeLockFile) close() error     { return nil }
+func (f *fakeLockFile) clearInfo() error { return nil }
+func (f *fakeLockFile) fdInt() int       { return 0 }
 func (f *fakeLockFile) writeInfo(info LockInfo) error {
 	f.writeCalls++
 	f.lastInfo = info
@@ -85,8 +86,12 @@ func TestTryAcquireReadUpdateAndRelease(t *testing.T) {
 	if err := lock.Release(); err != nil {
 		t.Fatalf("second Release() error = %v, want nil", err)
 	}
-	if _, err := os.Stat(LockPath(dir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file stat error = %v, want not-exist", err)
+	stat, err := os.Stat(LockPath(dir))
+	if err != nil {
+		t.Fatalf("lock file stat error = %v", err)
+	}
+	if stat.Size() != 0 {
+		t.Fatalf("lock file size = %d, want 0", stat.Size())
 	}
 	if CheckMainAlive(dir) {
 		t.Fatal("CheckMainAlive() after release = true, want false")

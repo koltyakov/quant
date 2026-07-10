@@ -285,11 +285,17 @@ func TestEmbedChunks_Empty(t *testing.T) {
 func TestEmbedChunks_NoEmbedder(t *testing.T) {
 	t.Parallel()
 	p := &Pipeline{Embedder: nil}
-	chunks := []chunk.Chunk{{Content: "text", Index: 0}}
+	chunks := []chunk.Chunk{{Content: "text", Index: 3, Depth: 2, SectionTitle: "Details"}}
 	records := make([]index.ChunkRecord, 1)
 	err := p.EmbedChunks(context.Background(), chunks, []PendingEmbed{{ChunkIdx: 0, BatchPos: 0}}, records)
 	if err != nil {
 		t.Fatalf("expected no error when no embedder, got %v", err)
+	}
+	if records[0].Content != "text" || records[0].ChunkIndex != 3 || records[0].Depth != 2 || records[0].SectionTitle != "Details" {
+		t.Fatalf("keyword-only record metadata mismatch: %+v", records[0])
+	}
+	if records[0].Embedding == nil || len(records[0].Embedding) != 0 {
+		t.Fatalf("expected non-nil empty embedding, got %#v", records[0].Embedding)
 	}
 }
 
