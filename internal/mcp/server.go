@@ -98,7 +98,7 @@ func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTP
 	mux := http.NewServeMux()
 	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	streamServer := mcpserver.NewStreamableHTTPServer(s.mcp, mcpserver.WithStreamableHTTPServer(httpServer))
-	mux.Handle(httpMCPPath, streamServer)
+	mux.Handle(httpMCPPath, withOriginProtection(streamServer))
 	s.registerHealthRoutes(mux)
 	return streamServer, httpServer
 }
@@ -107,8 +107,8 @@ func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) 
 	mux := http.NewServeMux()
 	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	sseServer := mcpserver.NewSSEServer(s.mcp, mcpserver.WithHTTPServer(httpServer))
-	mux.Handle(ssePath, sseServer.SSEHandler())
-	mux.Handle(sseMessagePath, sseServer.MessageHandler())
+	mux.Handle(ssePath, withOriginProtection(sseServer.SSEHandler()))
+	mux.Handle(sseMessagePath, withOriginProtection(sseServer.MessageHandler()))
 	s.registerHealthRoutes(mux)
 	return sseServer, httpServer
 }
@@ -116,6 +116,19 @@ func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) 
 func (s *Server) registerHealthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(healthPath, s.handleHealth)
 	mux.HandleFunc(readinessPath, s.handleReadiness)
+}
+
+// withOriginProtection blocks browser-originated requests. Quant's HTTP
+// transports are intended for native MCP clients, which omit Origin; rejecting
+// every present Origin prevents websites from driving a loopback MCP server.
+func withOriginProtection(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.Header.Values("Origin")) > 0 {
+			http.Error(w, "browser origins are not allowed", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

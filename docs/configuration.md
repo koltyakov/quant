@@ -145,7 +145,7 @@ exclude:
   - "node_modules/**"
 ```
 
-SSE and HTTP transports do not provide request authentication. The default listen address is loopback-only; binding to a non-loopback address exposes the MCP endpoint to that network and should only be done behind an authenticated, trusted proxy or equivalent access control. This does not affect the default `stdio` transport.
+SSE and HTTP transports do not provide request authentication. The default listen address is loopback-only, browser requests with an `Origin` header are rejected, and the transport library validates loopback hostnames to prevent DNS rebinding. Binding to a non-loopback address exposes the MCP endpoint to that network and should only be done behind an authenticated, trusted proxy or equivalent access control. This does not affect the default `stdio` transport.
 
 ### Include/exclude patterns
 

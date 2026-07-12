@@ -529,6 +529,59 @@ func TestNewSSEServer_ExposesHealthAndReadiness(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPTransportsRejectBrowserOrigins(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := NewServer(&config.Config{WatchDir: dir, DBPath: dbPath}, store, &testutil.QueryCountingEmbedder{}, "test", nil)
+	_, streamHTTP := s.newStreamableHTTPServer(":0")
+	_, sseHTTP := s.newSSEServer(":0")
+
+	tests := []struct {
+		name    string
+		handler http.Handler
+		method  string
+		path    string
+	}{
+		{name: "streamable HTTP", handler: streamHTTP.Handler, method: http.MethodPost, path: httpMCPPath},
+		{name: "SSE session", handler: sseHTTP.Handler, method: http.MethodGet, path: ssePath},
+		{name: "SSE message", handler: sseHTTP.Handler, method: http.MethodPost, path: sseMessagePath},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+			req.Header.Set("Origin", "https://evil.example")
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+			}
+			if strings.Contains(rec.Header().Get("Access-Control-Allow-Origin"), "*") {
+				t.Fatal("rejected request must not receive wildcard CORS")
+			}
+		})
+	}
+}
+
+func TestOriginProtectionAllowsNativeClients(t *testing.T) {
+	called := false
+	handler := withOriginProtection(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, httpMCPPath, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !called || rec.Code != http.StatusNoContent {
+		t.Fatalf("native request was not passed through: called=%t status=%d", called, rec.Code)
+	}
+}
+
 func TestHandleReadiness_ReturnsServiceUnavailableWhenDependenciesAreMissing(t *testing.T) {
 	s := &Server{}
 
