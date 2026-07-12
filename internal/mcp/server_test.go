@@ -582,6 +582,60 @@ func TestOriginProtectionAllowsNativeClients(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPTransportsRejectOversizedBodies(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	s := NewServer(&config.Config{WatchDir: dir, DBPath: dbPath}, store, &testutil.QueryCountingEmbedder{}, "test", nil)
+	_, streamHTTP := s.newStreamableHTTPServer(":0")
+	_, sseHTTP := s.newSSEServer(":0")
+	body := strings.Repeat("x", maxMCPRequestBodyBytes+1)
+
+	for _, tc := range []struct {
+		name    string
+		handler http.Handler
+		path    string
+	}{
+		{name: "streamable HTTP", handler: streamHTTP.Handler, path: httpMCPPath},
+		{name: "SSE message", handler: sseHTTP.Handler, path: sseMessagePath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
+			req.ContentLength = -1
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+			}
+		})
+	}
+}
+
+func TestRequestBodyLimitPassesBodyAtLimit(t *testing.T) {
+	body := strings.Repeat("x", 32)
+	handler := withRequestBodyLimit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading passed body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("body = %q, want %q", got, body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}), int64(len(body)))
+	req := httptest.NewRequest(http.MethodPost, httpMCPPath, strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
 func TestHandleReadiness_ReturnsServiceUnavailableWhenDependenciesAreMissing(t *testing.T) {
 	s := &Server{}
 

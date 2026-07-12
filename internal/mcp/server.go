@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -40,6 +42,7 @@ const (
 	ssePath                = "/sse"
 	sseMessagePath         = "/message"
 	maxConcurrentToolCalls = 4
+	maxMCPRequestBodyBytes = 1 << 20
 )
 
 // NewServer creates an MCP server wired to the given store and embedder.
@@ -98,7 +101,7 @@ func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTP
 	mux := http.NewServeMux()
 	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	streamServer := mcpserver.NewStreamableHTTPServer(s.mcp, mcpserver.WithStreamableHTTPServer(httpServer))
-	mux.Handle(httpMCPPath, withOriginProtection(streamServer))
+	mux.Handle(httpMCPPath, withOriginProtection(withRequestBodyLimit(streamServer, maxMCPRequestBodyBytes)))
 	s.registerHealthRoutes(mux)
 	return streamServer, httpServer
 }
@@ -108,7 +111,7 @@ func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) 
 	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
 	sseServer := mcpserver.NewSSEServer(s.mcp, mcpserver.WithHTTPServer(httpServer))
 	mux.Handle(ssePath, withOriginProtection(sseServer.SSEHandler()))
-	mux.Handle(sseMessagePath, withOriginProtection(sseServer.MessageHandler()))
+	mux.Handle(sseMessagePath, withOriginProtection(withRequestBodyLimit(sseServer.MessageHandler(), maxMCPRequestBodyBytes)))
 	s.registerHealthRoutes(mux)
 	return sseServer, httpServer
 }
@@ -127,6 +130,30 @@ func withOriginProtection(next http.Handler) http.Handler {
 			http.Error(w, "browser origins are not allowed", http.StatusForbidden)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func withRequestBodyLimit(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.ContentLength > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > limit {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
 }
