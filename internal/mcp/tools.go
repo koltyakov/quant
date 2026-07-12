@@ -759,6 +759,7 @@ func embeddingStatus(err error) string {
 
 type drillDownResponse struct {
 	SeedChunkID int64                 `json:"seed_chunk_id"`
+	Limit       int                   `json:"limit"`
 	Results     []searchToolResultRow `json:"results"`
 }
 
@@ -773,15 +774,19 @@ func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolReq
 	if !ok {
 		return nil, fmt.Errorf("chunk_id is required")
 	}
-	if math.IsNaN(chunkID) || math.IsInf(chunkID, 0) || chunkID <= 0 {
-		return nil, fmt.Errorf("chunk_id must be a positive number")
+	if math.IsNaN(chunkID) || math.IsInf(chunkID, 0) || chunkID <= 0 || chunkID != float64(int64(chunkID)) {
+		return nil, fmt.Errorf("chunk_id must be a positive integer")
 	}
 
 	limit := 10
 	if v, ok := args["limit"].(float64); ok {
-		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
-			limit = min(int(v), 50)
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != float64(int(v)) {
+			return nil, fmt.Errorf("limit must be an integer between 1 and %d", maxSearchLimit)
 		}
+		limit = int(v)
+	}
+	if limit < 1 || limit > maxSearchLimit {
+		return nil, fmt.Errorf("limit must be between 1 and %d", maxSearchLimit)
 	}
 
 	source, err := s.store.GetChunkByID(ctx, int64(chunkID))
@@ -789,31 +794,56 @@ func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolReq
 		return nil, fmt.Errorf("chunk %d not found: %w", int64(chunkID), err)
 	}
 
-	results, err := s.store.FindSimilar(ctx, int64(chunkID), limit)
+	candidateLimit := min(maxSearchLimit, limit*3)
+	results, err := s.store.FindSimilar(ctx, int64(chunkID), candidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("finding related chunks: %w", err)
 	}
 
-	seen := map[string]bool{source.DocumentPath: true}
-	var diverse []index.SearchResult
-	for _, r := range results {
-		if !seen[r.DocumentPath] || len(diverse) < limit/2 {
-			diverse = append(diverse, r)
-			seen[r.DocumentPath] = true
-		}
-	}
-	if len(diverse) == 0 {
-		diverse = results
-	}
+	diverse := diversifySearchResults(source.DocumentPath, results, limit)
 
 	output := fmt.Sprintf("Drill-down from chunk %d (%s):\n\n", int64(chunkID), source.DocumentPath)
 	output += formatSearchResults(diverse)
 
 	structured := drillDownResponse{
 		SeedChunkID: int64(chunkID),
+		Limit:       limit,
 		Results:     searchRows(diverse),
 	}
 	return mcplib.NewToolResultStructured(structured, output), nil
+}
+
+func diversifySearchResults(seedPath string, results []index.SearchResult, limit int) []index.SearchResult {
+	if limit <= 0 || len(results) == 0 {
+		return nil
+	}
+	limit = min(limit, len(results))
+	selected := make([]index.SearchResult, 0, limit)
+	selectedIDs := make(map[int64]bool, limit)
+	seenPaths := map[string]bool{seedPath: true}
+
+	for _, result := range results {
+		if len(selected) >= limit {
+			break
+		}
+		if seenPaths[result.DocumentPath] {
+			continue
+		}
+		selected = append(selected, result)
+		selectedIDs[result.ChunkID] = true
+		seenPaths[result.DocumentPath] = true
+	}
+	for _, result := range results {
+		if len(selected) >= limit {
+			break
+		}
+		if selectedIDs[result.ChunkID] {
+			continue
+		}
+		selected = append(selected, result)
+		selectedIDs[result.ChunkID] = true
+	}
+	return selected
 }
 
 type summarizeMatchesResponse struct {

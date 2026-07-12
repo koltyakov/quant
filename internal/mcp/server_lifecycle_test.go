@@ -259,7 +259,7 @@ func TestHandleDrillDown_InvalidChunkID(t *testing.T) {
 
 	s := newTestServer(dir, dbPath, store)
 
-	for _, chunkID := range []float64{-1, 0, math.NaN(), math.Inf(1)} {
+	for _, chunkID := range []float64{-1, 0, 1.5, math.NaN(), math.Inf(1)} {
 		_, err := s.handleDrillDown(context.Background(), mcplib.CallToolRequest{
 			Params: mcplib.CallToolParams{
 				Name:      "drill_down",

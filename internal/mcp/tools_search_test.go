@@ -318,6 +318,28 @@ func TestHandleDrillDown_MissingChunkID(t *testing.T) {
 	}
 }
 
+func TestDiversifySearchResultsPrioritizesNewDocuments(t *testing.T) {
+	t.Parallel()
+
+	results := []index.SearchResult{
+		{ChunkID: 1, DocumentPath: "seed.md"},
+		{ChunkID: 2, DocumentPath: "a.md"},
+		{ChunkID: 3, DocumentPath: "a.md"},
+		{ChunkID: 4, DocumentPath: "b.md"},
+		{ChunkID: 5, DocumentPath: "seed.md"},
+	}
+	got := diversifySearchResults("seed.md", results, 4)
+	want := []int64{2, 4, 1, 3}
+	if len(got) != len(want) {
+		t.Fatalf("result count = %d, want %d", len(got), len(want))
+	}
+	for i, chunkID := range want {
+		if got[i].ChunkID != chunkID {
+			t.Fatalf("result[%d].ChunkID = %d, want %d", i, got[i].ChunkID, chunkID)
+		}
+	}
+}
+
 func TestHandleSummarizeMatches(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
