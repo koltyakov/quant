@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.15.0 (2026-07-12)
+
+### Features
+
+- **Ordered context retrieval** - Added the `get_context` MCP tool for expanding a search hit with preceding and following chunks from the same document. Context retrieval preserves source order, duplicate chunks, document boundaries, structured metadata, and proxy-mode support.
+- **Collection-aware MCP search** - The `search` tool now accepts an exact collection filter and normalizes common file type aliases and language values. Structured responses echo the effective path, file type, language, and collection filters.
+- **Stricter MCP tool contracts** - All tools now publish explicit safety annotations and constrained input schemas, reject unknown arguments, and use server-side schema validation and panic recovery.
+
+### Improvements
+
+- **Correct retrieval score semantics** - Keyword-only searches no longer receive a synthetic vector contribution, normalized scores remain within their documented range, and `find_similar` returns actual vector similarity scores.
+- **Better filtered vector recall** - Valid HNSW neighbors are retained when fewer than the requested limit survive a filter and exact fallback is disabled or exceeds its candidate cap.
+- **Deterministic ranking** - Equal-score keyword, vector, document, and heap candidates now use stable path, chunk index, and chunk ID tie-breakers; FTS queries also use deterministic secondary ordering.
+- **More precise path ranking** - Path boosts match exact path and identifier components rather than arbitrary substrings, preventing queries such as `go` or `auth` from boosting unrelated names such as `logo` or `oauth`.
+- **More diverse topic exploration** - `drill_down` overfetches candidates and prioritizes one result per new document before filling with secondary or seed-document chunks. Fractional IDs and invalid limits are rejected consistently.
+- **Clearer match overviews** - `summarize_matches` now describes its bounded, non-exhaustive behavior accurately and reports the effective limit, chunk and document counts, embedding mode, and keyword-only fallback note.
+- **Safer embedding ingestion** - Empty, wrong-dimension, NaN, and infinite embedding vectors are rejected before quantization or storage. Embedding-budget splits preserve chunk hierarchy and section metadata.
+- **UTF-8-safe truncation** - Oversized text extraction and code signature limits now stop at valid rune boundaries instead of potentially storing malformed multibyte text.
+- **Coherent health snapshots** - Aggregated health checks execute each dependency probe once, derive status from that same result set, and report durations as actual milliseconds.
+
+### Security
+
+- **Hardened local HTTP transports** - Streamable HTTP and legacy SSE reject browser-origin requests before tool dispatch, cap request bodies at 1 MiB, and use `mcp-go` v0.56.0 for default localhost DNS-rebinding protection and safer SSE session shutdown.
+
 ## v0.14.0 (2026-07-02)
 
 ### Features
