@@ -522,6 +522,14 @@ func TestFindSimilar_WithHNSW(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatal("expected similar results from HNSW, got none")
 	}
+	if results[0].Score <= 0.9 {
+		t.Fatalf("expected nearest-neighbor similarity above 0.9, got %f", results[0].Score)
+	}
+	for i := 1; i < len(results); i++ {
+		if results[i].Score > results[i-1].Score {
+			t.Fatalf("similarity scores are not descending: %f before %f", results[i-1].Score, results[i].Score)
+		}
+	}
 
 	for _, r := range results {
 		if r.ChunkID == aChunkID {

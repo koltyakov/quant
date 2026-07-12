@@ -2,11 +2,47 @@ package index
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
 )
+
+func TestUnifiedRRFKeywordOnlyOmitsVectorSignal(t *testing.T) {
+	weights := QuerySignalWeights{Keyword: 0.7, Vector: 1.4}
+	results := unifiedRRF(map[int]*searchCandidate{
+		1: {id: 1, result: SearchResult{DocumentPath: "docs/auth.md"}, keywordRank: 1},
+	}, nil, 1, nil, weights)
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d", len(results))
+	}
+
+	want := (weights.Keyword / float32(rrfK+1)) /
+		((weights.Keyword + recencyBoostWeight) / float32(rrfK+1))
+	if math.Abs(float64(results[0].Score-want)) > 1e-6 {
+		t.Fatalf("keyword-only score = %f, want %f", results[0].Score, want)
+	}
+	if results[0].Score < 0 || results[0].Score > 1 {
+		t.Fatalf("keyword-only score must remain in [0,1], got %f", results[0].Score)
+	}
+}
+
+func TestMergeCandidatesRanksComputedZeroVectorScore(t *testing.T) {
+	merged := mergeCandidates(map[int]*searchCandidate{
+		1: {id: 1, keywordRank: 1, vectorScore: 0, hasVector: true},
+		2: {id: 2, keywordRank: 2},
+	}, nil)
+	if len(merged) != 2 {
+		t.Fatalf("expected two candidates, got %d", len(merged))
+	}
+	if merged[0].vectorRank != 1 {
+		t.Fatalf("computed zero-cosine candidate vector rank = %d, want 1", merged[0].vectorRank)
+	}
+	if merged[1].vectorRank != 0 {
+		t.Fatalf("keyword-only candidate vector rank = %d, want 0", merged[1].vectorRank)
+	}
+}
 
 func TestAnalyzeQueryAndHelpers(t *testing.T) {
 	t.Parallel()

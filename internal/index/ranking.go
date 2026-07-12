@@ -12,6 +12,7 @@ type searchCandidate struct {
 	result      SearchResult
 	keywordRank int
 	vectorScore float32
+	hasVector   bool
 	modifiedAt  time.Time
 }
 
@@ -109,6 +110,7 @@ type scoredCandidate struct {
 	score       float32
 	keywordRank int
 	vectorRank  int
+	vectorScore float32
 	modifiedAt  time.Time
 }
 
@@ -130,8 +132,12 @@ func mergeCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCand
 		return nil
 	}
 
-	// Sort by vector score descending to assign vector ranks.
+	// Candidates without a computed vector score sort after vector candidates
+	// and keep vectorRank=0, so keyword-only search receives no vector signal.
 	sort.Slice(all, func(i, j int) bool {
+		if all[i].hasVector != all[j].hasVector {
+			return all[i].hasVector
+		}
 		if all[i].vectorScore == all[j].vectorScore {
 			return all[i].keywordRank < all[j].keywordRank
 		}
@@ -139,11 +145,18 @@ func mergeCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCand
 	})
 
 	out := make([]scoredCandidate, len(all))
+	vectorRank := 0
 	for i, c := range all {
+		candidateVectorRank := 0
+		if c.hasVector {
+			vectorRank++
+			candidateVectorRank = vectorRank
+		}
 		out[i] = scoredCandidate{
 			result:      c.result,
 			keywordRank: c.keywordRank,
-			vectorRank:  i + 1,
+			vectorRank:  candidateVectorRank,
+			vectorScore: c.vectorScore,
 			modifiedAt:  c.modifiedAt,
 		}
 		out[i].result.ChunkID = int64(c.id)
@@ -156,7 +169,9 @@ func rrfBaseScore(weights QuerySignalWeights) rankingStage {
 	return func(candidates []scoredCandidate) []scoredCandidate {
 		for i := range candidates {
 			c := &candidates[i]
-			c.score += weights.Vector / float32(rrfK+c.vectorRank)
+			if c.vectorRank > 0 {
+				c.score += weights.Vector / float32(rrfK+c.vectorRank)
+			}
 			if c.keywordRank > noKeywordRank {
 				c.score += weights.Keyword / float32(rrfK+c.keywordRank)
 			}
@@ -282,7 +297,7 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 		return nil
 	}
 	hasKeyword := len(keywordCandidates) > 0
-	hasVector := len(vectorOnlyCandidates) > 0 || anyHasVectorScore(keywordCandidates)
+	hasVector := len(vectorOnlyCandidates) > 0 || anyHasVectorCandidate(keywordCandidates)
 	return runRankingPipeline(candidates,
 		rrfBaseScore(weights),
 		recencyBoost(recencyHalfLife, recencyBoostWeight),
@@ -292,9 +307,9 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 	)
 }
 
-func anyHasVectorScore(candidates map[int]*searchCandidate) bool {
+func anyHasVectorCandidate(candidates map[int]*searchCandidate) bool {
 	for _, c := range candidates {
-		if c.vectorScore != 0 {
+		if c.hasVector {
 			return true
 		}
 	}

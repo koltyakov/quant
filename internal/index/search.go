@@ -165,6 +165,7 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 		if i >= limit {
 			break
 		}
+		c.result.Score = c.vectorScore
 		c.result.ScoreKind = "similar"
 		results = append(results, c.result)
 	}
@@ -397,6 +398,7 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 			},
 			keywordRank: keywordRank,
 			vectorScore: dotProductEncoded(queryEmbedding, embeddingBytes),
+			hasVector:   len(queryEmbedding) > 0 && len(embeddingBytes) > 0,
 			modifiedAt:  modifiedAt,
 		}
 	}
@@ -637,6 +639,7 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 				SectionTitle: sr.sectionTitle,
 			},
 			vectorScore: sr.score,
+			hasVector:   true,
 			modifiedAt:  sr.modifiedAt,
 		}
 	}

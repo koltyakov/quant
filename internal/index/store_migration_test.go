@@ -276,8 +276,8 @@ func TestResetIndex(t *testing.T) {
 	}
 }
 
-func TestAnyHasVectorScore(t *testing.T) {
-	empty := anyHasVectorScore(nil)
+func TestAnyHasVectorCandidate(t *testing.T) {
+	empty := anyHasVectorCandidate(nil)
 	if empty {
 		t.Fatal("expected false for nil candidates")
 	}
@@ -286,16 +286,16 @@ func TestAnyHasVectorScore(t *testing.T) {
 		1: {id: 1, vectorScore: 0},
 		2: {id: 2, vectorScore: 0},
 	}
-	if anyHasVectorScore(noScore) {
-		t.Fatal("expected false when all scores are zero")
+	if anyHasVectorCandidate(noScore) {
+		t.Fatal("expected false when no vector scores were computed")
 	}
 
 	withScore := map[int]*searchCandidate{
 		1: {id: 1, vectorScore: 0},
-		2: {id: 2, vectorScore: 0.5},
+		2: {id: 2, vectorScore: 0, hasVector: true},
 	}
-	if !anyHasVectorScore(withScore) {
-		t.Fatal("expected true when at least one score is nonzero")
+	if !anyHasVectorCandidate(withScore) {
+		t.Fatal("expected true when a zero-cosine vector score was computed")
 	}
 }
 
