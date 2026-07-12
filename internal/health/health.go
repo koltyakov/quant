@@ -28,12 +28,13 @@ const (
 
 // CheckResult contains the result of a health check.
 type CheckResult struct {
-	Name      string        `json:"name"`
-	Status    Status        `json:"status"`
-	Message   string        `json:"message,omitempty"`
-	Details   any           `json:"details,omitempty"`
-	Duration  time.Duration `json:"duration_ms"`
-	Timestamp time.Time     `json:"timestamp"`
+	Name       string        `json:"name"`
+	Status     Status        `json:"status"`
+	Message    string        `json:"message,omitempty"`
+	Details    any           `json:"details,omitempty"`
+	Duration   time.Duration `json:"-"`
+	DurationMS int64         `json:"duration_ms"`
+	Timestamp  time.Time     `json:"timestamp"`
 }
 
 // Checker defines the interface for health checks.
@@ -99,6 +100,7 @@ func (r *Registry) Check(ctx context.Context) []CheckResult {
 			start := time.Now()
 			result := checker.Check(ctx)
 			result.Duration = time.Since(start)
+			result.DurationMS = result.Duration.Milliseconds()
 			result.Timestamp = start
 			results[i] = result
 		})
@@ -110,7 +112,10 @@ func (r *Registry) Check(ctx context.Context) []CheckResult {
 
 // OverallStatus returns the worst status from all checks.
 func (r *Registry) OverallStatus(ctx context.Context) Status {
-	results := r.Check(ctx)
+	return overallStatus(r.Check(ctx))
+}
+
+func overallStatus(results []CheckResult) Status {
 	if len(results) == 0 {
 		return StatusUnknown
 	}
@@ -150,7 +155,7 @@ type AggregateResult struct {
 func (r *Registry) Aggregate(ctx context.Context) AggregateResult {
 	checks := r.Check(ctx)
 	return AggregateResult{
-		Status:    r.OverallStatus(ctx),
+		Status:    overallStatus(checks),
 		Checks:    checks,
 		Timestamp: time.Now(),
 	}

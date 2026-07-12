@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -99,6 +100,48 @@ func TestRegistryAggregateReturnsChecksAndStatus(t *testing.T) {
 	}
 	if got.Timestamp.IsZero() {
 		t.Fatal("Aggregate().Timestamp was zero")
+	}
+}
+
+func TestRegistryAggregateRunsEachCheckOnce(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	calls := 0
+	registry.Register(NewCheckerFunc("counting", func(context.Context) CheckResult {
+		calls++
+		return CheckResult{Name: "counting", Status: StatusHealthy}
+	}))
+
+	got := registry.Aggregate(context.Background())
+	if calls != 1 {
+		t.Fatalf("checker calls = %d, want 1", calls)
+	}
+	if got.Status != StatusHealthy || len(got.Checks) != 1 {
+		t.Fatalf("unexpected aggregate: %+v", got)
+	}
+}
+
+func TestCheckResultJSONDurationUsesMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	result := CheckResult{
+		Name:       "test",
+		Status:     StatusHealthy,
+		Duration:   1500 * time.Millisecond,
+		DurationMS: 1500,
+		Timestamp:  time.Unix(1_700_000_000, 0).UTC(),
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if decoded["duration_ms"] != float64(1500) {
+		t.Fatalf("duration_ms = %v, want 1500", decoded["duration_ms"])
 	}
 }
 
