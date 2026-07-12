@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -354,7 +355,7 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 		placeholders := make([]string, len(filter.FileTypes))
 		for i, ft := range filter.FileTypes {
 			placeholders[i] = "?"
-			args = append(args, ft)
+			args = append(args, CanonicalFileType(ft))
 		}
 		conds = append(conds, "d.file_type IN ("+strings.Join(placeholders, ",")+")")
 	}
@@ -363,7 +364,7 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 		placeholders := make([]string, len(filter.Languages))
 		for i, lang := range filter.Languages {
 			placeholders[i] = "?"
-			args = append(args, lang)
+			args = append(args, strings.ToLower(strings.TrimSpace(lang)))
 		}
 		conds = append(conds, "d.language IN ("+strings.Join(placeholders, ",")+")")
 	}
@@ -371,9 +372,14 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 	// Tags are stored as a JSON object ('' when absent). json_each matches
 	// key/value pairs exactly, unlike a substring LIKE which is confused by
 	// wildcard characters and JSON escaping.
-	for k, v := range filter.Tags {
+	tagKeys := make([]string, 0, len(filter.Tags))
+	for key := range filter.Tags {
+		tagKeys = append(tagKeys, key)
+	}
+	sort.Strings(tagKeys)
+	for _, k := range tagKeys {
 		conds = append(conds, `(json_valid(d.tags) AND EXISTS (SELECT 1 FROM json_each(d.tags) WHERE json_each.key = ? AND json_each.value = ?))`)
-		args = append(args, k, v)
+		args = append(args, k, filter.Tags[k])
 	}
 
 	if filter.Collection != "" {

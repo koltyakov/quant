@@ -140,7 +140,7 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 
 | Tool | Description |
 |---|---|
-| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path`, `file_type`, `language` |
+| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path`, `file_type`, `language`, `collection` |
 | `list_sources` | List indexed documents. Params: `limit` |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model, embedding status, lifecycle state |
 | `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` |

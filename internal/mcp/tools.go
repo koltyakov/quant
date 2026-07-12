@@ -48,6 +48,10 @@ func (s *Server) registerTools() {
 		mcplib.WithString("language",
 			mcplib.Description("Filter by programming language (e.g. go, python, javascript)"),
 		),
+		mcplib.WithString("collection",
+			mcplib.Description("Filter by exact collection name"),
+			mcplib.MaxLength(256),
+		),
 	), s.handleSearch)
 
 	s.mcp.AddTool(mcplib.NewTool("list_sources",
@@ -204,6 +208,9 @@ const (
 type searchToolResponse struct {
 	Query           string                `json:"query"`
 	PathPrefix      string                `json:"path_prefix,omitempty"`
+	FileType        string                `json:"file_type,omitempty"`
+	Language        string                `json:"language,omitempty"`
+	Collection      string                `json:"collection,omitempty"`
 	Limit           int                   `json:"limit"`
 	Threshold       float32               `json:"threshold"`
 	EmbeddingStatus string                `json:"embedding_status"`
@@ -330,11 +337,24 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	}
 
 	var filter index.SearchFilter
-	if v, ok := args["file_type"].(string); ok && v != "" {
-		filter.FileTypes = []string{v}
+	fileType := ""
+	if v, ok := args["file_type"].(string); ok {
+		fileType = index.CanonicalFileType(v)
+		if fileType != "" {
+			filter.FileTypes = []string{fileType}
+		}
 	}
-	if v, ok := args["language"].(string); ok && v != "" {
-		filter.Languages = []string{v}
+	language := ""
+	if v, ok := args["language"].(string); ok {
+		language = strings.ToLower(strings.TrimSpace(v))
+		if language != "" {
+			filter.Languages = []string{language}
+		}
+	}
+	collection := ""
+	if v, ok := args["collection"].(string); ok {
+		collection = strings.TrimSpace(v)
+		filter.Collection = collection
 	}
 
 	startedAt := time.Now()
@@ -378,6 +398,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		structured := searchToolResponse{
 			Query:           query,
 			PathPrefix:      pathPrefix,
+			FileType:        fileType,
+			Language:        language,
+			Collection:      collection,
 			Limit:           limit,
 			Threshold:       threshold,
 			EmbeddingStatus: embeddingStatus(embedErr),
@@ -391,6 +414,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	structured := searchToolResponse{
 		Query:           query,
 		PathPrefix:      pathPrefix,
+		FileType:        fileType,
+		Language:        language,
+		Collection:      collection,
 		Limit:           limit,
 		Threshold:       threshold,
 		EmbeddingStatus: embeddingStatus(embedErr),

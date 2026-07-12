@@ -166,6 +166,21 @@ func TestAnalyzeQueryAndHelpers(t *testing.T) {
 	}
 }
 
+func TestCanonicalFileType(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]string{
+		" .GO ":    "go",
+		"py":       "python",
+		".md":      "markdown",
+		" CUSTOM ": "custom",
+	} {
+		if got := CanonicalFileType(input); got != want {
+			t.Errorf("CanonicalFileType(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestSignalRegistryAndHelpers(t *testing.T) {
 	t.Parallel()
 

@@ -79,6 +79,8 @@ Scores are divided by the theoretical maximum (rank 1 for both keyword and vecto
 
 Results are reordered so the single best chunk per unique document appears first, then remaining slots are filled with secondary chunks from the same documents. This prevents one large file from dominating all results.
 
+Search can be restricted by path prefix, canonical file type, programming language, or exact collection name. File type aliases and language names are normalized case-insensitively; collection names remain case-sensitive.
+
 ## Fallback behavior
 
 **At startup:** if the embedding backend is unavailable when `quant` starts, it attempts automatic recovery (start Ollama, pull model). If recovery fails, `quant` starts in keyword-only mode — the MCP server is fully operational and `index_status` reports the embedding status and the fix required.

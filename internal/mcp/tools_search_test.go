@@ -318,6 +318,48 @@ func TestHandleDrillDown_MissingChunkID(t *testing.T) {
 	}
 }
 
+func TestHandleSearchNormalizesAndAppliesCollectionFilters(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, doc := range []index.Document{
+		{Path: "alpha/app.py", Hash: "alpha", ModifiedAt: testTime(), FileType: "python", Language: "python", Collection: "alpha"},
+		{Path: "beta/app.py", Hash: "beta", ModifiedAt: testTime(), FileType: "python", Language: "python", Collection: "beta"},
+	} {
+		if err := store.ReindexDocument(context.Background(), &doc, []index.ChunkRecord{{
+			Content: "shared deployment guide", ChunkIndex: 0, Embedding: index.EncodeFloat32([]float32{1}),
+		}}); err != nil {
+			t.Fatalf("seeding %s: %v", doc.Path, err)
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	suppressLogs(t)
+	result, err := s.handleSearch(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Arguments: map[string]any{
+			"query":      "deployment guide",
+			"file_type":  " .PY ",
+			"language":   " Python ",
+			"collection": " alpha ",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handleSearch returned error: %v", err)
+	}
+	structured := extractSearchStructured(t, result)
+	if structured.FileType != "python" || structured.Language != "python" || structured.Collection != "alpha" {
+		t.Fatalf("unexpected effective filters: %+v", structured)
+	}
+	if len(structured.Results) != 1 || structured.Results[0].Path != "alpha/app.py" {
+		t.Fatalf("unexpected filtered results: %+v", structured.Results)
+	}
+}
+
 func TestDiversifySearchResultsPrioritizesNewDocuments(t *testing.T) {
 	t.Parallel()
 

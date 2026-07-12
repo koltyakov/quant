@@ -34,6 +34,16 @@ func DocumentFileType(path string) string {
 	return strings.TrimPrefix(ext, ".")
 }
 
+// CanonicalFileType normalizes user-facing file type filters to the same
+// values stored by DocumentFileType.
+func CanonicalFileType(value string) string {
+	value = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), ".")
+	if ext := fileTypeExtensions[value]; ext != "" {
+		return canonicalFileTypes[ext]
+	}
+	return value
+}
+
 // QueryAnalysis captures the parsed structure and inferred intent of a search query.
 type QueryAnalysis struct {
 	Original       string
