@@ -98,13 +98,18 @@ func codeSignature(block string) string {
 	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
-			if len(trimmed) > 120 {
-				return trimmed[:120] + "..."
-			}
-			return trimmed
+			return truncateSignature(trimmed, 120)
 		}
 	}
 	return ""
+}
+
+func truncateSignature(signature string, maxRunes int) string {
+	runes := []rune(signature)
+	if len(runes) <= maxRunes {
+		return signature
+	}
+	return string(runes[:maxRunes]) + "..."
 }
 
 // codeBlockBoundaries returns the line indices (0-based) where top-level blocks start.

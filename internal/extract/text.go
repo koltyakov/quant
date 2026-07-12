@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
@@ -140,6 +141,13 @@ func (t *TextExtractor) Extract(_ context.Context, path string) (string, error) 
 	}
 	if int64(len(data)) > maxTextReadBytes {
 		data = data[:maxTextReadBytes]
+		lastRune := len(data) - 1
+		for lastRune >= 0 && !utf8.RuneStart(data[lastRune]) {
+			lastRune--
+		}
+		if lastRune >= 0 && !utf8.Valid(data[lastRune:]) {
+			data = data[:lastRune]
+		}
 		truncated = true
 	}
 	if looksBinaryTextSample(data) {

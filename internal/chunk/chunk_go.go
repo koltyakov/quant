@@ -116,10 +116,7 @@ func goDeclSignature(decl string) string {
 	for line := range strings.SplitSeq(decl, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
-			if len(trimmed) > 120 {
-				return trimmed[:120] + "..."
-			}
-			return trimmed
+			return truncateSignature(trimmed, 120)
 		}
 	}
 	return ""

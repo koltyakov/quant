@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -686,6 +687,26 @@ func TestTextExtractor_TruncatesOversizedFiles(t *testing.T) {
 	}
 	if text != content[:maxTextReadBytes] {
 		t.Fatalf("expected oversized file content to be truncated, got %q", text[:min(len(text), 32)])
+	}
+}
+
+func TestTextExtractorTruncationPreservesUTF8(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.txt")
+	prefix := strings.Repeat("a", maxTextReadBytes-1)
+	if err := os.WriteFile(path, []byte(prefix+"€suffix"), 0644); err != nil {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+
+	text, err := (&TextExtractor{}).Extract(context.Background(), path)
+	if err != nil {
+		t.Fatalf("unexpected extraction error: %v", err)
+	}
+	if !utf8.ValidString(text) {
+		t.Fatal("truncated text is not valid UTF-8")
+	}
+	if text != prefix {
+		t.Fatalf("truncated text length = %d, want %d", len(text), len(prefix))
 	}
 }
 

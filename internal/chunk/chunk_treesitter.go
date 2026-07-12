@@ -146,10 +146,7 @@ func tsSignature(block string) string {
 	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
-			if len(trimmed) > 120 {
-				return trimmed[:120] + "..."
-			}
-			return trimmed
+			return truncateSignature(trimmed, 120)
 		}
 	}
 	return ""

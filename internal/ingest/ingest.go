@@ -271,8 +271,9 @@ func CodeSignature(block string) string {
 	for line := range strings.SplitSeq(block, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
-			if len(trimmed) > 120 {
-				return trimmed[:120] + "..."
+			runes := []rune(trimmed)
+			if len(runes) > 120 {
+				return string(runes[:120]) + "..."
 			}
 			return trimmed
 		}

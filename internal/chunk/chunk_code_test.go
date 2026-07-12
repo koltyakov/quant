@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSplitCode_BasicPython(t *testing.T) {
@@ -35,6 +36,18 @@ func TestSplitCode_BasicPython(t *testing.T) {
 	}
 	if !strings.Contains(joined, "def function_4()") {
 		t.Errorf("expected 'def function_4()' in chunks, got: %q", joined[:min(len(joined), 200)])
+	}
+}
+
+func TestCodeSignatureTruncatesUTF8ByRunes(t *testing.T) {
+	t.Parallel()
+
+	got := codeSignature(strings.Repeat("界", 121))
+	if !utf8.ValidString(got) {
+		t.Fatal("signature is not valid UTF-8")
+	}
+	if len([]rune(strings.TrimSuffix(got, "..."))) != 120 {
+		t.Fatalf("signature rune count = %d, want 120", len([]rune(strings.TrimSuffix(got, "..."))))
 	}
 }
 
