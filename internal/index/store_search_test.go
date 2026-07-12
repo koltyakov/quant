@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1273,7 +1274,14 @@ func TestSearch_WithHNSWAndPrefix_InsufficientFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search() with prefix error: %v", err)
 	}
-	_ = results
+	if len(results) != 2 {
+		t.Fatalf("expected 2 partial HNSW survivors when exact fallback is capped, got %d", len(results))
+	}
+	for _, result := range results {
+		if !strings.HasPrefix(result.DocumentPath, "src/") {
+			t.Fatalf("expected src/* result, got %q", result.DocumentPath)
+		}
+	}
 }
 
 func TestSearch_VectorFallbackWithDocFilter(t *testing.T) {

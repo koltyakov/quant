@@ -432,8 +432,10 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 			logx.Warn("filtered vector search: probe filter query failed; returning keyword-only results", "err", err)
 			return
 		}
-		if len(survivors) >= limit {
+		if len(survivors) > 0 {
 			s.loadHNSWChunkRows(ctx, survivors, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
+		}
+		if len(survivors) >= limit {
 			return
 		}
 	}
@@ -480,8 +482,10 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 		}
 	}
 
-	if len(filtered) >= limit {
+	if len(filtered) > 0 {
 		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
+	}
+	if len(filtered) >= limit {
 		return
 	}
 
