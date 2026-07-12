@@ -44,6 +44,46 @@ func TestMergeCandidatesRanksComputedZeroVectorScore(t *testing.T) {
 	}
 }
 
+func TestPathMatchingUsesExactComponents(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		path  string
+		query []string
+		want  bool
+	}{
+		{path: "internal/auth_handler.go", query: []string{"auth"}, want: true},
+		{path: "auth/middleware.go", query: []string{"middleware"}, want: true},
+		{path: "src/authHandler.go", query: []string{"handler"}, want: true},
+		{path: "src/main.go", query: []string{"go"}, want: true},
+		{path: "assets/logo.md", query: []string{"go"}, want: false},
+		{path: "docs/oauth.md", query: []string{"auth"}, want: false},
+	} {
+		if got := pathMatchesAnyToken(tc.path, tc.query); got != tc.want {
+			t.Errorf("pathMatchesAnyToken(%q, %v) = %t, want %t", tc.path, tc.query, got, tc.want)
+		}
+	}
+}
+
+func TestPathBoostAndSignalShareTokenSemantics(t *testing.T) {
+	t.Parallel()
+
+	candidates := []scoredCandidate{
+		{result: SearchResult{DocumentPath: "src/auth_handler.go"}},
+		{result: SearchResult{DocumentPath: "docs/oauth.md"}},
+	}
+	boosted := pathBoost([]string{"auth"})(candidates)
+	if boosted[0].score <= 0 || boosted[1].score != 0 {
+		t.Fatalf("unexpected path boost scores: %+v", boosted)
+	}
+
+	ctx := &SignalContext{QueryTokens: []string{"auth"}}
+	signal := &PathMatchSignal{}
+	if signal.Score(ctx, &candidates[0]) <= 0 || signal.Score(ctx, &candidates[1]) != 0 {
+		t.Fatal("PathMatchSignal does not match pathBoost token semantics")
+	}
+}
+
 func TestAnalyzeQueryAndHelpers(t *testing.T) {
 	t.Parallel()
 

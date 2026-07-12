@@ -174,7 +174,7 @@ func fastExp(x float64) float64 {
 	return math.Exp(x)
 }
 
-// PathMatchSignal boosts results where the document path contains query tokens.
+// PathMatchSignal boosts results where the document path has an exact query token.
 type PathMatchSignal struct {
 	WeightOverride float32
 }
@@ -192,11 +192,8 @@ func (s *PathMatchSignal) Score(ctx *SignalContext, candidate *ScoredCandidate) 
 	if len(ctx.QueryTokens) == 0 {
 		return 0
 	}
-	lowerPath := toLower(candidate.result.DocumentPath)
-	for _, tok := range ctx.QueryTokens {
-		if containsString(lowerPath, tok) {
-			return s.Weight() / float32(rrfK+1)
-		}
+	if pathMatchesAnyToken(candidate.result.DocumentPath, ctx.QueryTokens) {
+		return s.Weight() / float32(rrfK+1)
 	}
 	return 0
 }

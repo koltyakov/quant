@@ -200,7 +200,7 @@ func recencyBoost(halfLife time.Duration, weight float32) rankingStage {
 	}
 }
 
-// pathBoost adds a bonus when the document path contains query tokens.
+// pathBoost adds a bonus when the document path has an exact query token.
 func pathBoost(pathTokens []string) rankingStage {
 	return func(candidates []scoredCandidate) []scoredCandidate {
 		if len(pathTokens) == 0 {
@@ -208,16 +208,28 @@ func pathBoost(pathTokens []string) rankingStage {
 		}
 		for i := range candidates {
 			c := &candidates[i]
-			lowerPath := strings.ToLower(c.result.DocumentPath)
-			for _, tok := range pathTokens {
-				if strings.Contains(lowerPath, tok) {
-					c.score += 1.0 / float32(rrfK+1)
-					break
-				}
+			if pathMatchesAnyToken(c.result.DocumentPath, pathTokens) {
+				c.score += 1.0 / float32(rrfK+1)
 			}
 		}
 		return candidates
 	}
+}
+
+func pathMatchesAnyToken(path string, queryTokens []string) bool {
+	pathTokens := make(map[string]struct{})
+	for _, token := range ftsTokenPattern.FindAllString(path, -1) {
+		pathTokens[strings.ToLower(token)] = struct{}{}
+		for _, component := range splitIdentifier(token) {
+			pathTokens[strings.ToLower(component)] = struct{}{}
+		}
+	}
+	for _, token := range queryTokens {
+		if _, ok := pathTokens[strings.ToLower(token)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // documentDiversity reorders results so the best chunk per unique document is
