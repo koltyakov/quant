@@ -138,6 +138,7 @@ type Searcher interface {
 	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
 	SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter SearchFilter) ([]SearchResult, error)
 	FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error)
+	GetChunkWindow(ctx context.Context, chunkID int64, before, after int) ([]SearchResult, error)
 	ChunkRepository
 	DocumentRepository
 	StatsProvider

@@ -96,6 +96,15 @@ func (c *Client) GetChunkByID(ctx context.Context, chunkID int64) (*index.Search
 	return &resp.Chunk, nil
 }
 
+func (c *Client) GetChunkWindow(ctx context.Context, chunkID int64, before, after int) ([]index.SearchResult, error) {
+	body := ChunkWindowRequest{ChunkID: chunkID, Before: before, After: after}
+	var resp ChunkWindowResponse
+	if err := c.doPost(ctx, "/proxy/chunk_window", body, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Chunks, nil
+}
+
 func (c *Client) GetDocumentByPath(_ context.Context, _ string) (*index.Document, error) {
 	return nil, fmt.Errorf("GetDocumentByPath not available in proxy mode")
 }

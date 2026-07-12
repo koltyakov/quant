@@ -56,6 +56,7 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux.HandleFunc("/proxy/index_status", s.handleIndexStatus)
 	mux.HandleFunc("/proxy/ping", s.handlePing)
 	mux.HandleFunc("/proxy/chunk_by_id", s.handleChunkByID)
+	mux.HandleFunc("/proxy/chunk_window", s.handleChunkWindow)
 	mux.HandleFunc("/proxy/stats", s.handleStats)
 	mux.HandleFunc("/proxy/embed", s.handleEmbed)
 	mux.HandleFunc("/proxy/list_collections", s.handleListCollections)
@@ -262,6 +263,19 @@ func (s *Server) handleChunkByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, ChunkByIDResponse{Chunk: *result})
+}
+
+func (s *Server) handleChunkWindow(w http.ResponseWriter, r *http.Request) {
+	var req ChunkWindowRequest
+	if !s.readBody(w, r, &req) {
+		return
+	}
+	results, err := s.store.GetChunkWindow(r.Context(), req.ChunkID, req.Before, req.After)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, ChunkWindowResponse{Chunks: results})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

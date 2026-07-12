@@ -95,6 +95,31 @@ func (s *Server) registerTools() {
 		),
 	), s.handleFindSimilar)
 
+	s.mcp.AddTool(mcplib.NewTool("get_context",
+		mcplib.WithDescription("Get a chunk and its ordered neighboring chunks from the same document"),
+		mcplib.WithTitleAnnotation("Get Chunk Context"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithIdempotentHintAnnotation(true),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		mcplib.WithSchemaAdditionalProperties(false),
+		mcplib.WithInteger("chunk_id",
+			mcplib.Required(),
+			mcplib.Description("The chunk ID from a previous search result"),
+			mcplib.Min(1),
+		),
+		mcplib.WithInteger("before",
+			mcplib.Description("Number of preceding chunks to return (default: 1)"),
+			mcplib.Min(0),
+			mcplib.Max(maxContextNeighbors),
+		),
+		mcplib.WithInteger("after",
+			mcplib.Description("Number of following chunks to return (default: 1)"),
+			mcplib.Min(0),
+			mcplib.Max(maxContextNeighbors),
+		),
+	), s.handleGetContext)
+
 	s.mcp.AddTool(mcplib.NewTool("list_collections",
 		mcplib.WithDescription("List all named collections in the index with their document and chunk counts"),
 		mcplib.WithTitleAnnotation("List Collections"),
@@ -171,6 +196,7 @@ const (
 	maxSearchLimit        = 50
 	defaultSourcesLimit   = 100
 	maxSourcesLimit       = 500
+	maxContextNeighbors   = 5
 	maxResultSnippetRunes = 1200
 	maxSearchOutputRunes  = 12000
 )
@@ -235,6 +261,24 @@ type findSimilarToolResponse struct {
 	Limit   int                   `json:"limit"`
 	Source  searchToolResultRow   `json:"source"`
 	Results []searchToolResultRow `json:"results"`
+}
+
+type getContextToolResponse struct {
+	TargetChunkID int64                  `json:"target_chunk_id"`
+	Before        int                    `json:"before"`
+	After         int                    `json:"after"`
+	Chunks        []getContextToolResult `json:"chunks"`
+}
+
+type getContextToolResult struct {
+	ChunkID      int64  `json:"chunk_id"`
+	Path         string `json:"path"`
+	ChunkIndex   int    `json:"chunk_index"`
+	ChunkContent string `json:"chunk_content"`
+	IsTarget     bool   `json:"is_target"`
+	ParentID     *int64 `json:"parent_id,omitempty"`
+	Depth        int    `json:"depth"`
+	SectionTitle string `json:"section_title,omitempty"`
 }
 
 func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -577,6 +621,74 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 		Results: searchRows(results),
 	}
 	return mcplib.NewToolResultStructured(structured, output), nil
+}
+
+func (s *Server) handleGetContext(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	if err := s.acquireToolSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseToolSlot()
+
+	args := request.GetArguments()
+	chunkID, ok := args["chunk_id"].(float64)
+	if !ok || math.IsNaN(chunkID) || math.IsInf(chunkID, 0) || chunkID <= 0 || chunkID != float64(int64(chunkID)) {
+		return nil, fmt.Errorf("chunk_id must be a positive integer")
+	}
+	before, err := contextNeighborCount(args, "before")
+	if err != nil {
+		return nil, err
+	}
+	after, err := contextNeighborCount(args, "after")
+	if err != nil {
+		return nil, err
+	}
+
+	chunks, err := s.store.GetChunkWindow(ctx, int64(chunkID), before, after)
+	if err != nil {
+		return nil, fmt.Errorf("getting context for chunk %d: %w", int64(chunkID), err)
+	}
+
+	rows := make([]getContextToolResult, 0, len(chunks))
+	var output strings.Builder
+	fmt.Fprintf(&output, "Context for chunk %d (%s):\n\n", int64(chunkID), chunks[0].DocumentPath)
+	for _, chunk := range chunks {
+		isTarget := chunk.ChunkID == int64(chunkID)
+		rows = append(rows, getContextToolResult{
+			ChunkID:      chunk.ChunkID,
+			Path:         chunk.DocumentPath,
+			ChunkIndex:   chunk.ChunkIndex,
+			ChunkContent: chunk.ChunkContent,
+			IsTarget:     isTarget,
+			ParentID:     chunk.ParentID,
+			Depth:        chunk.Depth,
+			SectionTitle: chunk.SectionTitle,
+		})
+		marker := "neighbor"
+		if isTarget {
+			marker = "target"
+		}
+		fmt.Fprintf(&output, "[%s chunk %d, index %d]\n%s\n\n", marker, chunk.ChunkID, chunk.ChunkIndex, chunk.ChunkContent)
+	}
+
+	structured := getContextToolResponse{
+		TargetChunkID: int64(chunkID),
+		Before:        before,
+		After:         after,
+		Chunks:        rows,
+	}
+	return mcplib.NewToolResultStructured(structured, truncateRunes(output.String(), maxSearchOutputRunes)), nil
+}
+
+func contextNeighborCount(args map[string]any, name string) (int, error) {
+	v, ok := args[name]
+	if !ok {
+		return 1, nil
+	}
+	n, ok := v.(float64)
+	if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > maxContextNeighbors || n != float64(int(n)) {
+		return 0, fmt.Errorf("%s must be an integer between 0 and %d", name, maxContextNeighbors)
+	}
+	return int(n), nil
 }
 
 type collectionInfo struct {

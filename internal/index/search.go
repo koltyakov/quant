@@ -112,6 +112,54 @@ func (s *Store) GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult,
 	}, nil
 }
 
+// GetChunkWindow returns a target chunk and its ordered neighbors from the
+// same document. Chunk IDs break ties to keep results deterministic if an
+// imported index contains duplicate chunk indexes.
+func (s *Store) GetChunkWindow(ctx context.Context, chunkID int64, before, after int) ([]SearchResult, error) {
+	if before < 0 || after < 0 {
+		return nil, fmt.Errorf("context window sizes must be non-negative")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		WITH target AS (
+			SELECT document_id, chunk_index FROM chunks WHERE id = ?
+		)
+		SELECT c.id, c.content, c.chunk_index, d.path, c.parent_id, c.depth, c.section_title
+		FROM target
+		JOIN chunks c ON c.document_id = target.document_id
+		JOIN documents d ON d.id = c.document_id
+		WHERE c.chunk_index BETWEEN target.chunk_index - ? AND target.chunk_index + ?
+		ORDER BY c.chunk_index, c.id`, chunkID, before, after)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	results := make([]SearchResult, 0, before+after+1)
+	for rows.Next() {
+		var result SearchResult
+		if err := rows.Scan(
+			&result.ChunkID,
+			&result.ChunkContent,
+			&result.ChunkIndex,
+			&result.DocumentPath,
+			&result.ParentID,
+			&result.Depth,
+			&result.SectionTitle,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return results, nil
+}
+
 func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		return nil, nil

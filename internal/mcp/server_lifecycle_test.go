@@ -447,6 +447,9 @@ func (f *fakeEmbeddingStatusProvider) FindSimilar(context.Context, int64, int) (
 func (f *fakeEmbeddingStatusProvider) GetChunkByID(context.Context, int64) (*index.SearchResult, error) {
 	return nil, nil
 }
+func (f *fakeEmbeddingStatusProvider) GetChunkWindow(context.Context, int64, int, int) ([]index.SearchResult, error) {
+	return nil, nil
+}
 func (f *fakeEmbeddingStatusProvider) GetDocumentByPath(context.Context, string) (*index.Document, error) {
 	return nil, nil
 }

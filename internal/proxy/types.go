@@ -62,6 +62,17 @@ type ChunkByIDResponse struct {
 	Error string             `json:"error,omitempty"`
 }
 
+type ChunkWindowRequest struct {
+	ChunkID int64 `json:"chunk_id"`
+	Before  int   `json:"before"`
+	After   int   `json:"after"`
+}
+
+type ChunkWindowResponse struct {
+	Chunks []index.SearchResult `json:"chunks"`
+	Error  string               `json:"error,omitempty"`
+}
+
 type StatsResponse struct {
 	DocCount   int    `json:"doc_count"`
 	ChunkCount int    `json:"chunk_count"`

@@ -808,11 +808,63 @@ func TestNewServer_UsesRuntimeVersion(t *testing.T) {
 	}
 }
 
+func TestHandleGetContextReturnsOrderedNeighbors(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	store, err := index.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("unexpected store open error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.ReindexDocument(context.Background(), &index.Document{
+		Path: "docs/context.md", Hash: "context", ModifiedAt: testTime(),
+	}, []index.ChunkRecord{
+		{Content: "before", ChunkIndex: 0, Embedding: index.EncodeFloat32([]float32{1})},
+		{Content: "target", ChunkIndex: 1, Embedding: index.EncodeFloat32([]float32{1})},
+		{Content: "after", ChunkIndex: 2, Embedding: index.EncodeFloat32([]float32{1})},
+	}); err != nil {
+		t.Fatalf("unexpected seed error: %v", err)
+	}
+	chunks, err := store.GetDocumentChunksByPath(context.Background(), "docs/context.md")
+	if err != nil {
+		t.Fatalf("loading chunks: %v", err)
+	}
+	var targetID int64
+	for _, chunk := range chunks {
+		if chunk.ChunkIndex == 1 {
+			targetID = chunk.ID
+		}
+	}
+
+	s := newTestServer(dir, dbPath, store)
+	result, err := s.handleGetContext(context.Background(), mcplib.CallToolRequest{
+		Params: mcplib.CallToolParams{Arguments: map[string]any{
+			"chunk_id": float64(targetID),
+			"before":   float64(1),
+			"after":    float64(1),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("handleGetContext returned error: %v", err)
+	}
+	structured, ok := result.StructuredContent.(getContextToolResponse)
+	if !ok {
+		t.Fatalf("unexpected structured response type %T", result.StructuredContent)
+	}
+	if len(structured.Chunks) != 3 || !structured.Chunks[1].IsTarget {
+		t.Fatalf("unexpected context response: %+v", structured)
+	}
+	if structured.Chunks[0].ChunkContent != "before" || structured.Chunks[2].ChunkContent != "after" {
+		t.Fatalf("context chunks are out of order: %+v", structured.Chunks)
+	}
+}
+
 func TestRegisteredToolsDeclareSafeContracts(t *testing.T) {
 	s := NewServer(&config.Config{}, nil, &testutil.QueryCountingEmbedder{}, "test", nil)
 	tools := s.mcp.ListTools()
-	if len(tools) != 8 {
-		t.Fatalf("registered tool count = %d, want 8", len(tools))
+	if len(tools) != 9 {
+		t.Fatalf("registered tool count = %d, want 9", len(tools))
 	}
 
 	for name, registered := range tools {

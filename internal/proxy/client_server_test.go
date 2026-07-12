@@ -66,6 +66,13 @@ func TestClientAdditionalMethodsProxyToMain(t *testing.T) {
 	if chunk.ChunkID != results[0].ChunkID {
 		t.Fatalf("unexpected chunk by id result: %+v", chunk)
 	}
+	window, err := client.GetChunkWindow(ctx, results[0].ChunkID, 1, 1)
+	if err != nil {
+		t.Fatalf("GetChunkWindow returned error: %v", err)
+	}
+	if len(window) != 1 || window[0].ChunkID != results[0].ChunkID {
+		t.Fatalf("unexpected chunk window: %+v", window)
+	}
 
 	similar, err := client.FindSimilar(ctx, results[0].ChunkID, 5)
 	if err != nil {
@@ -297,6 +304,10 @@ func (f *fakeSearcher) GetChunkByID(context.Context, int64) (*index.SearchResult
 		return nil, errors.New("missing chunk")
 	}
 	return f.chunkByID, nil
+}
+
+func (f *fakeSearcher) GetChunkWindow(context.Context, int64, int, int) ([]index.SearchResult, error) {
+	return f.searchResults, nil
 }
 
 func (f *fakeSearcher) GetDocumentChunksByPath(context.Context, string) (map[string]index.ChunkRecord, error) {

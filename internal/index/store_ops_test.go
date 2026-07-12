@@ -235,3 +235,50 @@ func TestStoreChunkLookupCollectionsAndQuarantine(t *testing.T) {
 		t.Fatalf("unexpected collections after delete: %+v", collections)
 	}
 }
+
+func TestGetChunkWindowPreservesOrderDuplicatesAndDocumentBoundary(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	doc := &Document{Path: "docs/target.md", Hash: "target", ModifiedAt: time.Unix(1_700_000_000, 0).UTC()}
+	chunks := []ChunkRecord{
+		{Content: "repeated", ChunkIndex: 0, Embedding: EncodeFloat32([]float32{1})},
+		{Content: "middle", ChunkIndex: 1, Embedding: EncodeFloat32([]float32{1})},
+		{Content: "repeated", ChunkIndex: 2, Embedding: EncodeFloat32([]float32{1})},
+	}
+	if err := store.ReindexDocument(ctx, doc, chunks); err != nil {
+		t.Fatalf("ReindexDocument returned error: %v", err)
+	}
+	if err := store.ReindexDocument(ctx, &Document{Path: "docs/other.md", Hash: "other", ModifiedAt: time.Unix(1_700_000_000, 0).UTC()}, []ChunkRecord{
+		{Content: "must not leak", ChunkIndex: 1, Embedding: EncodeFloat32([]float32{1})},
+	}); err != nil {
+		t.Fatalf("ReindexDocument(other) returned error: %v", err)
+	}
+
+	var targetID int64
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id
+		WHERE d.path = ? AND c.chunk_index = 1`, doc.Path).Scan(&targetID); err != nil {
+		t.Fatalf("loading target chunk id: %v", err)
+	}
+
+	window, err := store.GetChunkWindow(ctx, targetID, 1, 1)
+	if err != nil {
+		t.Fatalf("GetChunkWindow returned error: %v", err)
+	}
+	if len(window) != 3 {
+		t.Fatalf("window size = %d, want 3", len(window))
+	}
+	for i, result := range window {
+		if result.DocumentPath != doc.Path || result.ChunkIndex != i {
+			t.Fatalf("window[%d] = %+v", i, result)
+		}
+	}
+	if window[0].ChunkContent != "repeated" || window[2].ChunkContent != "repeated" {
+		t.Fatalf("duplicate content was not preserved: %+v", window)
+	}
+}

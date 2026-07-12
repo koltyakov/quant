@@ -94,6 +94,10 @@ Results are reordered so the single best chunk per unique document appears first
 
 The `find_similar` tool bypasses keyword search entirely. It loads the stored embedding for the given chunk ID, then queries the HNSW graph for nearest neighbors. This is useful for "more like this" exploration when you already have a relevant chunk from a previous search.
 
+## get_context
+
+The `get_context` tool retrieves a search result in source order with neighboring chunks from the same document. `before` and `after` default to one and allow up to five chunks in either direction. Unlike similarity search, context expansion never crosses a document boundary and preserves duplicate chunks and chunk-index ordering.
+
 ## drill_down
 
 The `drill_down` tool is like `find_similar` but prioritizes diversity across documents. It spreads results across different source files to help explore a topic broadly rather than staying within one file. Useful when a single search result is a good entry point but you want to map the surrounding territory across multiple documents.

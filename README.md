@@ -144,6 +144,7 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 | `list_sources` | List indexed documents. Params: `limit` |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model, embedding status, lifecycle state |
 | `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` |
+| `get_context` | Retrieve a chunk with ordered neighbors from the same document. Params: `chunk_id` (required), `before`, `after` |
 | `drill_down` | Explore a topic by finding diverse chunks related to a seed chunk from a previous search. Params: `chunk_id` (required), `limit` |
 | `summarize_matches` | Summarize all matching documents for a query — returns an overview of what the index contains on a topic. Params: `query` (required), `limit` |
 | `list_collections` | List all named collections with their document and chunk counts |
@@ -152,6 +153,8 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 **`search`** embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common 0-1 scale. If the embedding backend is unavailable, search falls back to keyword-only results automatically. The `embedding_status` field in the response indicates whether results are hybrid or keyword-only.
 
 **`find_similar`** takes a chunk ID from a previous search result and returns the nearest neighbors from the HNSW index. Useful for discovering related content without formulating a new query.
+
+**`get_context`** expands a search hit in source order, returning the target chunk plus up to five preceding and following chunks from the same document. Use it when the matching chunk needs surrounding definitions, setup, or continuation text.
 
 **`drill_down`** is like `find_similar` but prioritizes diversity across documents — it spreads results across different source files to help explore a topic broadly rather than staying within one file.
 
