@@ -808,6 +808,47 @@ func TestNewServer_UsesRuntimeVersion(t *testing.T) {
 	}
 }
 
+func TestRegisteredToolsDeclareSafeContracts(t *testing.T) {
+	s := NewServer(&config.Config{}, nil, &testutil.QueryCountingEmbedder{}, "test", nil)
+	tools := s.mcp.ListTools()
+	if len(tools) != 8 {
+		t.Fatalf("registered tool count = %d, want 8", len(tools))
+	}
+
+	for name, registered := range tools {
+		tool := registered.Tool
+		if tool.InputSchema.AdditionalProperties != false {
+			t.Errorf("tool %q must reject unknown arguments", name)
+		}
+		if tool.Annotations.ReadOnlyHint == nil || tool.Annotations.DestructiveHint == nil ||
+			tool.Annotations.IdempotentHint == nil || tool.Annotations.OpenWorldHint == nil {
+			t.Errorf("tool %q must declare all safety annotations", name)
+			continue
+		}
+		if name == "delete_collection" {
+			if *tool.Annotations.ReadOnlyHint || !*tool.Annotations.DestructiveHint {
+				t.Errorf("delete_collection annotations = %+v", tool.Annotations)
+			}
+		} else if !*tool.Annotations.ReadOnlyHint || *tool.Annotations.DestructiveHint {
+			t.Errorf("read-only tool %q annotations = %+v", name, tool.Annotations)
+		}
+	}
+
+	search := tools["search"].Tool
+	limit, ok := search.InputSchema.Properties["limit"].(map[string]any)
+	if !ok || limit["type"] != "integer" || limit["minimum"] != 1 || limit["maximum"] != maxSearchLimit {
+		t.Fatalf("search limit schema = %#v", limit)
+	}
+	threshold, ok := search.InputSchema.Properties["threshold"].(map[string]any)
+	if !ok || threshold["minimum"] != 0.0 || threshold["maximum"] != 1.0 {
+		t.Fatalf("search threshold schema = %#v", threshold)
+	}
+	query, ok := search.InputSchema.Properties["query"].(map[string]any)
+	if !ok || query["minLength"] != 1 || query["maxLength"] != maxQueryLength {
+		t.Fatalf("search query schema = %#v", query)
+	}
+}
+
 func newTestServer(dir, dbPath string, store *index.Store) *Server {
 	tracker := runtimestate.NewIndexStateTracker()
 	tracker.Set(runtimestate.IndexStateReady, "test ready")

@@ -63,7 +63,10 @@ func NewServer(cfg *config.Config, store index.Searcher, embedder embed.Embedder
 		maxToolSlots: maxTools,
 	}
 
-	s.mcp = mcpserver.NewMCPServer("quant", version)
+	s.mcp = mcpserver.NewMCPServer("quant", version,
+		mcpserver.WithRecovery(),
+		mcpserver.WithInputSchemaValidation(),
+	)
 	s.registerTools()
 
 	return s
