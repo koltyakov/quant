@@ -697,6 +697,29 @@ func TestSplitChunkForEmbeddingBudget_LargeContentWithHeading(t *testing.T) {
 	}
 }
 
+func TestSplitChunkForEmbeddingBudgetPreservesStructuralMetadata(t *testing.T) {
+	t.Parallel()
+
+	c := chunk.Chunk{
+		Content:      strings.Repeat("structured content ", embed.MaxInputRunes),
+		Index:        7,
+		Heading:      "Parent > Section",
+		ParentIndex:  3,
+		Depth:        2,
+		SectionTitle: "Section",
+	}
+	parts := splitChunkForEmbeddingBudget(c)
+	if len(parts) < 2 {
+		t.Fatalf("expected multiple parts, got %d", len(parts))
+	}
+	for i, part := range parts {
+		if part.Index != c.Index || part.Heading != c.Heading || part.ParentIndex != c.ParentIndex ||
+			part.Depth != c.Depth || part.SectionTitle != c.SectionTitle {
+			t.Fatalf("part %d lost structural metadata: %+v", i, part)
+		}
+	}
+}
+
 func TestCodeSignature_Basic(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

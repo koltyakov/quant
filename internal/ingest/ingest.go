@@ -247,7 +247,9 @@ func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
 			piece = embed.TruncateForInput(remaining, contentBudget)
 			consumed = min(utf8.RuneCountInString(remaining), contentBudget)
 		}
-		parts = append(parts, chunk.Chunk{Content: piece, Heading: c.Heading})
+		part := c
+		part.Content = piece
+		parts = append(parts, part)
 		remainingRunes := []rune(remaining)
 		if consumed >= len(remainingRunes) {
 			break
