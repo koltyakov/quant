@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -16,6 +17,7 @@ type mockEmbedder struct {
 	vectors [][]float32
 	err     error
 	called  int
+	dims    int
 }
 
 func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
@@ -45,8 +47,13 @@ func (m *mockEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float3
 	return out, nil
 }
 
-func (m *mockEmbedder) Dimensions() int { return 1 }
-func (m *mockEmbedder) Close() error    { return nil }
+func (m *mockEmbedder) Dimensions() int {
+	if m.dims > 0 {
+		return m.dims
+	}
+	return 1
+}
+func (m *mockEmbedder) Close() error { return nil }
 
 type mockDedupStore struct {
 	store    map[string][]byte
@@ -103,6 +110,39 @@ func TestDiffChunks_AllNew(t *testing.T) {
 	}
 	if len(positions) != 2 {
 		t.Fatalf("expected 2 positions, got %d", len(positions))
+	}
+}
+
+func TestEmbedChunksRejectsMalformedVectors(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		vector []float32
+		dims   int
+	}{
+		{name: "empty", vector: nil, dims: 2},
+		{name: "wrong dimensions", vector: []float32{1}, dims: 2},
+		{name: "NaN", vector: []float32{float32(math.NaN()), 1}, dims: 2},
+		{name: "positive infinity", vector: []float32{float32(math.Inf(1)), 1}, dims: 2},
+		{name: "negative infinity", vector: []float32{float32(math.Inf(-1)), 1}, dims: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dedup := newMockDedupStore()
+			pipeline := &Pipeline{
+				Embedder:   &mockEmbedder{vectors: [][]float32{tc.vector}, dims: tc.dims},
+				DedupStore: dedup,
+			}
+			records := make([]index.ChunkRecord, 1)
+			err := pipeline.EmbedChunks(context.Background(), []chunk.Chunk{{Content: "test"}}, []PendingEmbed{{ChunkIdx: 0}}, records)
+			if err == nil {
+				t.Fatal("expected malformed vector error")
+			}
+			if records[0].Content != "" || len(dedup.store) != 0 {
+				t.Fatalf("malformed vector mutated output: record=%+v dedup=%v", records[0], dedup.store)
+			}
+		})
 	}
 }
 

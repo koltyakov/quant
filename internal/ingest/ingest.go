@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -154,6 +155,20 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 				"embedding chunks %d-%d: embedder returned %d embeddings for %d chunks",
 				result.batchStart, result.batchStart+len(batch)-1, len(result.embeddings), len(batch),
 			)
+		}
+		expectedDimensions := p.Embedder.Dimensions()
+		for i, vector := range result.embeddings {
+			if len(vector) == 0 {
+				return fmt.Errorf("embedding chunk %d: embedder returned an empty vector", result.batchStart+i)
+			}
+			if expectedDimensions > 0 && len(vector) != expectedDimensions {
+				return fmt.Errorf("embedding chunk %d: vector has %d dimensions, want %d", result.batchStart+i, len(vector), expectedDimensions)
+			}
+			for _, value := range vector {
+				if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+					return fmt.Errorf("embedding chunk %d: vector contains a non-finite value", result.batchStart+i)
+				}
+			}
 		}
 
 		var summaries []*ChunkSummary
