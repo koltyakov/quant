@@ -139,7 +139,19 @@ func mergeCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCand
 			return all[i].hasVector
 		}
 		if all[i].vectorScore == all[j].vectorScore {
-			return all[i].keywordRank < all[j].keywordRank
+			if (all[i].keywordRank > 0) != (all[j].keywordRank > 0) {
+				return all[i].keywordRank > 0
+			}
+			if all[i].keywordRank != all[j].keywordRank {
+				return all[i].keywordRank < all[j].keywordRank
+			}
+			if all[i].result.DocumentPath != all[j].result.DocumentPath {
+				return all[i].result.DocumentPath < all[j].result.DocumentPath
+			}
+			if all[i].result.ChunkIndex != all[j].result.ChunkIndex {
+				return all[i].result.ChunkIndex < all[j].result.ChunkIndex
+			}
+			return all[i].id < all[j].id
 		}
 		return all[i].vectorScore > all[j].vectorScore
 	})
@@ -237,9 +249,7 @@ func pathMatchesAnyToken(path string, queryTokens []string) bool {
 func documentDiversity(limit int) rankingStage {
 	return func(candidates []scoredCandidate) []scoredCandidate {
 		// Sort by score descending.
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].score > candidates[j].score
-		})
+		sort.Slice(candidates, func(i, j int) bool { return scoredCandidateBefore(candidates[i], candidates[j]) })
 
 		results := make([]scoredCandidate, 0, limit)
 		seen := make(map[string]bool)
@@ -283,6 +293,19 @@ func documentDiversity(limit int) rankingStage {
 
 		return results
 	}
+}
+
+func scoredCandidateBefore(a, b scoredCandidate) bool {
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	if a.result.DocumentPath != b.result.DocumentPath {
+		return a.result.DocumentPath < b.result.DocumentPath
+	}
+	if a.result.ChunkIndex != b.result.ChunkIndex {
+		return a.result.ChunkIndex < b.result.ChunkIndex
+	}
+	return a.result.ChunkID < b.result.ChunkID
 }
 
 // runRankingPipeline executes ranking stages in order and returns final results.
@@ -369,7 +392,7 @@ type scoredResult struct {
 type candidateHeap []scoredResult
 
 func (h candidateHeap) Len() int           { return len(h) }
-func (h candidateHeap) Less(i, j int) bool { return h[i].score < h[j].score }
+func (h candidateHeap) Less(i, j int) bool { return scoredResultBetter(h[j], h[i]) }
 func (h candidateHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 
 func (h *candidateHeap) Push(x any) {
@@ -382,4 +405,17 @@ func (h *candidateHeap) Pop() any {
 	item := old[n-1]
 	*h = old[:n-1]
 	return item
+}
+
+func scoredResultBetter(a, b scoredResult) bool {
+	if a.score != b.score {
+		return a.score > b.score
+	}
+	if a.path != b.path {
+		return a.path < b.path
+	}
+	if a.chunkIndex != b.chunkIndex {
+		return a.chunkIndex < b.chunkIndex
+	}
+	return a.id < b.id
 }

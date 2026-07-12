@@ -404,7 +404,7 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 	baseQuery += metadataWhere // #nosec G202
 	args = append(args, metadataArgs...)
 
-	baseQuery += " ORDER BY bm25(chunks_fts) LIMIT ?"
+	baseQuery += " ORDER BY bm25(chunks_fts), d.path, c.chunk_index, c.id LIMIT ?"
 	args = append(args, candidateLimit)
 
 	rows, err = s.db.QueryContext(ctx, baseQuery, args...)
@@ -670,7 +670,7 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 
 		if len(top) < limit {
 			heap.Push(&top, candidate)
-		} else if candidate.score > top[0].score {
+		} else if scoredResultBetter(candidate, top[0]) {
 			top[0] = candidate
 			heap.Fix(&top, 0)
 		}

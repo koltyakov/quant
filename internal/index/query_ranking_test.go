@@ -84,6 +84,34 @@ func TestPathBoostAndSignalShareTokenSemantics(t *testing.T) {
 	}
 }
 
+func TestRankingUsesDeterministicTieBreakers(t *testing.T) {
+	t.Parallel()
+
+	keyword := map[int]*searchCandidate{
+		3: {id: 3, result: SearchResult{DocumentPath: "b.md", ChunkIndex: 0}, keywordRank: 1},
+		2: {id: 2, result: SearchResult{DocumentPath: "a.md", ChunkIndex: 1}, keywordRank: 1},
+		1: {id: 1, result: SearchResult{DocumentPath: "a.md", ChunkIndex: 0}, keywordRank: 1},
+	}
+	merged := mergeCandidates(keyword, nil)
+	for i, want := range []int64{1, 2, 3} {
+		if merged[i].result.ChunkID != want {
+			t.Fatalf("merged[%d].ChunkID = %d, want %d", i, merged[i].result.ChunkID, want)
+		}
+	}
+
+	tied := []scoredCandidate{
+		{result: SearchResult{ChunkID: 3, DocumentPath: "b.md"}, score: 1},
+		{result: SearchResult{ChunkID: 2, DocumentPath: "a.md", ChunkIndex: 1}, score: 1},
+		{result: SearchResult{ChunkID: 1, DocumentPath: "a.md", ChunkIndex: 0}, score: 1},
+	}
+	SortByScore(tied)
+	for i, want := range []int64{1, 2, 3} {
+		if tied[i].result.ChunkID != want {
+			t.Fatalf("sorted[%d].ChunkID = %d, want %d", i, tied[i].result.ChunkID, want)
+		}
+	}
+}
+
 func TestAnalyzeQueryAndHelpers(t *testing.T) {
 	t.Parallel()
 

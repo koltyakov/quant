@@ -283,7 +283,5 @@ func ApplySignalsToRanking(candidates []scoredCandidate, ctx *SignalContext) []s
 
 // SortByScore sorts candidates by score in descending order.
 func SortByScore(candidates []scoredCandidate) {
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
+	sort.Slice(candidates, func(i, j int) bool { return scoredCandidateBefore(candidates[i], candidates[j]) })
 }

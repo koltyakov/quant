@@ -70,8 +70,8 @@ func (d *docEmbeddingIndex) topDocPaths(queryEmbed []float32, topK int) map[stri
 		dot := dotProduct(queryEmbed, doc.vec)
 		if len(top) < topK {
 			heap.Push(&top, scoredResult{path: doc.path, score: dot})
-		} else if dot > top[0].score {
-			top[0] = scoredResult{path: doc.path, score: dot}
+		} else if candidate := (scoredResult{path: doc.path, score: dot}); scoredResultBetter(candidate, top[0]) {
+			top[0] = candidate
 			heap.Fix(&top, 0)
 		}
 	}
