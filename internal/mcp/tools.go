@@ -170,7 +170,7 @@ func (s *Server) registerTools() {
 	), s.handleDrillDown)
 
 	s.mcp.AddTool(mcplib.NewTool("summarize_matches",
-		mcplib.WithDescription("Summarize all matching documents for a query, returning a concise overview of what the index contains on a topic"),
+		mcplib.WithDescription("Return a concise, non-exhaustive overview of the top matching chunks and source documents for a query"),
 		mcplib.WithTitleAnnotation("Summarize Matches"),
 		mcplib.WithReadOnlyHintAnnotation(true),
 		mcplib.WithDestructiveHintAnnotation(false),
@@ -873,10 +873,15 @@ func diversifySearchResults(seedPath string, results []index.SearchResult, limit
 }
 
 type summarizeMatchesResponse struct {
-	Query         string   `json:"query"`
-	DocumentCount int      `json:"document_count"`
-	Documents     []string `json:"documents"`
-	Overview      string   `json:"overview"`
+	Query           string   `json:"query"`
+	Limit           int      `json:"limit"`
+	MatchCount      int      `json:"match_count"`
+	DocumentCount   int      `json:"document_count"`
+	Documents       []string `json:"documents"`
+	EmbeddingStatus string   `json:"embedding_status"`
+	Note            string   `json:"note,omitempty"`
+	Exhaustive      bool     `json:"exhaustive"`
+	Overview        string   `json:"overview"`
 }
 
 func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -891,15 +896,22 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 		return nil, fmt.Errorf("query is required")
 	}
 	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
 	if len([]rune(query)) > maxQueryLength {
 		query = string([]rune(query)[:maxQueryLength])
 	}
 
 	limit := 20
 	if v, ok := args["limit"].(float64); ok {
-		if !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 1 {
-			limit = min(int(v), 50)
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != float64(int(v)) {
+			return nil, fmt.Errorf("limit must be an integer between 1 and %d", maxSearchLimit)
 		}
+		limit = int(v)
+	}
+	if limit < 1 || limit > maxSearchLimit {
+		return nil, fmt.Errorf("limit must be between 1 and %d", maxSearchLimit)
 	}
 
 	queryEmbedding, embedErr := s.cachedEmbed(ctx, query)
@@ -922,8 +934,11 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 	}
 
 	var overview strings.Builder
-	fmt.Fprintf(&overview, "Found %d matching chunks across %d documents for query: %q\n\n",
-		len(results), len(uniqueDocs), query)
+	fmt.Fprintf(&overview, "Top-match overview: %d chunks across %d documents for query %q (limit %d; not exhaustive)\n\n",
+		len(results), len(uniqueDocs), query, limit)
+	if embedErr != nil {
+		overview.WriteString("[Note: embedding backend unavailable; overview is based on keyword-only results]\n\n")
+	}
 
 	if len(uniqueDocs) > 0 {
 		overview.WriteString("Matching documents:\n")
@@ -948,10 +963,15 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 	}
 
 	structured := summarizeMatchesResponse{
-		Query:         query,
-		DocumentCount: len(uniqueDocs),
-		Documents:     uniqueDocs,
-		Overview:      overview.String(),
+		Query:           query,
+		Limit:           limit,
+		MatchCount:      len(results),
+		DocumentCount:   len(uniqueDocs),
+		Documents:       uniqueDocs,
+		EmbeddingStatus: embeddingStatus(embedErr),
+		Note:            embeddingNote(embedErr),
+		Exhaustive:      false,
+		Overview:        overview.String(),
 	}
 	return mcplib.NewToolResultStructured(structured, overview.String()), nil
 }

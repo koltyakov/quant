@@ -146,7 +146,7 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 | `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` |
 | `get_context` | Retrieve a chunk with ordered neighbors from the same document. Params: `chunk_id` (required), `before`, `after` |
 | `drill_down` | Explore a topic by finding diverse chunks related to a seed chunk from a previous search. Params: `chunk_id` (required), `limit` |
-| `summarize_matches` | Summarize all matching documents for a query — returns an overview of what the index contains on a topic. Params: `query` (required), `limit` |
+| `summarize_matches` | Return a non-exhaustive overview of top matching chunks and source documents. Params: `query` (required), `limit` |
 | `list_collections` | List all named collections with their document and chunk counts |
 | `delete_collection` | Delete all documents and chunks in a named collection. Params: `collection` (required) |
 
@@ -158,7 +158,7 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 
 **`drill_down`** is like `find_similar` but prioritizes diversity across documents — it spreads results across different source files to help explore a topic broadly rather than staying within one file.
 
-**`summarize_matches`** runs a search and returns a high-level overview of which documents matched and what they contain, without returning individual chunks. Useful when you want a quick map of what the index knows about a subject.
+**`summarize_matches`** runs a bounded search and returns a high-level, non-exhaustive overview of the top matching documents and excerpts. The response reports the effective limit, match count, and embedding mode so agents can distinguish a quick map from complete corpus coverage.
 
 All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback. Tool concurrency is bounded by `--max-concurrent-tools` (auto-tuned by CPU by default).
 

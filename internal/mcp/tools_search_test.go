@@ -421,6 +421,16 @@ func TestHandleSummarizeMatches(t *testing.T) {
 	if !strings.Contains(text, "guide.md") {
 		t.Fatalf("expected document path in summary, got %q", text)
 	}
+	structured, ok := result.StructuredContent.(summarizeMatchesResponse)
+	if !ok {
+		t.Fatalf("unexpected structured response type %T", result.StructuredContent)
+	}
+	if structured.MatchCount != 1 || structured.DocumentCount != 1 || structured.Limit != 20 {
+		t.Fatalf("unexpected summary counts: %+v", structured)
+	}
+	if structured.Exhaustive || structured.EmbeddingStatus != "hybrid" {
+		t.Fatalf("unexpected summary scope/status: %+v", structured)
+	}
 }
 
 func TestHandleSummarizeMatches_MissingQuery(t *testing.T) {
@@ -442,6 +452,19 @@ func TestHandleSummarizeMatches_MissingQuery(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing query")
+	}
+
+	for _, args := range []map[string]any{
+		{"query": "   "},
+		{"query": "guide", "limit": float64(1.5)},
+		{"query": "guide", "limit": float64(0)},
+		{"query": "guide", "limit": float64(maxSearchLimit + 1)},
+	} {
+		if _, err := s.handleSummarizeMatches(context.Background(), mcplib.CallToolRequest{
+			Params: mcplib.CallToolParams{Arguments: args},
+		}); err == nil {
+			t.Fatalf("expected error for arguments %#v", args)
+		}
 	}
 }
 

@@ -106,7 +106,7 @@ The `drill_down` tool is like `find_similar` but prioritizes diversity across do
 
 ## summarize_matches
 
-The `summarize_matches` tool runs a hybrid search and returns a high-level overview of which documents matched and what they contain, without returning individual chunks. It groups results by source document and produces a per-document summary. Useful when you want a quick map of what the index contains on a subject before drilling into specific chunks.
+The `summarize_matches` tool runs a bounded search and returns a non-exhaustive overview of the top matching source documents with a small set of excerpts. Structured output includes the effective limit, matched chunk and document counts, and embedding mode. Use it for a quick map before drilling into specific chunks, not as proof that every matching document was examined.
 
 ## Score kind
 
