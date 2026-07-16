@@ -17,6 +17,8 @@ type Client struct {
 	httpClient *http.Client
 }
 
+var _ index.Searcher = (*Client)(nil)
+
 func NewClient(addr string) *Client {
 	return &Client{
 		addr: "http://" + addr,
@@ -105,10 +107,6 @@ func (c *Client) GetChunkWindow(ctx context.Context, chunkID int64, before, afte
 	return resp.Chunks, nil
 }
 
-func (c *Client) GetDocumentByPath(_ context.Context, _ string) (*index.Document, error) {
-	return nil, fmt.Errorf("GetDocumentByPath not available in proxy mode")
-}
-
 func (c *Client) ListDocuments(ctx context.Context) ([]index.Document, error) {
 	return c.ListDocumentsLimit(ctx, 0)
 }
@@ -120,10 +118,6 @@ func (c *Client) ListDocumentsLimit(ctx context.Context, limit int) ([]index.Doc
 		return nil, err
 	}
 	return resp.Documents, nil
-}
-
-func (c *Client) GetDocumentChunksByPath(_ context.Context, _ string) (map[string]index.ChunkRecord, error) {
-	return nil, fmt.Errorf("GetDocumentChunksByPath not available in proxy mode")
 }
 
 func (c *Client) Stats(ctx context.Context) (int, int, error) {

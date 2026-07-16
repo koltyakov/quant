@@ -126,7 +126,7 @@ type HealthProvider interface {
 // Composite Interfaces
 // -----------------------------------------------------------------------------
 
-// Searcher provides search capabilities over the index.
+// Searcher provides the index read capabilities exposed by query servers.
 type SearchFilter struct {
 	FileTypes  []string
 	Languages  []string
@@ -138,9 +138,9 @@ type Searcher interface {
 	Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error)
 	SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter SearchFilter) ([]SearchResult, error)
 	FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error)
+	GetChunkByID(ctx context.Context, chunkID int64) (*SearchResult, error)
 	GetChunkWindow(ctx context.Context, chunkID int64, before, after int) ([]SearchResult, error)
-	ChunkRepository
-	DocumentRepository
+	ListDocumentsLimit(ctx context.Context, limit int) ([]Document, error)
 	StatsProvider
 	HealthProvider
 	CollectionRepository

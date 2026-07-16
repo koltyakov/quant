@@ -5,8 +5,8 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"sort"
 	"testing"
-	"time"
 )
 
 func TestUnifiedRRFKeywordOnlyOmitsVectorSignal(t *testing.T) {
@@ -65,7 +65,7 @@ func TestPathMatchingUsesExactComponents(t *testing.T) {
 	}
 }
 
-func TestPathBoostAndSignalShareTokenSemantics(t *testing.T) {
+func TestPathBoostUsesExactComponentSemantics(t *testing.T) {
 	t.Parallel()
 
 	candidates := []scoredCandidate{
@@ -75,12 +75,6 @@ func TestPathBoostAndSignalShareTokenSemantics(t *testing.T) {
 	boosted := pathBoost([]string{"auth"})(candidates)
 	if boosted[0].score <= 0 || boosted[1].score != 0 {
 		t.Fatalf("unexpected path boost scores: %+v", boosted)
-	}
-
-	ctx := &SignalContext{QueryTokens: []string{"auth"}}
-	signal := &PathMatchSignal{}
-	if signal.Score(ctx, &candidates[0]) <= 0 || signal.Score(ctx, &candidates[1]) != 0 {
-		t.Fatal("PathMatchSignal does not match pathBoost token semantics")
 	}
 }
 
@@ -104,7 +98,7 @@ func TestRankingUsesDeterministicTieBreakers(t *testing.T) {
 		{result: SearchResult{ChunkID: 2, DocumentPath: "a.md", ChunkIndex: 1}, score: 1},
 		{result: SearchResult{ChunkID: 1, DocumentPath: "a.md", ChunkIndex: 0}, score: 1},
 	}
-	SortByScore(tied)
+	sort.Slice(tied, func(i, j int) bool { return scoredCandidateBefore(tied[i], tied[j]) })
 	for i, want := range []int64{1, 2, 3} {
 		if tied[i].result.ChunkID != want {
 			t.Fatalf("sorted[%d].ChunkID = %d, want %d", i, tied[i].result.ChunkID, want)
@@ -178,95 +172,6 @@ func TestCanonicalFileType(t *testing.T) {
 		if got := CanonicalFileType(input); got != want {
 			t.Errorf("CanonicalFileType(%q) = %q, want %q", input, got, want)
 		}
-	}
-}
-
-func TestSignalRegistryAndHelpers(t *testing.T) {
-	t.Parallel()
-
-	registry := NewSignalRegistry()
-	registry.Register(&KeywordSignal{})
-	registry.Register(&PathMatchSignal{WeightOverride: 2})
-
-	signals := registry.List()
-	if len(signals) != 2 {
-		t.Fatalf("expected 2 signals, got %d", len(signals))
-	}
-	signals[0] = nil
-	if registry.List()[0] == nil {
-		t.Fatal("List should return a copy")
-	}
-
-	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
-	ctx := &SignalContext{
-		Query:       "Auth Service",
-		QueryTokens: []string{"auth", "service"},
-		Now:         now,
-		Weights:     QuerySignalWeights{Keyword: 1.5, Vector: 0.8},
-	}
-	candidates := []scoredCandidate{
-		{
-			result:      SearchResult{DocumentPath: "internal/auth/service.go"},
-			keywordRank: 2,
-			vectorRank:  3,
-			modifiedAt:  now.Add(-24 * time.Hour),
-		},
-		{
-			result:      SearchResult{DocumentPath: "docs/readme.md"},
-			keywordRank: noKeywordRank,
-			vectorRank:  0,
-		},
-	}
-
-	scored := registry.ApplySignals(ctx, candidates)
-	if scored[0].score <= 0 {
-		t.Fatalf("expected first candidate to receive signal score, got %f", scored[0].score)
-	}
-	if scored[1].score != 0 {
-		t.Fatalf("expected second candidate score to stay zero, got %f", scored[1].score)
-	}
-
-	recency := (&RecencySignal{HalfLife: 48 * time.Hour}).Score(ctx, &candidates[0])
-	if recency <= 0 {
-		t.Fatalf("expected positive recency score, got %f", recency)
-	}
-	if score := (&VectorSignal{}).Score(ctx, &scoredCandidate{vectorRank: 0}); score != 0 {
-		t.Fatalf("expected zero vector score for missing rank, got %f", score)
-	}
-
-	fileType := &FileTypeSignal{
-		Extensions: map[string]float32{".go": 3},
-		Default:    1,
-	}
-	if score := fileType.Score(ctx, &ScoredCandidate{result: SearchResult{DocumentPath: "internal/auth/service.go"}}); score <= 0 {
-		t.Fatalf("expected file type signal score, got %f", score)
-	}
-	if score := fileType.Score(ctx, &ScoredCandidate{result: SearchResult{DocumentPath: "README"}}); score <= 0 {
-		t.Fatalf("expected default file type score, got %f", score)
-	}
-
-	if got := toLower("Auth/HTTP.go"); got != "auth/http.go" {
-		t.Fatalf("unexpected toLower result: %q", got)
-	}
-	if !containsString("service.go", "vice") || containsString("service.go", "VICE") {
-		t.Fatal("containsString should perform literal matching")
-	}
-	if idx := searchString("service.go", "ice"); idx != 4 {
-		t.Fatalf("unexpected substring index: %d", idx)
-	}
-	if ext := fileExtension("docs/Guide.MD"); ext != ".md" {
-		t.Fatalf("unexpected extension: %q", ext)
-	}
-
-	created := CreateSignalContext("Auth Service", QuerySignalWeights{Keyword: 1, Vector: 1}, true, false)
-	if !reflect.DeepEqual(created.QueryTokens, []string{"auth", "service"}) {
-		t.Fatalf("unexpected query tokens: %v", created.QueryTokens)
-	}
-
-	out := []scoredCandidate{{score: 0.1}, {score: 0.4}, {score: 0.2}}
-	SortByScore(out)
-	if out[0].score < out[1].score || out[1].score < out[2].score {
-		t.Fatalf("expected descending order after SortByScore: %+v", out)
 	}
 }
 

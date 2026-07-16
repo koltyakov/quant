@@ -367,10 +367,8 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 
 	var results []index.SearchResult
 	var err error
-	if filtered, ok := s.store.(interface {
-		SearchFiltered(context.Context, string, []float32, int, string, index.SearchFilter) ([]index.SearchResult, error)
-	}); ok && (len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0 || filter.Collection != "") {
-		results, err = filtered.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, filter)
+	if len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0 || filter.Collection != "" {
+		results, err = s.store.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, filter)
 	} else {
 		results, err = s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
 	}

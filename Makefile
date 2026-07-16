@@ -6,7 +6,7 @@ BUILD_FLAGS := -trimpath -ldflags "$(BUILD_LDFLAGS)"
 COVER_PROFILE ?= tmp/coverage.out
 COVER_HTML ?= tmp/coverage.html
 
-.PHONY: build test cov fmt lint clean install uninstall
+.PHONY: build test cov fmt lint clean install uninstall tidy deps-update
 
 build:
 	mkdir -p bin
@@ -20,6 +20,10 @@ uninstall:
 	rm -f $$HOME/.local/bin/$(APP)
 
 tidy:
+	go mod tidy
+
+deps-update:
+	go get -u ./...
 	go mod tidy
 
 test:

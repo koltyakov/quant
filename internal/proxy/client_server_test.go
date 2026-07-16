@@ -120,12 +120,6 @@ func TestClientAdditionalMethodsProxyToMain(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("expected no-op close, got %v", err)
 	}
-	if _, err := client.GetDocumentByPath(ctx, "alpha/one.md"); err == nil {
-		t.Fatal("expected GetDocumentByPath proxy error")
-	}
-	if _, err := client.GetDocumentChunksByPath(ctx, "alpha/one.md"); err == nil {
-		t.Fatal("expected GetDocumentChunksByPath proxy error")
-	}
 }
 
 func TestClientDoRequestAndServerHandlers(t *testing.T) {
@@ -308,21 +302,6 @@ func (f *fakeSearcher) GetChunkByID(context.Context, int64) (*index.SearchResult
 
 func (f *fakeSearcher) GetChunkWindow(context.Context, int64, int, int) ([]index.SearchResult, error) {
 	return f.searchResults, nil
-}
-
-func (f *fakeSearcher) GetDocumentChunksByPath(context.Context, string) (map[string]index.ChunkRecord, error) {
-	return map[string]index.ChunkRecord{}, nil
-}
-
-func (f *fakeSearcher) GetDocumentByPath(context.Context, string) (*index.Document, error) {
-	if len(f.documents) == 0 {
-		return nil, nil
-	}
-	return &f.documents[0], nil
-}
-
-func (f *fakeSearcher) ListDocuments(context.Context) ([]index.Document, error) {
-	return f.documents, nil
 }
 
 func (f *fakeSearcher) ListDocumentsLimit(_ context.Context, limit int) ([]index.Document, error) {
