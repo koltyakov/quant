@@ -13,10 +13,7 @@ func TestRemoveBackup(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")
 
-	origData := []byte("not a real sqlite db")
-	if err := os.WriteFile(dbPath, origData, 0600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
+	createMarkedIncompatibleDatabase(t, dbPath)
 
 	store, err := NewStore(dbPath)
 	if err != nil {

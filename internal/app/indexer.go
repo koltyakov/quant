@@ -242,7 +242,6 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 			report.HadIndexFailures = true
 			logx.Error("indexing failed", "path", result.ref.AbsPath, "err", result.err)
 			idx.scheduleIndexRetryRef(ctx, result.ref, result.modTime, result.err)
-			reclaimProcessMemory()
 			continue
 		}
 		if idx.retries != nil {
@@ -254,7 +253,6 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 		case IndexRemoved:
 			logx.Info("removed document from index", "path", result.ref.AbsPath)
 		}
-		reclaimProcessMemory()
 	}
 	if walkErr := <-walkDone; walkErr != nil {
 		if ctx.Err() != nil {
@@ -291,7 +289,6 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 				case IndexRemoved:
 					logx.Info("removed document from index", "path", ref.AbsPath)
 				}
-				reclaimProcessMemory()
 				continue
 			}
 			if err := idx.store.DeleteDocument(ctx, ref.Key); err != nil {
@@ -431,7 +428,6 @@ func (idx *Indexer) processLiveIndexDocumentDirect(ctx context.Context, ref Docu
 			logx.Info("removed document from index", "path", ref.AbsPath)
 		}
 	}
-	reclaimProcessMemory()
 }
 
 func (idx *Indexer) WatchLoop(ctx context.Context, watcher *watch.Watcher) {

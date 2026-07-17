@@ -22,13 +22,13 @@ func TestMigrate_FullSchemaCreation(t *testing.T) {
 
 	var tableCount int
 	err = store.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('documents','chunks','embedding_metadata','hnsw_state','quarantine','content_dedup')`,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('documents','chunks','embedding_metadata','hnsw_state','index_state','quarantine','content_dedup')`,
 	).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("counting tables: %v", err)
 	}
-	if tableCount != 6 {
-		t.Fatalf("expected 6 tables, got %d", tableCount)
+	if tableCount != 7 {
+		t.Fatalf("expected 7 tables, got %d", tableCount)
 	}
 
 	var ftsCount int
@@ -40,6 +40,106 @@ func TestMigrate_FullSchemaCreation(t *testing.T) {
 	}
 	if ftsCount != 3 {
 		t.Fatalf("expected 3 FTS triggers, got %d", ftsCount)
+	}
+
+	var hnswTriggerCount int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'trigger' AND name IN ('hnsw_chunks_ai', 'hnsw_chunks_ad', 'hnsw_chunks_au')
+	`).Scan(&hnswTriggerCount); err != nil {
+		t.Fatalf("counting HNSW invalidation triggers: %v", err)
+	}
+	if hnswTriggerCount != 3 {
+		t.Fatalf("expected 3 HNSW invalidation triggers, got %d", hnswTriggerCount)
+	}
+
+	var applicationID int64
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA application_id`).Scan(&applicationID); err != nil {
+		t.Fatalf("reading application id: %v", err)
+	}
+	if applicationID != quantApplicationID {
+		t.Fatalf("application_id = %d, want %d", applicationID, quantApplicationID)
+	}
+}
+
+func TestChunkMutationInvalidatesHNSWStateTransactionally(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	docID, err := store.UpsertDocument(ctx, &Document{Path: "trigger/doc.txt", Hash: "h1", ModifiedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("UpsertDocument() error: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions)
+		VALUES (1, CURRENT_TIMESTAMP, 1, 'test', 1)
+	`); err != nil {
+		t.Fatalf("seeding hnsw_state: %v", err)
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO chunks (document_id, content, chunk_index, embedding)
+		VALUES (?, 'rolled back', 0, X'01')
+	`, docID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("inserting chunk in transaction: %v", err)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&count); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("querying hnsw_state in transaction: %v", err)
+	}
+	if count != 0 {
+		_ = tx.Rollback()
+		t.Fatalf("hnsw_state count in mutating transaction = %d, want 0", count)
+	}
+	var generation int64
+	if err := tx.QueryRowContext(ctx, `SELECT chunk_generation FROM index_state WHERE id = 1`).Scan(&generation); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("querying generation in transaction: %v", err)
+	}
+	if generation != 1 {
+		_ = tx.Rollback()
+		t.Fatalf("transaction generation = %d, want 1", generation)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback() error: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&count); err != nil {
+		t.Fatalf("querying hnsw_state after rollback: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("hnsw_state count after rollback = %d, want 1", count)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT chunk_generation FROM index_state WHERE id = 1`).Scan(&generation); err != nil {
+		t.Fatalf("querying generation after rollback: %v", err)
+	}
+	if generation != 0 {
+		t.Fatalf("generation after rollback = %d, want 0", generation)
+	}
+
+	if err := store.InsertChunk(ctx, &ChunkRecord{DocumentID: docID, Content: "committed", ChunkIndex: 0, Embedding: []byte{1}}); err != nil {
+		t.Fatalf("InsertChunk() error: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&count); err != nil {
+		t.Fatalf("querying hnsw_state after commit: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("hnsw_state count after committed mutation = %d, want 0", count)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT chunk_generation FROM index_state WHERE id = 1`).Scan(&generation); err != nil {
+		t.Fatalf("querying generation after commit: %v", err)
+	}
+	if generation != 1 {
+		t.Fatalf("generation after commit = %d, want 1", generation)
 	}
 }
 
@@ -246,42 +346,6 @@ func TestDeleteChunksByDocumentIDTx(t *testing.T) {
 	}
 }
 
-func TestRebuildChunksFTSTx(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "quant.db")
-	store, err := NewStore(dbPath)
-	if err != nil {
-		t.Fatalf("NewStore() error: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	ctx := context.Background()
-	id, err := store.UpsertDocument(ctx, &Document{Path: "fts_rebuild/doc.txt", Hash: "h1", ModifiedAt: time.Now()})
-	if err != nil {
-		t.Fatalf("UpsertDocument: %v", err)
-	}
-	if err := store.InsertChunk(ctx, &ChunkRecord{
-		DocumentID: id, Content: "rebuild test", ChunkIndex: 0, Embedding: EncodeFloat32([]float32{1}),
-	}); err != nil {
-		t.Fatalf("InsertChunk: %v", err)
-	}
-
-	tx, err := store.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
-		t.Fatalf("rebuildChunksFTSTx: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-}
-
 func TestClearHNSWStateTx(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +429,7 @@ func TestMigrateHNSWStateColumns_OldSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create chunks: %v", err)
 	}
+	createLegacyFTSSchema(t, db)
 
 	if err := db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
@@ -434,6 +499,7 @@ func TestMigrateDocumentMetadata_OldSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create content_dedup: %v", err)
 	}
+	createLegacyFTSSchema(t, db)
 
 	if err := db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
@@ -533,6 +599,7 @@ func TestMigrate_HierarchicalChunksMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create hnsw_state: %v", err)
 	}
+	createLegacyFTSSchema(t, db)
 
 	if err := db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)

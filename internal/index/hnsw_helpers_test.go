@@ -41,8 +41,16 @@ func TestHNSWIndexOperations(t *testing.T) {
 	if idx.Len() != 1 {
 		t.Fatalf("unexpected HNSW len after deletes: %d", idx.Len())
 	}
-	if idx.modCount() != 5 {
-		t.Fatalf("unexpected HNSW mod count after deletes: %d", idx.modCount())
+	idx.Delete(3)
+	if results := idx.Search([]float32{1, 0}, 1); len(results) != 0 {
+		t.Fatalf("empty HNSW search returned %v", results)
+	}
+	idx.Add(4, []float32{1, 0})
+	if results := idx.Search([]float32{1, 0}, 1); len(results) != 1 || results[0] != 4 {
+		t.Fatalf("HNSW did not recover after deleting all nodes: %v", results)
+	}
+	if idx.modCount() != 7 {
+		t.Fatalf("unexpected HNSW mod count after delete and add: %d", idx.modCount())
 	}
 
 	idx.resetMods()

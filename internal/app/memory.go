@@ -32,10 +32,6 @@ func configureProcessMemory() {
 	)
 }
 
-func reclaimProcessMemory() {
-	debug.FreeOSMemory()
-}
-
 func formatMemoryLimit(n int64) string {
 	if n >= math.MaxInt64/2 {
 		return "unlimited"

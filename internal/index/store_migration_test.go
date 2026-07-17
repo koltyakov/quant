@@ -3,13 +3,58 @@ package index
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func createMarkedIncompatibleDatabase(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open incompatible database: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE sentinel (value TEXT)`); err != nil {
+		t.Fatalf("create sentinel table: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA application_id = %d`, quantApplicationID)); err != nil {
+		t.Fatalf("set quant application id: %v", err)
+	}
+	if _, err := db.Exec(`CREATE VIEW documents AS SELECT 1 AS id`); err != nil {
+		t.Fatalf("create incompatible schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close incompatible database: %v", err)
+	}
+}
+
+func createLegacyFTSSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+		CREATE VIRTUAL TABLE chunks_fts USING fts5(
+			content,
+			content='chunks',
+			content_rowid='id'
+		);
+		CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+		END;
+		CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+		END;
+		CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+			INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+			INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+		END;
+	`); err != nil {
+		t.Fatalf("create legacy FTS schema: %v", err)
+	}
+}
 
 func TestMigrate_Idempotent(t *testing.T) {
 	dir := t.TempDir()
@@ -67,6 +112,7 @@ func TestMigrate_OldSchemaToNew(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create old hnsw_state table: %v", err)
 	}
+	createLegacyFTSSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatalf("close old db: %v", err)
 	}
@@ -100,6 +146,13 @@ func TestMigrate_OldSchemaToNew(t *testing.T) {
 	if doc.Collection != "testcol" {
 		t.Fatalf("expected collection 'testcol', got %q", doc.Collection)
 	}
+	var applicationID int64
+	if err := store.db.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&applicationID); err != nil {
+		t.Fatalf("read migrated application id: %v", err)
+	}
+	if applicationID != quantApplicationID {
+		t.Fatalf("migrated application_id = %d, want %d", applicationID, quantApplicationID)
+	}
 }
 
 func TestNewStore_DoesNotRecoverArbitraryOpenFailure(t *testing.T) {
@@ -127,16 +180,7 @@ func TestNewStore_DoesNotRecoverArbitraryOpenFailure(t *testing.T) {
 
 func TestNewStore_RecoversSchemaIncompatibility(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "quant.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := db.Exec(`CREATE VIEW documents AS SELECT 1 AS id`); err != nil {
-		t.Fatalf("create incompatible schema: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close incompatible database: %v", err)
-	}
+	createMarkedIncompatibleDatabase(t, dbPath)
 
 	store, err := NewStore(dbPath)
 	if err != nil {
@@ -154,12 +198,48 @@ func TestNewStore_RecoversSchemaIncompatibility(t *testing.T) {
 	}
 }
 
+func TestNewStore_RecoversDatabaseSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.db")
+	createMarkedIncompatibleDatabase(t, target)
+	alias := filepath.Join(dir, "alias.db")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	store, err := NewStore(alias)
+	if err != nil {
+		t.Fatalf("NewStore() recovery error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if store.dbPath != resolved {
+		t.Fatalf("store db path = %q, want resolved target %q", store.dbPath, resolved)
+	}
+	if store.backup != resolved+".bak" {
+		t.Fatalf("backup path = %q, want %q", store.backup, resolved+".bak")
+	}
+	info, err := os.Lstat(alias)
+	if err != nil {
+		t.Fatalf("Lstat database alias: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("database alias was replaced: mode=%v", info.Mode())
+	}
+	if _, _, err := store.Stats(context.Background()); err != nil {
+		t.Fatalf("recovered store Stats() error: %v", err)
+	}
+}
+
 func TestNewStore_ReturnsBackupRemovalError(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "quant.db")
-	original := []byte("not a sqlite database")
-	if err := os.WriteFile(dbPath, original, 0600); err != nil {
-		t.Fatalf("WriteFile(database): %v", err)
-	}
+	createMarkedIncompatibleDatabase(t, dbPath)
 	if err := os.Mkdir(dbPath+".bak", 0750); err != nil {
 		t.Fatalf("Mkdir(stale backup): %v", err)
 	}
@@ -175,12 +255,216 @@ func TestNewStore_ReturnsBackupRemovalError(t *testing.T) {
 	if !strings.Contains(err.Error(), "removing stale backup") {
 		t.Fatalf("NewStore() error = %v, want stale backup removal context", err)
 	}
+	db, openErr := sql.Open("sqlite", dbPath)
+	if openErr != nil {
+		t.Fatalf("reopen original database: %v", openErr)
+	}
+	defer func() { _ = db.Close() }()
+	var sentinelCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sentinel`).Scan(&sentinelCount); err != nil {
+		t.Fatalf("original marked database changed: %v", err)
+	}
+}
+
+func TestNewStore_RejectsNonSQLiteWithoutModification(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "notes.txt")
+	original := []byte("important user data")
+	if err := os.WriteFile(dbPath, original, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("NewStore unexpectedly opened a non-SQLite file")
+	}
+	if !errors.Is(err, ErrNotQuantDatabase) {
+		t.Fatalf("NewStore error = %v, want ErrNotQuantDatabase", err)
+	}
 	got, readErr := os.ReadFile(dbPath)
 	if readErr != nil {
-		t.Fatalf("ReadFile(original database): %v", readErr)
+		t.Fatalf("ReadFile: %v", readErr)
 	}
 	if string(got) != string(original) {
-		t.Fatalf("original database changed: got %q, want %q", got, original)
+		t.Fatalf("file contents changed: got %q, want %q", got, original)
+	}
+	if _, statErr := os.Stat(dbPath + ".bak"); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected backup for rejected file: %v", statErr)
+	}
+}
+
+func TestNewStore_RejectsUnrelatedSQLite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "other.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE user_data (value TEXT); INSERT INTO user_data VALUES ('keep')`); err != nil {
+		t.Fatalf("seed unrelated database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close unrelated database: %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("NewStore unexpectedly opened an unrelated SQLite database")
+	}
+	if !errors.Is(err, ErrNotQuantDatabase) {
+		t.Fatalf("NewStore error = %v, want ErrNotQuantDatabase", err)
+	}
+
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen unrelated database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var value string
+	if err := db.QueryRow(`SELECT value FROM user_data`).Scan(&value); err != nil || value != "keep" {
+		t.Fatalf("unrelated database changed: value=%q err=%v", value, err)
+	}
+	var quantTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('documents', 'chunks')`).Scan(&quantTables); err != nil {
+		t.Fatalf("inspect unrelated database: %v", err)
+	}
+	if quantTables != 0 {
+		t.Fatalf("unrelated database gained %d quant tables", quantTables)
+	}
+}
+
+func TestNewStore_RejectsLookalikeSQLiteWithoutFTSIdentity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "lookalike.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE documents (
+			id INTEGER PRIMARY KEY, path TEXT, hash TEXT, modified_at DATETIME, indexed_at DATETIME
+		);
+		CREATE TABLE chunks (
+			id INTEGER PRIMARY KEY, document_id INTEGER, content TEXT, chunk_index INTEGER, embedding BLOB
+		);
+		CREATE TABLE embedding_metadata (key TEXT PRIMARY KEY, value TEXT);
+		INSERT INTO documents VALUES (1, 'foreign', 'keep', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+	`); err != nil {
+		t.Fatalf("seed lookalike database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close lookalike database: %v", err)
+	}
+
+	store, err := NewStore(dbPath)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("NewStore unexpectedly claimed a lookalike SQLite database")
+	}
+	if !errors.Is(err, ErrNotQuantDatabase) {
+		t.Fatalf("NewStore error = %v, want ErrNotQuantDatabase", err)
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen lookalike database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var hash string
+	if err := db.QueryRow(`SELECT hash FROM documents WHERE id = 1`).Scan(&hash); err != nil || hash != "keep" {
+		t.Fatalf("lookalike database changed: hash=%q err=%v", hash, err)
+	}
+	var applicationID int64
+	if err := db.QueryRow(`PRAGMA application_id`).Scan(&applicationID); err != nil {
+		t.Fatalf("read lookalike application id: %v", err)
+	}
+	if applicationID != 0 {
+		t.Fatalf("lookalike application_id = %d, want 0", applicationID)
+	}
+}
+
+func TestNewStore_SetsApplicationID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var applicationID int64
+	if err := store.db.QueryRow(`PRAGMA application_id`).Scan(&applicationID); err != nil {
+		t.Fatalf("read application id: %v", err)
+	}
+	if applicationID != quantApplicationID {
+		t.Fatalf("application_id = %d, want %d", applicationID, quantApplicationID)
+	}
+}
+
+func TestNewStore_IdentityInspectionHandlesSpecialPathCharacters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant #1?.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopening special-character path: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+}
+
+func TestMigrateHNSWInvalidationTriggers_InvalidatesLegacyStateOnce(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `
+		DROP TRIGGER hnsw_chunks_ai;
+		DROP TRIGGER hnsw_chunks_ad;
+		DROP TRIGGER hnsw_chunks_au;
+		INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions)
+		VALUES (1, CURRENT_TIMESTAMP, 1, 'legacy', 2);
+	`); err != nil {
+		t.Fatalf("prepare legacy trigger state: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen legacy store: %v", err)
+	}
+	var stateCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&stateCount); err != nil {
+		t.Fatalf("count migrated hnsw_state: %v", err)
+	}
+	if stateCount != 0 {
+		t.Fatalf("legacy hnsw_state count = %d, want 0", stateCount)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions)
+		VALUES (1, CURRENT_TIMESTAMP, 1, 'current', 2)
+	`); err != nil {
+		t.Fatalf("insert current hnsw_state: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() error: %v", err)
+	}
+
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("second reopen: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&stateCount); err != nil {
+		t.Fatalf("count current hnsw_state: %v", err)
+	}
+	if stateCount != 1 {
+		t.Fatalf("current hnsw_state count = %d, want 1", stateCount)
 	}
 }
 

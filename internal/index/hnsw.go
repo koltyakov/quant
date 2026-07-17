@@ -3,6 +3,7 @@ package index
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -23,10 +24,13 @@ type hnswIndex struct {
 	// flushedMods is the mods value at the time of the last successful graph
 	// file save; periodic flushes are skipped while the two are equal.
 	flushedMods atomic.Int64
+	generation  atomic.Int64
 }
 
 func newHNSWIndex() *hnswIndex {
-	return &hnswIndex{}
+	h := &hnswIndex{}
+	h.generation.Store(-1)
+	return h
 }
 
 func (h *hnswIndex) modCount() int64 {
@@ -46,6 +50,13 @@ func (h *hnswIndex) Add(id int, vec []float32) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.graph == nil || h.graph.Len() == 0 {
+		m, efSearch := defaultHNSWM, defaultHNSWEfSearch
+		if h.graph != nil {
+			m, efSearch = h.graph.M, h.graph.EfSearch
+		}
+		h.graph = newGraph(m, efSearch)
+	}
 	h.graph.Add(hnsw.MakeNode(id, vec))
 	h.mods.Add(1)
 }
@@ -78,6 +89,13 @@ func (h *hnswIndex) BatchAdd(nodes []hnsw.Node[int]) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.graph == nil || h.graph.Len() == 0 {
+		m, efSearch := defaultHNSWM, defaultHNSWEfSearch
+		if h.graph != nil {
+			m, efSearch = h.graph.M, h.graph.EfSearch
+		}
+		h.graph = newGraph(m, efSearch)
+	}
 	for _, node := range nodes {
 		h.graph.Add(node)
 	}
@@ -90,6 +108,9 @@ func (h *hnswIndex) Search(query []float32, k int) []int {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if h.graph == nil || h.graph.Len() == 0 {
+		return nil
+	}
 	nodes := h.graph.Search(query, k)
 	ids := make([]int, len(nodes))
 	for i, n := range nodes {
@@ -132,11 +153,20 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	}
 	dims := meta.Dimensions
 
-	rows, err := s.db.QueryContext(ctx, `SELECT id, embedding FROM chunks`)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("beginning hnsw snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	generation, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, embedding FROM chunks`)
 	if err != nil {
 		return fmt.Errorf("querying chunks for hnsw build: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	g := newGraph(s.hnswM, s.hnswEfSearch)
 
@@ -155,22 +185,33 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 		count++
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return fmt.Errorf("reading chunks for hnsw: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("closing hnsw chunk snapshot: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing hnsw snapshot: %w", err)
 	}
 
 	s.hnsw.mu.Lock()
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
+	s.hnsw.generation.Store(generation)
 	s.hnsw.ready.Store(true)
 	s.hnsw.resetMods()
 	logx.Info("hnsw graph built", "chunks", count, "M", s.hnswM, "EfSearch", s.hnswEfSearch)
 
-	if err := s.saveHNSWState(ctx, count); err != nil {
-		logx.Warn("failed to persist hnsw metadata snapshot", "err", err)
-	}
-
+	// hnsw_state is the validity marker for the graph sidecar. Publish it only
+	// after the graph has been replaced successfully.
 	if err := s.saveHNSWGraphToFile(); err != nil {
 		logx.Warn("failed to persist hnsw graph file", "err", err)
+	} else if published, err := s.saveHNSWState(ctx, count, generation); err != nil {
+		logx.Warn("failed to persist hnsw metadata snapshot", "err", err)
+	} else if !published {
+		s.resetRuntimeIndexes(false)
+		return fmt.Errorf("chunk generation changed while building hnsw graph")
 	}
 
 	if err := s.LoadDocEmbeddings(ctx); err != nil {
@@ -180,21 +221,37 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) saveHNSWState(ctx context.Context, nodeCount int) error {
+func (s *Store) saveHNSWState(ctx context.Context, nodeCount int, generation int64) (bool, error) {
 	meta, err := s.embeddingMetadata(ctx)
 	if err != nil || meta == nil {
-		return fmt.Errorf("reading embedding metadata for hnsw state: %w", err)
+		return false, fmt.Errorf("reading embedding metadata for hnsw state: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions) VALUES (1, CURRENT_TIMESTAMP, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET built_at = CURRENT_TIMESTAMP, node_count = ?, model = ?, dimensions = ?`,
-		nodeCount, meta.Model, meta.Dimensions,
-		nodeCount, meta.Model, meta.Dimensions,
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO hnsw_state (id, built_at, node_count, model, dimensions, generation)
+		 SELECT 1, CURRENT_TIMESTAMP, ?, ?, ?, ?
+		 FROM index_state WHERE id = 1 AND chunk_generation = ?
+		 ON CONFLICT(id) DO UPDATE SET
+			built_at = excluded.built_at,
+			node_count = excluded.node_count,
+			model = excluded.model,
+			dimensions = excluded.dimensions,
+			generation = excluded.generation`,
+		nodeCount, meta.Model, meta.Dimensions, generation, generation,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected == 1, nil
 }
 
 func (s *Store) LoadHNSWFromState(ctx context.Context) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	loaded := s.loadHNSWGraphFromFile(ctx)
 	if !loaded {
 		loaded = s.loadHNSWFromSQLite(ctx)
@@ -216,9 +273,14 @@ func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 	var nodeCount int
 	var storedModel string
 	var storedDims int
+	var storedGeneration int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT node_count, model, dimensions FROM hnsw_state WHERE id = 1`,
-	).Scan(&nodeCount, &storedModel, &storedDims); err != nil || nodeCount == 0 {
+		`SELECT node_count, model, dimensions, generation FROM hnsw_state WHERE id = 1`,
+	).Scan(&nodeCount, &storedModel, &storedDims, &storedGeneration); err != nil || nodeCount == 0 {
+		return false
+	}
+	currentGeneration, err := s.chunkGeneration(ctx)
+	if err != nil || currentGeneration != storedGeneration {
 		return false
 	}
 
@@ -273,6 +335,14 @@ func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 		logx.Warn("hnsw graph file has incompatible version", "expected", hnswGraphFileVersion, "got", version)
 		return false
 	}
+	var fileGeneration int64
+	if err := binary.Read(f, binary.LittleEndian, &fileGeneration); err != nil {
+		return false
+	}
+	if fileGeneration != storedGeneration {
+		logx.Warn("hnsw graph file generation mismatch", "file_generation", fileGeneration, "state_generation", storedGeneration)
+		return false
+	}
 
 	g := newGraph(s.hnswM, s.hnswEfSearch)
 	if err := g.Import(bufio.NewReader(f)); err != nil {
@@ -283,10 +353,15 @@ func (s *Store) loadHNSWGraphFromFile(ctx context.Context) bool {
 		logx.Warn("hnsw graph file node count mismatch", "path", s.hnswGraphPath, "file_nodes", g.Len(), "state_nodes", nodeCount)
 		return false
 	}
+	currentGeneration, err = s.chunkGeneration(ctx)
+	if err != nil || currentGeneration != storedGeneration {
+		return false
+	}
 
 	s.hnsw.mu.Lock()
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
+	s.hnsw.generation.Store(storedGeneration)
 	s.hnsw.ready.Store(true)
 	s.hnsw.resetMods()
 	// The in-memory graph came from the file, so the two are in sync.
@@ -299,13 +374,18 @@ func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 	var nodeCount int
 	var storedModel string
 	var storedDims int
+	var storedGeneration int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT node_count, model, dimensions FROM hnsw_state WHERE id = 1`,
-	).Scan(&nodeCount, &storedModel, &storedDims)
+		`SELECT node_count, model, dimensions, generation FROM hnsw_state WHERE id = 1`,
+	).Scan(&nodeCount, &storedModel, &storedDims, &storedGeneration)
 	if err != nil {
 		return false
 	}
 	if nodeCount == 0 {
+		return false
+	}
+	currentGeneration, err := s.chunkGeneration(ctx)
+	if err != nil || currentGeneration != storedGeneration {
 		return false
 	}
 
@@ -354,10 +434,15 @@ func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 	if err := rows.Err(); err != nil {
 		return false
 	}
+	currentGeneration, err = s.chunkGeneration(ctx)
+	if err != nil || currentGeneration != storedGeneration {
+		return false
+	}
 
 	s.hnsw.mu.Lock()
 	s.hnsw.graph = g
 	s.hnsw.mu.Unlock()
+	s.hnsw.generation.Store(storedGeneration)
 	s.hnsw.ready.Store(true)
 	s.hnsw.resetMods()
 	logx.Info("hnsw graph reconstructed from chunk embeddings using metadata snapshot", "chunks", loaded)
@@ -370,7 +455,7 @@ func (s *Store) loadHNSWFromSQLite(ctx context.Context) bool {
 }
 
 const hnswGraphFileMagic uint32 = 0x514E5347 // "QNSG"
-const hnswGraphFileVersion uint32 = 1
+const hnswGraphFileVersion uint32 = 2
 
 // embeddedChunkCountQuery counts only chunks that carry an embedding: chunks
 // indexed during keyword-only fallback have none and are never HNSW nodes, so
@@ -406,6 +491,11 @@ func (s *Store) saveHNSWGraphToFile() error {
 		return err
 	}
 	if err := binary.Write(w, binary.LittleEndian, hnswGraphFileVersion); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := binary.Write(w, binary.LittleEndian, s.hnsw.generation.Load()); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return err
@@ -461,7 +551,24 @@ func (s *Store) HNSWLen() int {
 }
 
 func (s *Store) FlushHNSW() error {
-	return s.saveHNSWGraphToFile()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.hnsw == nil || !s.hnsw.ready.Load() {
+		return nil
+	}
+	if err := s.saveHNSWGraphToFile(); err != nil {
+		return err
+	}
+	generation := s.hnsw.generation.Load()
+	published, err := s.saveHNSWState(context.Background(), s.hnsw.Len(), generation)
+	if err != nil {
+		return err
+	}
+	if !published {
+		s.resetRuntimeIndexes(false)
+		return fmt.Errorf("chunk generation changed before hnsw flush")
+	}
+	return nil
 }
 
 func decodeEmbeddingForHNSW(data []byte, dims int) []float32 {

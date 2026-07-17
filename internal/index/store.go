@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,36 +54,260 @@ const (
 	defaultSQLiteConnMaxIdleTime = 15 * time.Minute
 )
 
+const quantApplicationID int64 = 0x514E5431 // "QNT1"
+
+// ErrNotQuantDatabase indicates that an existing path is not owned by quant.
+var ErrNotQuantDatabase = errors.New("existing database is not a quant database")
+
+type storePathKind uint8
+
+const (
+	storePathFresh storePathKind = iota
+	storePathQuant
+)
+
 // NewStore opens (or creates) a SQLite database at dbPath.
-// If the database exists but migration fails, the old file is backed up and a
-// fresh database is created. Call RemoveBackup after re-indexing completes.
+// If a recognized quant database exists but migration fails, the old file is
+// backed up and a fresh database is created. Unknown files are never replaced.
 func NewStore(dbPath string) (*Store, error) {
-	s, err := openStore(dbPath)
-	if err == nil {
-		return s, nil
+	effectiveDBPath, err := resolveStorePath(dbPath)
+	if err != nil {
+		return nil, err
 	}
-	if !isRecoverableStoreError(err) {
+	pathKind, err := classifyStorePath(effectiveDBPath)
+	if err != nil {
 		return nil, err
 	}
 
-	if _, statErr := os.Stat(dbPath); statErr != nil {
+	s, err := openStore(effectiveDBPath)
+	if err == nil {
+		return s, nil
+	}
+	if pathKind != storePathQuant || !isRecoverableStoreError(err) {
+		return nil, err
+	}
+
+	if _, statErr := os.Stat(effectiveDBPath); statErr != nil {
 		return nil, errors.Join(err, fmt.Errorf("stating database before recovery: %w", statErr))
 	}
 
 	// Back up the broken DB and start fresh.
-	backupPath := dbPath + ".bak"
+	backupPath := effectiveDBPath + ".bak"
 	logx.Warn("migration failed; backing up existing database", "backup_path", backupPath, "err", err)
 
-	if err := backupStoreFiles(dbPath, backupPath); err != nil {
+	if err := backupStoreFiles(effectiveDBPath, backupPath); err != nil {
 		return nil, fmt.Errorf("backing up database after migration failure: %w", err)
 	}
 
-	s, err = openStore(dbPath)
+	s, err = openStore(effectiveDBPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating fresh database after backup: %w", err)
 	}
 	s.backup = backupPath
 	return s, nil
+}
+
+func resolveStorePath(dbPath string) (string, error) {
+	info, err := os.Lstat(dbPath)
+	if os.IsNotExist(err) {
+		return dbPath, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspecting database path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return dbPath, nil
+	}
+	resolved, err := filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving database symlink: %w", err)
+	}
+	return resolved, nil
+}
+
+func classifyStorePath(dbPath string) (storePathKind, error) {
+	info, err := os.Stat(dbPath)
+	if os.IsNotExist(err) {
+		return storePathFresh, nil
+	}
+	if err != nil {
+		return storePathFresh, fmt.Errorf("stating database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return storePathFresh, fmt.Errorf("%w: %q is not a regular file", ErrNotQuantDatabase, dbPath)
+	}
+	if info.Size() == 0 {
+		return storePathFresh, nil
+	}
+	headerApplicationID, err := sqliteHeaderApplicationID(dbPath)
+	if err != nil {
+		return storePathFresh, err
+	}
+	headerClaimsQuant := headerApplicationID == quantApplicationID
+	if headerApplicationID != 0 && !headerClaimsQuant {
+		return storePathFresh, fmt.Errorf("%w: %q has application_id %d", ErrNotQuantDatabase, dbPath, headerApplicationID)
+	}
+
+	db, err := sql.Open("sqlite", readOnlySQLiteDSN(dbPath))
+	if err != nil {
+		return storePathFresh, fmt.Errorf("opening %q read-only: %w", dbPath, err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+
+	ctx := context.Background()
+	var applicationID int64
+	if err := db.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&applicationID); err != nil {
+		if headerClaimsQuant {
+			return storePathQuant, nil
+		}
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_NOTADB {
+			return storePathFresh, fmt.Errorf("%w: inspecting %q: %v", ErrNotQuantDatabase, dbPath, err)
+		}
+		return storePathFresh, fmt.Errorf("inspecting database identity in %q: %w", dbPath, err)
+	}
+	if applicationID == quantApplicationID || (applicationID == 0 && headerClaimsQuant) {
+		return storePathQuant, nil
+	}
+	if applicationID != 0 {
+		return storePathFresh, fmt.Errorf("%w: %q has application_id %d", ErrNotQuantDatabase, dbPath, applicationID)
+	}
+
+	legacy, err := hasLegacyQuantSchema(ctx, db)
+	if err != nil {
+		return storePathFresh, fmt.Errorf("inspecting legacy schema in %q: %w", dbPath, err)
+	}
+	if !legacy {
+		return storePathFresh, fmt.Errorf("%w: %q has no quant schema marker", ErrNotQuantDatabase, dbPath)
+	}
+	return storePathQuant, nil
+}
+
+func sqliteHeaderApplicationID(dbPath string) (int64, error) {
+	//nolint:gosec // The database path is explicitly configured and inspected before opening.
+	f, err := os.Open(dbPath)
+	if err != nil {
+		return 0, fmt.Errorf("reading database header: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var header [72]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return 0, fmt.Errorf("%w: %q has an invalid SQLite header: %v", ErrNotQuantDatabase, dbPath, err)
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return 0, fmt.Errorf("%w: %q has an invalid SQLite header", ErrNotQuantDatabase, dbPath)
+	}
+	return int64(binary.BigEndian.Uint32(header[68:72])), nil
+}
+
+func readOnlySQLiteDSN(dbPath string) string {
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		absPath = dbPath
+	}
+	path := filepath.ToSlash(absPath)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func hasLegacyQuantSchema(ctx context.Context, db *sql.DB) (bool, error) {
+	required := []struct {
+		table   string
+		columns []string
+	}{
+		{table: "documents", columns: []string{"id", "path", "hash", "modified_at", "indexed_at"}},
+		{table: "chunks", columns: []string{"id", "document_id", "content", "chunk_index", "embedding"}},
+		{table: "embedding_metadata", columns: []string{"key", "value"}},
+	}
+
+	for _, schema := range required {
+		var tableCount int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, schema.table,
+		).Scan(&tableCount); err != nil {
+			return false, err
+		}
+		if tableCount != 1 {
+			return false, nil
+		}
+
+		rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, schema.table)
+		if err != nil {
+			return false, err
+		}
+		columns := make(map[string]struct{}, len(schema.columns))
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				_ = rows.Close()
+				return false, err
+			}
+			columns[column] = struct{}{}
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return false, rowsErr
+		}
+		for _, column := range schema.columns {
+			if _, ok := columns[column]; !ok {
+				return false, nil
+			}
+		}
+	}
+
+	var ftsSQL string
+	if err := db.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'`,
+	).Scan(&ftsSQL); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	normalizedFTSSQL := strings.ToLower(ftsSQL)
+	if !strings.Contains(normalizedFTSSQL, "virtual table") ||
+		!strings.Contains(normalizedFTSSQL, "using fts5") ||
+		!strings.Contains(normalizedFTSSQL, "content='chunks'") {
+		return false, nil
+	}
+	var triggerCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'trigger' AND tbl_name = 'chunks'
+		AND name IN ('chunks_ai', 'chunks_ad', 'chunks_au')
+	`).Scan(&triggerCount); err != nil {
+		return false, err
+	}
+	if triggerCount != 3 {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Store) ensureQuantApplicationID(ctx context.Context) error {
+	var applicationID int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&applicationID); err != nil {
+		return fmt.Errorf("reading sqlite application id: %w", err)
+	}
+	if applicationID == quantApplicationID {
+		return nil
+	}
+	if applicationID != 0 {
+		return fmt.Errorf("%w: unexpected application_id %d", ErrNotQuantDatabase, applicationID)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA application_id = %d`, quantApplicationID)); err != nil {
+		return fmt.Errorf("setting sqlite application id: %w", err)
+	}
+	return nil
 }
 
 func isRecoverableStoreError(err error) bool {
@@ -196,7 +423,7 @@ func openStore(dbPath string) (*Store, error) {
 func (s *Store) Close() error {
 	var err error
 	if s != nil && s.db != nil {
-		if flushErr := s.saveHNSWGraphToFile(); flushErr != nil {
+		if flushErr := s.FlushHNSW(); flushErr != nil {
 			logx.Warn("failed to flush hnsw graph on close", "err", flushErr)
 		}
 		if _, checkpointErr := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); checkpointErr != nil {
@@ -250,6 +477,7 @@ func (s *Store) resetRuntimeIndexes(removeGraphFile bool) {
 		s.hnsw.mu.Lock()
 		s.hnsw.graph = newGraph(s.hnswM, s.hnswEfSearch)
 		s.hnsw.mu.Unlock()
+		s.hnsw.generation.Store(-1)
 		s.hnsw.resetMods()
 	}
 	if s.docEmbeds != nil {
@@ -287,8 +515,14 @@ func (s *Store) migrate() error {
 		built_at    DATETIME NOT NULL,
 		node_count  INTEGER NOT NULL,
 		model       TEXT NOT NULL DEFAULT '',
-		dimensions  INTEGER NOT NULL DEFAULT 0
+		dimensions  INTEGER NOT NULL DEFAULT 0,
+		generation  INTEGER NOT NULL DEFAULT 0
 	);
+	CREATE TABLE IF NOT EXISTS index_state (
+		id               INTEGER PRIMARY KEY CHECK (id = 1),
+		chunk_generation INTEGER NOT NULL DEFAULT 0
+	);
+	INSERT OR IGNORE INTO index_state (id, chunk_generation) VALUES (1, 0);
 	CREATE TABLE IF NOT EXISTS quarantine (
 		path        TEXT PRIMARY KEY,
 		error_msg   TEXT NOT NULL,
@@ -324,6 +558,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateHNSWStateColumns(); err != nil {
 		return err
 	}
+	if err := s.migrateHNSWGenerationColumn(); err != nil {
+		return err
+	}
 	if err := s.migrateDocEmbeddingColumn(); err != nil {
 		return err
 	}
@@ -336,7 +573,67 @@ func (s *Store) migrate() error {
 	if err := s.migrateDocumentMetadata(); err != nil {
 		return err
 	}
-	return s.migrateCollectionColumn()
+	if err := s.migrateCollectionColumn(); err != nil {
+		return err
+	}
+	if err := s.migrateHNSWInvalidationTriggers(); err != nil {
+		return err
+	}
+	return s.ensureQuantApplicationID(context.Background())
+}
+
+const hnswInvalidationTriggers = `
+CREATE TRIGGER IF NOT EXISTS hnsw_chunks_ai AFTER INSERT ON chunks BEGIN
+	UPDATE index_state SET chunk_generation = chunk_generation + 1 WHERE id = 1;
+	DELETE FROM hnsw_state;
+END;
+CREATE TRIGGER IF NOT EXISTS hnsw_chunks_ad AFTER DELETE ON chunks BEGIN
+	UPDATE index_state SET chunk_generation = chunk_generation + 1 WHERE id = 1;
+	DELETE FROM hnsw_state;
+END;
+CREATE TRIGGER IF NOT EXISTS hnsw_chunks_au AFTER UPDATE ON chunks BEGIN
+	UPDATE index_state SET chunk_generation = chunk_generation + 1 WHERE id = 1;
+	DELETE FROM hnsw_state;
+END;
+`
+
+func (s *Store) migrateHNSWInvalidationTriggers() error {
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning hnsw trigger migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var compatible int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type = 'trigger' AND name IN ('hnsw_chunks_ai', 'hnsw_chunks_ad', 'hnsw_chunks_au')
+		AND instr(lower(sql), 'chunk_generation') > 0
+	`).Scan(&compatible); err != nil {
+		return fmt.Errorf("checking hnsw invalidation triggers: %w", err)
+	}
+	if compatible != 3 {
+		if _, err := tx.ExecContext(ctx, `
+			DROP TRIGGER IF EXISTS hnsw_chunks_ai;
+			DROP TRIGGER IF EXISTS hnsw_chunks_ad;
+			DROP TRIGGER IF EXISTS hnsw_chunks_au;
+		`); err != nil {
+			return fmt.Errorf("replacing hnsw invalidation triggers: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, hnswInvalidationTriggers); err != nil {
+		return fmt.Errorf("creating hnsw invalidation triggers: %w", err)
+	}
+	if compatible != 3 {
+		if err := clearHNSWStateTx(ctx, tx); err != nil {
+			return fmt.Errorf("invalidating pre-trigger hnsw state: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing hnsw trigger migration: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) migrateCollectionColumn() error {
@@ -403,6 +700,23 @@ func (s *Store) migrateHNSWStateColumns() error {
 	return nil
 }
 
+func (s *Store) migrateHNSWGenerationColumn() error {
+	var generationCount int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('hnsw_state') WHERE name='generation'`,
+	).Scan(&generationCount); err != nil {
+		return fmt.Errorf("checking hnsw_state generation schema: %w", err)
+	}
+	if generationCount == 0 {
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE hnsw_state ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`,
+		); err != nil {
+			return fmt.Errorf("adding hnsw_state.generation column: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -435,20 +749,27 @@ func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error
 }
 
 func (s *Store) InsertChunk(ctx context.Context, chunk *ChunkRecord) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO chunks (document_id, content, chunk_index, embedding, parent_id, depth, section_title, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		chunk.DocumentID, chunk.Content, chunk.ChunkIndex, chunk.Embedding, chunk.ParentID, chunk.Depth, chunk.SectionTitle, chunk.Summary,
 	)
+	if err == nil && s.hnsw != nil && s.hnsw.ready.Load() {
+		s.resetRuntimeIndexes(false)
+	}
 	return err
 }
 
 func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	return s.ReindexDocumentWithDeferredHNSW(ctx, doc, chunks, nil)
 }
 
 func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Document, chunks []ChunkRecord, deferredHNSW func()) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -460,8 +781,10 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 		return err
 	}
 
+	hnswReady := s.hnsw != nil && s.hnsw.ready.Load()
+	hnswDeleteComplete := !hnswReady
 	var hnswDeleteIDs []int
-	if s.hnsw != nil && s.hnsw.ready.Load() {
+	if hnswReady {
 		rows, err := tx.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
 		if err != nil {
 			logx.Warn("failed to collect chunk ids for hnsw delete; graph may retain stale nodes", "doc_id", docID, "err", err)
@@ -476,6 +799,8 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 			if rowsErr := rows.Err(); rowsErr != nil {
 				logx.Warn("failed to read chunk ids for hnsw delete; graph may retain stale nodes", "doc_id", docID, "err", rowsErr)
 				hnswDeleteIDs = nil
+			} else {
+				hnswDeleteComplete = true
 			}
 		}
 	}
@@ -521,6 +846,10 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 			logx.Warn("failed to store document embedding", "doc_id", docID, "err", err)
 		}
 	}
+	committedGeneration, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
@@ -528,18 +857,24 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 
 	// HNSW mutations happen only after the transaction commits, so a failed
 	// commit never leaves the graph out of sync with the database.
-	if len(hnswDeleteIDs) > 0 {
-		s.hnsw.BatchDelete(hnswDeleteIDs)
+	if hnswReady {
+		if !hnswDeleteComplete {
+			s.resetRuntimeIndexes(false)
+			hnswReady = false
+		} else {
+			s.hnsw.BatchDelete(hnswDeleteIDs)
+		}
 	}
 
 	if deferredHNSW != nil {
 		deferredHNSW()
 	}
 
-	if s.hnsw != nil && s.hnsw.ready.Load() {
+	if hnswReady && s.hnsw.ready.Load() {
 		meta2, metaErr := s.embeddingMetadata(ctx)
 		if metaErr != nil {
 			logx.Warn("failed to read embedding metadata for HNSW update", "err", metaErr)
+			s.resetRuntimeIndexes(false)
 		} else if meta2 != nil && meta2.Dimensions > 0 {
 			var nodes []hnsw.Node[int]
 			for _, ic := range inserted {
@@ -549,6 +884,9 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 				}
 			}
 			s.hnsw.BatchAdd(nodes)
+			s.hnsw.generation.Store(committedGeneration)
+		} else {
+			s.resetRuntimeIndexes(false)
 		}
 	}
 
@@ -599,7 +937,13 @@ func ChunkDiffKey(content string) string {
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	_, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE document_id = ?`, docID)
+	if err == nil && s.hnsw != nil && s.hnsw.ready.Load() {
+		s.resetRuntimeIndexes(false)
+	}
 	return err
 }
 
@@ -607,9 +951,11 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	hnswReady := s.hnsw != nil && s.hnsw.ready.Load()
+	hnswDeleteComplete := !hnswReady
 	var hnswDeleteIDs []int
 	var docID int64
-	if s.hnsw != nil && s.hnsw.ready.Load() {
+	if hnswReady {
 		doc, err := s.GetDocumentByPath(ctx, path)
 		if err == nil && doc != nil {
 			docID = doc.ID
@@ -624,6 +970,8 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 				_ = rows.Close()
 				if rows.Err() != nil {
 					hnswDeleteIDs = nil
+				} else {
+					hnswDeleteComplete = true
 				}
 			}
 		}
@@ -651,18 +999,24 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting document: %w", err)
 	}
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
 	}
-	if err := clearHNSWStateTx(ctx, tx); err != nil {
+	committedGeneration, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing delete transaction: %w", err)
 	}
 
-	if len(hnswDeleteIDs) > 0 {
-		s.hnsw.BatchDelete(hnswDeleteIDs)
+	if hnswReady {
+		if !hnswDeleteComplete {
+			s.resetRuntimeIndexes(false)
+		} else {
+			s.hnsw.BatchDelete(hnswDeleteIDs)
+			s.hnsw.generation.Store(committedGeneration)
+		}
 	}
 
 	s.docEmbeds.Remove(docID, path)
@@ -689,9 +1043,6 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 			return fmt.Errorf("clearing documents: %w", err)
 		}
-		if err := rebuildChunksFTSTx(ctx, tx); err != nil {
-			return err
-		}
 		if err := clearHNSWStateTx(ctx, tx); err != nil {
 			return err
 		}
@@ -703,8 +1054,10 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		return nil
 	}
 
+	hnswReady := s.hnsw != nil && s.hnsw.ready.Load()
+	hnswDeleteComplete := !hnswReady
 	var hnswDeleteIDs []int
-	if s.hnsw != nil && s.hnsw.ready.Load() {
+	if hnswReady {
 		rows, err := s.db.QueryContext(ctx,
 			`SELECT c.id
 			 FROM chunks c
@@ -722,6 +1075,8 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 			_ = rows.Close()
 			if rows.Err() != nil {
 				hnswDeleteIDs = nil
+			} else {
+				hnswDeleteComplete = true
 			}
 		}
 	}
@@ -747,18 +1102,24 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 	); err != nil {
 		return fmt.Errorf("deleting documents by prefix: %w", err)
 	}
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
 	}
-	if err := clearHNSWStateTx(ctx, tx); err != nil {
+	committedGeneration, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing delete-by-prefix transaction: %w", err)
 	}
 
-	if len(hnswDeleteIDs) > 0 {
-		s.hnsw.BatchDelete(hnswDeleteIDs)
+	if hnswReady {
+		if !hnswDeleteComplete {
+			s.resetRuntimeIndexes(false)
+		} else {
+			s.hnsw.BatchDelete(hnswDeleteIDs)
+			s.hnsw.generation.Store(committedGeneration)
+		}
 	}
 	if s.docEmbeds != nil {
 		s.docEmbeds.Clear()
@@ -1053,8 +1414,10 @@ func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 		return fmt.Errorf("collection is required")
 	}
 
+	hnswReady := s.hnsw != nil && s.hnsw.ready.Load()
+	hnswDeleteComplete := !hnswReady
 	var hnswDeleteIDs []int
-	if s.hnsw != nil && s.hnsw.ready.Load() {
+	if hnswReady {
 		rows, err := s.db.QueryContext(ctx,
 			`SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.collection = ?`,
 			collection,
@@ -1069,6 +1432,8 @@ func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 			_ = rows.Close()
 			if rows.Err() != nil {
 				hnswDeleteIDs = nil
+			} else {
+				hnswDeleteComplete = true
 			}
 		}
 	}
@@ -1089,18 +1454,24 @@ func (s *Store) DeleteCollection(ctx context.Context, collection string) error {
 	); err != nil {
 		return fmt.Errorf("deleting collection %s: %w", collection, err)
 	}
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
+	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
 	}
-	if err := clearHNSWStateTx(ctx, tx); err != nil {
+	committedGeneration, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing delete-collection transaction: %w", err)
 	}
 
-	if len(hnswDeleteIDs) > 0 {
-		s.hnsw.BatchDelete(hnswDeleteIDs)
+	if hnswReady {
+		if !hnswDeleteComplete {
+			s.resetRuntimeIndexes(false)
+		} else {
+			s.hnsw.BatchDelete(hnswDeleteIDs)
+			s.hnsw.generation.Store(committedGeneration)
+		}
 	}
 	if s.docEmbeds != nil {
 		s.docEmbeds.Clear()

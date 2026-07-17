@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1106,6 +1107,188 @@ func TestLoadHNSWFromState(t *testing.T) {
 	}
 	if store.HNSWLen() != 1 {
 		t.Fatalf("expected HNSW len 1 after load, got %d", store.HNSWLen())
+	}
+}
+
+func TestLoadHNSWFromState_RejectsSameCountOfflineUpdate(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "quant.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "offline-update", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	if err := store.ReindexDocument(ctx, &Document{Path: "offline/a.txt", Hash: "h1", ModifiedAt: time.Now()}, []ChunkRecord{{
+		Content:    "before offline update",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}}); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE chunks SET embedding = ?`, EncodeFloat32(NormalizeFloat32([]float32{0, 1}))); err != nil {
+		_ = db.Close()
+		t.Fatalf("offline chunk update error: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing offline database: %v", err)
+	}
+
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopening store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	var chunkCount int
+	if err := store.db.QueryRowContext(ctx, embeddedChunkCountQuery).Scan(&chunkCount); err != nil {
+		t.Fatalf("counting chunks: %v", err)
+	}
+	if chunkCount != 1 {
+		t.Fatalf("embedded chunk count = %d, want 1", chunkCount)
+	}
+	var stateCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&stateCount); err != nil {
+		t.Fatalf("counting hnsw_state: %v", err)
+	}
+	if stateCount != 0 {
+		t.Fatalf("hnsw_state count = %d, want 0", stateCount)
+	}
+	if store.LoadHNSWFromState(ctx) {
+		t.Fatal("stale same-count graph was loaded")
+	}
+}
+
+func TestFlushHNSW_PersistsIncrementalGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "incremental-generation", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	doc := &Document{Path: "generation/a.txt", Hash: "h1", ModifiedAt: time.Now()}
+	if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{
+		Content: "before generation update", ChunkIndex: 0,
+		Embedding: EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}}); err != nil {
+		t.Fatalf("initial ReindexDocument() error: %v", err)
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+
+	doc.Hash = "h2"
+	if err := store.ReindexDocument(ctx, doc, []ChunkRecord{{
+		Content: "after generation update", ChunkIndex: 0,
+		Embedding: EncodeFloat32(NormalizeFloat32([]float32{0, 1})),
+	}}); err != nil {
+		t.Fatalf("incremental ReindexDocument() error: %v", err)
+	}
+	if err := store.FlushHNSW(); err != nil {
+		t.Fatalf("FlushHNSW() error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	store, err = NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopening store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if !store.LoadHNSWFromState(ctx) {
+		t.Fatal("incrementally updated HNSW graph was not loaded")
+	}
+	var chunkID int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?
+	`, doc.Path).Scan(&chunkID); err != nil {
+		t.Fatalf("loading current chunk id: %v", err)
+	}
+	ids := store.hnsw.Search(NormalizeFloat32([]float32{0, 1}), 1)
+	if len(ids) != 1 || ids[0] != chunkID {
+		t.Fatalf("loaded HNSW ids = %v, want [%d]", ids, chunkID)
+	}
+}
+
+func TestFlushHNSW_InvalidatesRuntimeGraphOnGenerationMismatch(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "generation-mismatch", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	if err := store.ReindexDocument(ctx, &Document{Path: "mismatch/a.txt", Hash: "h1", ModifiedAt: time.Now()}, []ChunkRecord{{
+		Content: "before mismatch", ChunkIndex: 0,
+		Embedding: EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}}); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE chunks SET embedding = ?`, EncodeFloat32(NormalizeFloat32([]float32{0, 1})),
+	); err != nil {
+		t.Fatalf("out-of-band chunk update: %v", err)
+	}
+	if err := store.FlushHNSW(); err == nil {
+		t.Fatal("FlushHNSW() unexpectedly accepted a generation mismatch")
+	}
+	if store.HNSWReady() {
+		t.Fatal("generation mismatch left stale runtime HNSW ready")
+	}
+}
+
+func TestBuildHNSW_PublishesStateOnlyAfterGraphSave(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(filepath.Join(dir, "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "failed-save", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	if err := store.ReindexDocument(ctx, &Document{Path: "failed/a.txt", Hash: "h1", ModifiedAt: time.Now()}, []ChunkRecord{{
+		Content:    "graph save must fail",
+		ChunkIndex: 0,
+		Embedding:  EncodeFloat32(NormalizeFloat32([]float32{1, 0})),
+	}}); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	store.hnswGraphPath = filepath.Join(dir, "missing", "graph.hnsw")
+	if err := store.BuildHNSW(ctx); err != nil {
+		t.Fatalf("BuildHNSW() error: %v", err)
+	}
+	if !store.HNSWReady() {
+		t.Fatal("in-memory HNSW should remain ready after persistence failure")
+	}
+	var stateCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM hnsw_state`).Scan(&stateCount); err != nil {
+		t.Fatalf("counting hnsw_state: %v", err)
+	}
+	if stateCount != 0 {
+		t.Fatalf("hnsw_state count = %d, want 0 after graph save failure", stateCount)
 	}
 }
 

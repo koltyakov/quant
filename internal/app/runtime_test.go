@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -88,11 +89,35 @@ func TestMainProcessClose_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMainConfigFingerprintTracksIndexingConfiguration(t *testing.T) {
+	root := t.TempDir()
+	base := config.Default()
+	base.WatchDir = root
+	base.DBPath = filepath.Join(root, ".index", "quant.db")
+
+	same := *base
+	if got, want := mainConfigFingerprint(&same), mainConfigFingerprint(base); got != want {
+		t.Fatalf("equivalent config fingerprints differ: got %q want %q", got, want)
+	}
+	changed := *base
+	changed.ChunkSize++
+	if mainConfigFingerprint(&changed) == mainConfigFingerprint(base) {
+		t.Fatal("chunk-size change did not change main config fingerprint")
+	}
+	if err := validateMainLockConfig(base, &lock.LockInfo{ConfigFingerprint: mainConfigFingerprint(&changed)}); err == nil {
+		t.Fatal("expected incompatible main lock configuration error")
+	}
+	if err := validateMainLockConfig(base, &lock.LockInfo{}); err != nil {
+		t.Fatalf("legacy lock without fingerprint should remain compatible: %v", err)
+	}
+}
+
 func TestWatchMainAndPromoteInterval_PromotesWhenLockAvailable(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config.Config{WatchDir: dir}
+	dbPath := filepath.Join(dir, ".index", "quant.db")
+	cfg := &config.Config{WatchDir: dir, DBPath: dbPath}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -107,7 +132,7 @@ func TestWatchMainAndPromoteInterval_PromotesWhenLockAvailable(t *testing.T) {
 		t.Fatal("timed out waiting for worker promotion")
 	}
 
-	if info, err := lock.ReadLock(dir); err == nil && info != nil {
+	if info, err := lock.ReadLockForDB(dbPath); err == nil && info != nil {
 		t.Fatalf("expected temporary promotion lock to be released, got %+v", *info)
 	}
 }
@@ -116,8 +141,9 @@ func TestWatchMainAndPromoteInterval_RestartsOnNewMain(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cfg := &config.Config{WatchDir: dir}
-	lk, err := lock.TryAcquire(dir, "main-instance", "127.0.0.1:9001")
+	dbPath := filepath.Join(dir, ".index", "quant.db")
+	cfg := &config.Config{WatchDir: dir, DBPath: dbPath}
+	lk, err := lock.TryAcquireForDB(dbPath, "main-instance", "127.0.0.1:9001")
 	if err != nil {
 		t.Fatalf("unexpected lock acquire error: %v", err)
 	}

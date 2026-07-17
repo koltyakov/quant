@@ -1028,10 +1028,6 @@ func TestConfigureProcessMemory_NoPanic(t *testing.T) {
 	configureProcessMemory()
 }
 
-func TestReclaimProcessMemory_NoPanic(t *testing.T) {
-	reclaimProcessMemory()
-}
-
 func TestQuarantineFailedPath_NilIndexer(t *testing.T) {
 	var idx *Indexer
 	idx.quarantineFailedPath(context.Background(), "", nil)

@@ -23,9 +23,10 @@ var (
 )
 
 type LockInfo struct {
-	InstanceID string `json:"instance_id"`
-	PID        int    `json:"pid"`
-	ProxyAddr  string `json:"proxy_addr"`
+	InstanceID        string `json:"instance_id"`
+	PID               int    `json:"pid"`
+	ProxyAddr         string `json:"proxy_addr"`
+	ConfigFingerprint string `json:"config_fingerprint,omitempty"`
 }
 
 type Lock struct {
@@ -41,8 +42,91 @@ func LockPath(dir string) string {
 	return filepath.Join(dir, ".index", lockFileName)
 }
 
+// LockPathForDB returns the lock protecting a canonical database path. A
+// non-symlinked default database keeps its historical lock location.
+func LockPathForDB(dbPath string) (string, error) {
+	canonical, err := canonicalDBPath(dbPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(canonical) == "quant.db" && filepath.Base(filepath.Dir(canonical)) == ".index" {
+		return filepath.Join(filepath.Dir(canonical), lockFileName), nil
+	}
+	return canonical + ".lock", nil
+}
+
+func canonicalDBPath(dbPath string) (string, error) {
+	return canonicalDBPathDepth(dbPath, 0)
+}
+
+func canonicalDBPathDepth(dbPath string, depth int) (string, error) {
+	if depth > 32 {
+		return "", fmt.Errorf("resolving database symlinks: too many links")
+	}
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolving database path: %w", err)
+	}
+	absPath = filepath.Clean(absPath)
+	if info, err := os.Lstat(absPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(absPath)
+		if err != nil {
+			return "", fmt.Errorf("reading database symlink: %w", err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(absPath), target)
+		}
+		return canonicalDBPathDepth(target, depth+1)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspecting database symlink: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return filepath.Clean(resolved), nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("resolving database symlinks: %w", err)
+	}
+
+	current := absPath
+	var suffix []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absPath, nil
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolving database parent symlinks: %w", err)
+		}
+	}
+}
+
 func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
-	lockPath := LockPath(dir)
+	return tryAcquirePath(LockPath(dir), instanceID, proxyAddr, "")
+}
+
+func TryAcquireForDB(dbPath, instanceID, proxyAddr string) (*Lock, error) {
+	return TryAcquireForDBWithFingerprint(dbPath, instanceID, proxyAddr, "")
+}
+
+// TryAcquireForDBWithFingerprint acquires database ownership and records the
+// indexing configuration served by the main process.
+func TryAcquireForDBWithFingerprint(dbPath, instanceID, proxyAddr, fingerprint string) (*Lock, error) {
+	lockPath, err := LockPathForDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return tryAcquirePath(lockPath, instanceID, proxyAddr, fingerprint)
+}
+
+func tryAcquirePath(lockPath, instanceID, proxyAddr, fingerprint string) (*Lock, error) {
 	lockDir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(lockDir, stateDirMode); err != nil {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
@@ -59,9 +143,10 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 	}
 
 	info := LockInfo{
-		InstanceID: instanceID,
-		PID:        os.Getpid(),
-		ProxyAddr:  proxyAddr,
+		InstanceID:        instanceID,
+		PID:               os.Getpid(),
+		ProxyAddr:         proxyAddr,
+		ConfigFingerprint: fingerprint,
 	}
 
 	if err := lf.writeInfo(info); err != nil {
@@ -82,7 +167,18 @@ func TryAcquire(dir, instanceID, proxyAddr string) (*Lock, error) {
 }
 
 func ReadLock(dir string) (*LockInfo, error) {
-	lockPath := LockPath(dir)
+	return readLockPath(LockPath(dir))
+}
+
+func ReadLockForDB(dbPath string) (*LockInfo, error) {
+	lockPath, err := LockPathForDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return readLockPath(lockPath)
+}
+
+func readLockPath(lockPath string) (*LockInfo, error) {
 	info, err := readLockInfo(lockPath)
 	if err != nil {
 		return nil, err
@@ -91,7 +187,18 @@ func ReadLock(dir string) (*LockInfo, error) {
 }
 
 func CheckMainAlive(dir string) bool {
-	lockPath := LockPath(dir)
+	return checkMainAlivePath(LockPath(dir))
+}
+
+func CheckMainAliveForDB(dbPath string) bool {
+	lockPath, err := LockPathForDB(dbPath)
+	if err != nil {
+		return false
+	}
+	return checkMainAlivePath(lockPath)
+}
+
+func checkMainAlivePath(lockPath string) bool {
 	info, err := readLockInfo(lockPath)
 	if err != nil {
 		return false

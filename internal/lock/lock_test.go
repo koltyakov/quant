@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -31,6 +32,126 @@ func TestLockPath(t *testing.T) {
 	want := filepath.Join(dir, ".index", lockFileName)
 	if got := LockPath(dir); got != want {
 		t.Fatalf("LockPath(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestLockPathForDB_PreservesDefaultLocation(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, ".index", "quant.db")
+	got, err := LockPathForDB(dbPath)
+	if err != nil {
+		t.Fatalf("LockPathForDB() error = %v", err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+	if want := LockPath(canonicalRoot); got != want {
+		t.Fatalf("LockPathForDB() = %q, want %q", got, want)
+	}
+}
+
+func TestTryAcquireForDB_SeparatesDatabases(t *testing.T) {
+	dir := t.TempDir()
+	first, err := TryAcquireForDB(filepath.Join(dir, "first.db"), "first", "")
+	if err != nil {
+		t.Fatalf("first TryAcquireForDB() error = %v", err)
+	}
+	defer func() { _ = first.Release() }()
+
+	second, err := TryAcquireForDB(filepath.Join(dir, "second.db"), "second", "")
+	if err != nil {
+		t.Fatalf("second TryAcquireForDB() error = %v", err)
+	}
+	defer func() { _ = second.Release() }()
+}
+
+func TestTryAcquireForDBWithFingerprintRecordsIdentity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "quant.db")
+	lk, err := TryAcquireForDBWithFingerprint(dbPath, "instance", "127.0.0.1:9000", "fingerprint")
+	if err != nil {
+		t.Fatalf("TryAcquireForDBWithFingerprint() error = %v", err)
+	}
+	defer func() { _ = lk.Release() }()
+	if got := lk.Info().ConfigFingerprint; got != "fingerprint" {
+		t.Fatalf("ConfigFingerprint = %q, want %q", got, "fingerprint")
+	}
+}
+
+func TestTryAcquireForDB_CanonicalizesSymlinkAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.db")
+	if err := os.WriteFile(target, nil, 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	alias := filepath.Join(dir, "alias.db")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	targetLock, err := LockPathForDB(target)
+	if err != nil {
+		t.Fatalf("target LockPathForDB() error = %v", err)
+	}
+	aliasLock, err := LockPathForDB(alias)
+	if err != nil {
+		t.Fatalf("alias LockPathForDB() error = %v", err)
+	}
+	if targetLock != aliasLock {
+		t.Fatalf("lock paths differ: target=%q alias=%q", targetLock, aliasLock)
+	}
+
+	lk, err := TryAcquireForDB(target, "target", "")
+	if err != nil {
+		t.Fatalf("TryAcquireForDB(target) error = %v", err)
+	}
+	defer func() { _ = lk.Release() }()
+	if _, err := TryAcquireForDB(alias, "alias", ""); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("TryAcquireForDB(alias) error = %v, want ErrLockHeld", err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("Remove(target) error = %v", err)
+	}
+	danglingAliasLock, err := LockPathForDB(alias)
+	if err != nil {
+		t.Fatalf("dangling alias LockPathForDB() error = %v", err)
+	}
+	if danglingAliasLock != targetLock {
+		t.Fatalf("dangling alias changed lock path: got=%q want=%q", danglingAliasLock, targetLock)
+	}
+}
+
+func TestLockPathForDB_CanonicalizesDefaultDatabaseAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(realRoot, ".index"), 0750); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	dbPath := filepath.Join(realRoot, ".index", "quant.db")
+	if err := os.WriteFile(dbPath, nil, 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	aliasRoot := filepath.Join(base, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	realLock, err := LockPathForDB(dbPath)
+	if err != nil {
+		t.Fatalf("real LockPathForDB() error = %v", err)
+	}
+	aliasLock, err := LockPathForDB(filepath.Join(aliasRoot, ".index", "quant.db"))
+	if err != nil {
+		t.Fatalf("alias LockPathForDB() error = %v", err)
+	}
+	if realLock != aliasLock {
+		t.Fatalf("default lock paths differ: real=%q alias=%q", realLock, aliasLock)
 	}
 }
 

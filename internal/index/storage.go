@@ -129,9 +129,6 @@ func (s *Store) resetIndex(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM content_dedup`); err != nil {
 		return fmt.Errorf("clearing content dedup: %w", err)
 	}
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
-		return err
-	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
 	}
@@ -150,11 +147,24 @@ func deleteChunksByDocumentIDTx(ctx context.Context, tx *sql.Tx, docID int64) er
 	return nil
 }
 
-func rebuildChunksFTSTx(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
-		return fmt.Errorf("rebuilding chunks fts: %w", err)
+func (s *Store) chunkGeneration(ctx context.Context) (int64, error) {
+	var generation int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT chunk_generation FROM index_state WHERE id = 1`,
+	).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("reading chunk generation: %w", err)
 	}
-	return nil
+	return generation, nil
+}
+
+func chunkGenerationTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var generation int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT chunk_generation FROM index_state WHERE id = 1`,
+	).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("reading transaction chunk generation: %w", err)
+	}
+	return generation, nil
 }
 
 func clearHNSWStateTx(ctx context.Context, tx *sql.Tx) error {
@@ -204,9 +214,6 @@ func (s *Store) cleanupOrphanedChunks(ctx context.Context) error {
 		 )`,
 	); err != nil {
 		return fmt.Errorf("deleting orphaned chunks: %w", err)
-	}
-	if err := rebuildChunksFTSTx(ctx, tx); err != nil {
-		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err

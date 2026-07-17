@@ -9,19 +9,6 @@ import (
 	"time"
 )
 
-func ftsShadowRowCounts(t *testing.T, store *Store) (dataRows, idxRows int) {
-	t.Helper()
-
-	ctx := context.Background()
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_data`).Scan(&dataRows); err != nil {
-		t.Fatalf("unexpected error reading chunks_fts_data: %v", err)
-	}
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks_fts_idx`).Scan(&idxRows); err != nil {
-		t.Fatalf("unexpected error reading chunks_fts_idx: %v", err)
-	}
-	return dataRows, idxRows
-}
-
 func TestNewStore(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir + "/test.db")
@@ -545,9 +532,21 @@ func TestStore_DeleteDocument(t *testing.T) {
 		t.Fatalf("expected chunk cascade delete, got %d chunks", chunkCount)
 	}
 
-	dataRows, idxRows := ftsShadowRowCounts(t, store)
-	if dataRows != 2 || idxRows != 0 {
-		t.Fatalf("expected rebuilt empty FTS shadow tables, got data=%d idx=%d", dataRows, idxRows)
+	diag, err := store.FTSDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error reading FTS diagnostics: %v", err)
+	}
+	if !diag.Empty || diag.LogicalRows != 0 {
+		t.Fatalf("expected logically empty FTS after delete, got %+v", diag)
+	}
+	var matches int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'hello'`,
+	).Scan(&matches); err != nil {
+		t.Fatalf("unexpected error searching deleted FTS term: %v", err)
+	}
+	if matches != 0 {
+		t.Fatalf("deleted FTS term still has %d matches", matches)
 	}
 }
 
@@ -639,14 +638,39 @@ func TestStore_DeleteDocumentsByPrefix(t *testing.T) {
 	if docs[0].Path != "src/main.go" {
 		t.Fatalf("expected src/main.go to remain, got %s", docs[0].Path)
 	}
+	var docsMatches, srcMatches int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'docs'`,
+	).Scan(&docsMatches); err != nil {
+		t.Fatalf("unexpected error searching deleted prefix term: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'main'`,
+	).Scan(&srcMatches); err != nil {
+		t.Fatalf("unexpected error searching surviving prefix term: %v", err)
+	}
+	if docsMatches != 0 || srcMatches != 1 {
+		t.Fatalf("unexpected FTS matches after prefix delete: docs=%d main=%d", docsMatches, srcMatches)
+	}
 
 	if err := store.DeleteDocumentsByPrefix(ctx, "."); err != nil {
 		t.Fatalf("unexpected delete-all error: %v", err)
 	}
 
-	dataRows, idxRows := ftsShadowRowCounts(t, store)
-	if dataRows != 2 || idxRows != 0 {
-		t.Fatalf("expected rebuilt empty FTS shadow tables, got data=%d idx=%d", dataRows, idxRows)
+	diag, err := store.FTSDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error reading FTS diagnostics: %v", err)
+	}
+	if !diag.Empty || diag.LogicalRows != 0 {
+		t.Fatalf("expected logically empty FTS after delete-all, got %+v", diag)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'main'`,
+	).Scan(&srcMatches); err != nil {
+		t.Fatalf("unexpected error searching FTS after delete-all: %v", err)
+	}
+	if srcMatches != 0 {
+		t.Fatalf("deleted-all FTS term still has %d matches", srcMatches)
 	}
 }
 
