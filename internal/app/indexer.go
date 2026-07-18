@@ -902,11 +902,11 @@ func DocumentKey(root, path string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
 	}
-	return rel, nil
+	return filepath.ToSlash(rel), nil
 }
 
 func NormalizeStoredDocumentPath(root, storedPath string) (string, error) {
-	return DocumentKey(root, filepath.Join(root, storedPath))
+	return DocumentKey(root, filepath.Join(root, storedDocumentPath(storedPath)))
 }
 
 func SameModTime(a, b time.Time) bool {

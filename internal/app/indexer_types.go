@@ -1,7 +1,6 @@
 package app
 
 import (
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +97,7 @@ func (t *PathSyncTracker) InvalidatePrefix(prefix string) {
 	defer t.mu.Unlock()
 
 	for key, state := range t.states {
-		if key == prefix || strings.HasPrefix(key, prefix+string(filepath.Separator)) {
+		if key == prefix || strings.HasPrefix(key, prefix+"/") {
 			state.version++
 			state.dirty = true
 		}
@@ -177,7 +176,7 @@ func (q *LiveIndexQueue) CancelPrefix(prefix string) {
 	defer q.mu.Unlock()
 
 	for path, state := range q.states {
-		if path != prefix && !strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+		if path != prefix && !strings.HasPrefix(path, prefix+"/") {
 			continue
 		}
 		state.hasPending = false
@@ -270,7 +269,7 @@ func (r *RetryScheduler) ClearPrefix(prefix string) {
 	}
 
 	for path, state := range r.states {
-		if path != prefix && !strings.HasPrefix(path, prefix+string(filepath.Separator)) {
+		if path != prefix && !strings.HasPrefix(path, prefix+"/") {
 			continue
 		}
 		if state.timer != nil {

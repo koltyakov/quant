@@ -619,17 +619,18 @@ func TestReadinessError_IndexingStateWithMessage(t *testing.T) {
 
 func TestNormalizeSearchPathPrefix(t *testing.T) {
 	t.Parallel()
+	watchDir := filepath.Join(t.TempDir(), "project")
 	tests := []struct {
 		watchDir string
 		raw      string
 		want     string
 		wantErr  bool
 	}{
-		{"/project", "", "", false},
-		{"/project", "src", "src", false},
-		{"/project", "src/", "src/", false},
-		{"/project", "/project/src", "src", false},
-		{"/project", "../outside", "", true},
+		{watchDir, "", "", false},
+		{watchDir, "src", "src", false},
+		{watchDir, "src/", "src/", false},
+		{watchDir, filepath.Join(watchDir, "src"), "src", false},
+		{watchDir, "../outside", "", true},
 	}
 	for _, tt := range tests {
 		got, err := normalizeSearchPathPrefix(tt.watchDir, tt.raw)

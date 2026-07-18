@@ -53,7 +53,7 @@ func TestDocumentKey_SubdirectoryPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if key != filepath.Join("docs", "inner", "notes.md") {
+	if key != "docs/inner/notes.md" {
 		t.Fatalf("unexpected key: %q", key)
 	}
 }
@@ -86,7 +86,7 @@ func TestDocumentKey_PathCleaning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if key != filepath.Join("src", "main.go") {
+	if key != "src/main.go" {
 		t.Fatalf("expected cleaned key, got %q", key)
 	}
 }
@@ -106,8 +106,16 @@ func TestNormalizeStoredDocumentPath_EdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if normalized != filepath.Join("docs", "b.md") {
+	if normalized != "docs/b.md" {
 		t.Fatalf("unexpected normalized path with separator: %q", normalized)
+	}
+
+	normalized, err = NormalizeStoredDocumentPath(root, `docs\legacy.md`)
+	if err != nil {
+		t.Fatalf("unexpected legacy separator error: %v", err)
+	}
+	if normalized != "docs/legacy.md" {
+		t.Fatalf("unexpected normalized legacy path: %q", normalized)
 	}
 }
 

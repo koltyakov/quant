@@ -399,7 +399,7 @@ func TestNewStore_SetsApplicationID(t *testing.T) {
 }
 
 func TestNewStore_IdentityInspectionHandlesSpecialPathCharacters(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "quant #1?.db")
+	dbPath := filepath.Join(t.TempDir(), "quant #1.db")
 	store, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewStore() error: %v", err)

@@ -45,6 +45,7 @@ type Watcher struct {
 
 	mu            sync.Mutex
 	timers        map[string]*time.Timer
+	pendingDirs   map[string]bool
 	resyncTimer   *time.Timer
 	watchedDirs   map[string]struct{}
 	resyncPending bool
@@ -70,12 +71,13 @@ func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 	}
 
 	w := &Watcher{
-		fsw:     fsw,
-		matcher: scan.NewGitIgnoreMatcher(dir, gi),
-		rootDir: dir,
-		events:  make(chan Event, cfg.EventBuffer),
-		done:    make(chan struct{}),
-		timers:  make(map[string]*time.Timer),
+		fsw:         fsw,
+		matcher:     scan.NewGitIgnoreMatcher(dir, gi),
+		rootDir:     dir,
+		events:      make(chan Event, cfg.EventBuffer),
+		done:        make(chan struct{}),
+		timers:      make(map[string]*time.Timer),
+		pendingDirs: make(map[string]bool),
 		watchedDirs: map[string]struct{}{
 			dir: {},
 		},
@@ -107,6 +109,7 @@ func (w *Watcher) Close() error {
 	for path, timer := range w.timers {
 		timer.Stop()
 		delete(w.timers, path)
+		delete(w.pendingDirs, path)
 	}
 	if w.resyncTimer != nil {
 		w.resyncTimer.Stop()
@@ -285,10 +288,17 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 	if t, ok := w.timers[path]; ok {
 		t.Stop()
 	}
+	if w.pendingDirs == nil {
+		w.pendingDirs = make(map[string]bool)
+	}
+	isDir = isDir || w.pendingDirs[path]
+	w.pendingDirs[path] = isDir
 
 	w.timers[path] = time.AfterFunc(defaultDebounceDelay, func() {
 		w.mu.Lock()
 		delete(w.timers, path)
+		isDir := w.pendingDirs[path]
+		delete(w.pendingDirs, path)
 		closed := w.closed
 		w.mu.Unlock()
 		if closed {

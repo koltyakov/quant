@@ -459,7 +459,7 @@ func TestIndexFile_StoresPathRelativeToWatchDir(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatalf("expected 1 document, got %d", len(docs))
 	}
-	if docs[0].Path != filepath.Join("nested", "sample.txt") {
+	if docs[0].Path != "nested/sample.txt" {
 		t.Fatalf("expected relative path, got %q", docs[0].Path)
 	}
 }
@@ -1166,7 +1166,7 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatalf("expected 1 document, got %d", len(docs))
 	}
-	if docs[0].Path != filepath.Join("nested", "sample.txt") {
+	if docs[0].Path != "nested/sample.txt" {
 		t.Fatalf("expected migrated relative path, got %q", docs[0].Path)
 	}
 }
@@ -1177,7 +1177,7 @@ func TestDocumentKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != filepath.Join("nested", "file.txt") {
+	if got != "nested/file.txt" {
 		t.Fatalf("unexpected key %q", got)
 	}
 }
@@ -1193,22 +1193,13 @@ func TestDocumentKey_RejectsOutsideRoot(t *testing.T) {
 func TestConfigParse_DefaultsDirToCurrentFolder(t *testing.T) {
 	oldArgs := os.Args
 	oldCommandLine := flag.CommandLine
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("unexpected getwd error: %v", err)
-	}
 	t.Cleanup(func() {
 		os.Args = oldArgs
 		flag.CommandLine = oldCommandLine
-		if err := os.Chdir(oldWD); err != nil {
-			t.Fatalf("unexpected restore chdir error: %v", err)
-		}
 	})
 
 	dir := t.TempDir()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("unexpected chdir error: %v", err)
-	}
+	t.Chdir(dir)
 	expectedDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("unexpected getwd error after chdir: %v", err)

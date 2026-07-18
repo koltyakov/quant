@@ -33,7 +33,7 @@ func TestDualHandlerWithAttrsAndGroupRelativizesPaths(t *testing.T) {
 	var console bytes.Buffer
 	var file bytes.Buffer
 
-	baseDir := filepath.Join(string(filepath.Separator), "tmp")
+	baseDir := t.TempDir()
 	handler := (&dualHandler{
 		console:     &console,
 		fileHandler: slog.NewTextHandler(&file, &slog.HandlerOptions{}),

@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -203,6 +204,28 @@ func TestDebounce_ReplacesExistingTimer(t *testing.T) {
 	}
 }
 
+func TestDebounce_PreservesDirectoryRemoval(t *testing.T) {
+	t.Parallel()
+
+	w := &Watcher{
+		events: make(chan Event, 1),
+		done:   make(chan struct{}),
+		timers: make(map[string]*time.Timer),
+	}
+
+	w.debounce("directory", Remove, true)
+	w.debounce("directory", Remove, false)
+
+	select {
+	case evt := <-w.events:
+		if !evt.IsDir {
+			t.Fatalf("expected duplicate remove event to preserve directory state, got %+v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected debounced remove event to fire")
+	}
+}
+
 func TestDebounce_FullEventChannel_TriggersResync(t *testing.T) {
 	t.Parallel()
 
@@ -264,14 +287,14 @@ func TestRemoveWatchedDirEntry_ExistingDir(t *testing.T) {
 
 	w := &Watcher{
 		watchedDirs: map[string]struct{}{
-			"/test":          {},
-			"/test/sub":      {},
-			"/test/sub/deep": {},
-			"/other":         {},
+			filepath.Join("test"):                {},
+			filepath.Join("test", "sub"):         {},
+			filepath.Join("test", "sub", "deep"): {},
+			filepath.Join("other"):               {},
 		},
 	}
 
-	isDir := w.removeWatchedDirEntry("/test/sub")
+	isDir := w.removeWatchedDirEntry(filepath.Join("test", "sub"))
 
 	if !isDir {
 		t.Fatal("expected true for existing watched directory")

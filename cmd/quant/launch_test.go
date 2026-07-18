@@ -121,7 +121,7 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 		want := []string{
 			"-C", opts.WorkspaceDir,
 			"-c", `mcp_servers.quant.command="/tmp/quant"`,
-			"-c", `mcp_servers.quant.args=["mcp", "--dir", "` + opts.IndexDir + `"]`,
+			"-c", "mcp_servers.quant.args=" + tomlStringArray([]string{"mcp", "--dir", opts.IndexDir}),
 			"-c", `mcp_servers.quant.env={QUANT_AUTOUPDATE="true"}`,
 			"-c", `mcp_servers.quant.tools."*".approval_mode="approve"`,
 			"hello",
@@ -238,8 +238,15 @@ func TestBuildLaunchInvocationAdapters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading gemini settings: %v", err)
 		}
-		if !strings.Contains(string(data), `"mcpServers"`) || !strings.Contains(string(data), `"/tmp/quant"`) || !strings.Contains(string(data), opts.IndexDir) {
-			t.Fatalf("unexpected gemini settings:\n%s", data)
+		var cfg struct {
+			MCPServers map[string]launchMCPConfig `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("decoding gemini settings: %v", err)
+		}
+		quant := cfg.MCPServers[launchServerName]
+		if quant.Command != "/tmp/quant" || !reflect.DeepEqual(quant.Args, []string{"mcp", "--dir", opts.IndexDir}) || quant.Env["QUANT_AUTOUPDATE"] != "true" {
+			t.Fatalf("unexpected gemini settings: %+v", quant)
 		}
 	})
 }

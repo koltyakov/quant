@@ -6,7 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"path"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/coder/hnsw"
@@ -326,8 +327,8 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	prefix = filepath.Clean(prefix)
-	likePrefix := sqlLikePrefixPattern(prefix + string(filepath.Separator))
+	prefix = path.Clean(strings.ReplaceAll(prefix, `\`, "/"))
+	likePrefix := sqlLikePrefixPattern(prefix + "/")
 	if prefix == "." || prefix == "" {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {

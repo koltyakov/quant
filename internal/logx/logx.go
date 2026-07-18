@@ -135,16 +135,16 @@ func (h *dualHandler) relativizeAttr(a slog.Attr) slog.Attr {
 func relativizePath(path, base string) string {
 	p := filepath.Clean(path)
 	if !filepath.IsAbs(p) {
-		return p
+		return filepath.ToSlash(p)
 	}
 	rel, err := filepath.Rel(base, p)
 	if err != nil {
-		return p
+		return filepath.ToSlash(p)
 	}
 	if strings.HasPrefix(rel, "..") {
-		return p
+		return filepath.ToSlash(p)
 	}
-	return rel
+	return filepath.ToSlash(rel)
 }
 
 func (h *dualHandler) writeConsole(t time.Time, level slog.Level, msg string, attrs []slog.Attr) {

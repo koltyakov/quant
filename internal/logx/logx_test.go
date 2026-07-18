@@ -3,6 +3,7 @@ package logx
 import (
 	"bytes"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,9 +27,11 @@ func TestLogFunctionsDoNotPanic(t *testing.T) {
 
 func TestConsoleFormat(t *testing.T) {
 	var buf bytes.Buffer
-	Configure("/tmp", &buf, ioDiscard{})
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "data", "books", "test.pdf")
+	Configure(baseDir, &buf, ioDiscard{})
 
-	Info("indexed document", "path", "/tmp/data/books/test.pdf")
+	Info("indexed document", "path", path)
 
 	output := buf.String()
 	if !strings.Contains(output, "INF") {
@@ -37,19 +40,21 @@ func TestConsoleFormat(t *testing.T) {
 	if !strings.Contains(output, "data/books/test.pdf") {
 		t.Errorf("expected relative path in output, got: %s", output)
 	}
-	if strings.Contains(output, "/tmp/data/books/test.pdf") {
+	if strings.Contains(output, filepath.ToSlash(path)) {
 		t.Errorf("expected absolute path to be relativized, got: %s", output)
 	}
 }
 
 func TestPathRelativizationOutsideBase(t *testing.T) {
 	var buf bytes.Buffer
-	Configure("/tmp", &buf, ioDiscard{})
+	baseDir := t.TempDir()
+	externalPath := filepath.Join(t.TempDir(), "system.log")
+	Configure(baseDir, &buf, ioDiscard{})
 
-	Info("external path", "path", "/var/log/system.log")
+	Info("external path", "path", externalPath)
 
 	output := buf.String()
-	if !strings.Contains(output, "/var/log/system.log") {
+	if !strings.Contains(output, filepath.ToSlash(externalPath)) {
 		t.Errorf("expected absolute path preserved when outside base dir, got: %s", output)
 	}
 }
@@ -79,15 +84,17 @@ func TestDualHandlerWritesToBothOutputs(t *testing.T) {
 }
 
 func TestRelativizePath(t *testing.T) {
+	baseDir := t.TempDir()
+	externalPath := filepath.Join(t.TempDir(), "log.txt")
 	tests := []struct {
 		path string
 		base string
 		want string
 	}{
-		{"/tmp/data/file.txt", "/tmp", "data/file.txt"},
-		{"/var/log.txt", "/tmp", "/var/log.txt"},
-		{"relative/path.txt", "/tmp", "relative/path.txt"},
-		{"/tmp", "/tmp", "."},
+		{filepath.Join(baseDir, "data", "file.txt"), baseDir, "data/file.txt"},
+		{externalPath, baseDir, filepath.ToSlash(externalPath)},
+		{filepath.Join("relative", "path.txt"), baseDir, "relative/path.txt"},
+		{baseDir, baseDir, "."},
 	}
 	for _, tt := range tests {
 		got := relativizePath(tt.path, tt.base)

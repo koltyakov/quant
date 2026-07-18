@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -100,6 +101,9 @@ func TestReplaceBinaryCopy_WithTempFiles(t *testing.T) {
 
 func TestReplaceBinaryCopy_PreservesMode(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve POSIX executable mode bits")
+	}
 
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "testbinary")

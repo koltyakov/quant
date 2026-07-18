@@ -13,6 +13,8 @@ type windowsLockFile struct {
 	handle windows.Handle
 }
 
+const windowsLockOffset uint32 = 1 << 30
+
 func openLockFile(path string) (lockFile, error) {
 	h, err := windows.CreateFile(
 		windows.StringToUTF16Ptr(path),
@@ -30,7 +32,7 @@ func openLockFile(path string) (lockFile, error) {
 }
 
 func (l *windowsLockFile) tryLock() error {
-	ol := new(windows.Overlapped)
+	ol := &windows.Overlapped{Offset: windowsLockOffset}
 	err := windows.LockFileEx(l.handle, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, ol)
 	if err != nil {
 		return fmt.Errorf("lock file held: %w", err)
@@ -39,7 +41,7 @@ func (l *windowsLockFile) tryLock() error {
 }
 
 func (l *windowsLockFile) unlock() error {
-	ol := new(windows.Overlapped)
+	ol := &windows.Overlapped{Offset: windowsLockOffset}
 	return windows.UnlockFileEx(l.handle, 0, 1, 0, ol)
 }
 

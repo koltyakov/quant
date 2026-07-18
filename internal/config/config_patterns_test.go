@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -89,7 +91,7 @@ func TestResolveConfigPath(t *testing.T) {
 		}
 	})
 	t.Run("absolute path unchanged", func(t *testing.T) {
-		abs := filepath.Join("/", "absolute", "path")
+		abs := filepath.Join(t.TempDir(), "absolute", "path")
 		got := resolveConfigPath("/base", abs)
 		if got != abs {
 			t.Errorf("expected %s, got %s", abs, got)
@@ -259,6 +261,9 @@ func TestCheckDirWritable(t *testing.T) {
 		}
 	})
 	t.Run("permission denied", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows permissions are controlled by ACLs, not POSIX mode bits")
+		}
 		if os.Getuid() == 0 {
 			t.Skip("running as root, skip permission test")
 		}
@@ -517,8 +522,10 @@ func TestApplyEnv_InvalidValuesUseDefaults(t *testing.T) {
 func TestLoadYAML_AllFields(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	content := `dir: /tmp/myproject
-db: /tmp/myproject/data.db
+	watchDir := filepath.Join(dir, "myproject")
+	dbPath := filepath.Join(watchDir, "data.db")
+	content := fmt.Sprintf(`dir: %q
+db: %q
 transport: http
 listen: ":3000"
 embed_url: https://api.openai.com
@@ -533,7 +540,7 @@ include:
   - "*.ts"
 exclude:
   - "vendor/**"
-`
+`, watchDir, dbPath)
 	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
@@ -544,11 +551,11 @@ exclude:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.WatchDir != "/tmp/myproject" {
-		t.Errorf("expected /tmp/myproject, got %s", cfg.WatchDir)
+	if cfg.WatchDir != watchDir {
+		t.Errorf("expected %s, got %s", watchDir, cfg.WatchDir)
 	}
-	if cfg.DBPath != "/tmp/myproject/data.db" {
-		t.Errorf("expected /tmp/myproject/data.db, got %s", cfg.DBPath)
+	if cfg.DBPath != dbPath {
+		t.Errorf("expected %s, got %s", dbPath, cfg.DBPath)
 	}
 	if cfg.Transport != TransportHTTP {
 		t.Errorf("expected http, got %s", cfg.Transport)
