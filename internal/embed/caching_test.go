@@ -292,7 +292,7 @@ func TestCachingEmbedder_Close(t *testing.T) {
 	closeErr := errors.New("close failed")
 	inner := stubEmbedder{closeErr: closeErr}
 	c := NewCachingEmbedder(inner, CachingConfig{CacheSize: 2})
-	if err := c.Close(); err != closeErr {
+	if err := c.Close(); !errors.Is(err, closeErr) {
 		t.Fatalf("expected closeErr, got %v", err)
 	}
 }

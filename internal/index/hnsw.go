@@ -175,6 +175,7 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 		var id int
 		var embBytes []byte
 		if err := rows.Scan(&id, &embBytes); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("scanning chunk for hnsw: %w", err)
 		}
 		vec := decodeEmbeddingForHNSW(embBytes, dims)

@@ -77,7 +77,7 @@ func classifyStorePath(dbPath string) (storePathKind, error) {
 		}
 		var sqliteErr *sqlite.Error
 		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_NOTADB {
-			return storePathFresh, fmt.Errorf("%w: inspecting %q: %v", ErrNotQuantDatabase, dbPath, err)
+			return storePathFresh, fmt.Errorf("%w: inspecting %q: %w", ErrNotQuantDatabase, dbPath, err)
 		}
 		return storePathFresh, fmt.Errorf("inspecting database identity in %q: %w", dbPath, err)
 	}
@@ -108,7 +108,7 @@ func sqliteHeaderApplicationID(dbPath string) (int64, error) {
 
 	var header [72]byte
 	if _, err := io.ReadFull(f, header[:]); err != nil {
-		return 0, fmt.Errorf("%w: %q has an invalid SQLite header: %v", ErrNotQuantDatabase, dbPath, err)
+		return 0, fmt.Errorf("%w: %q has an invalid SQLite header: %w", ErrNotQuantDatabase, dbPath, err)
 	}
 	if string(header[:16]) != "SQLite format 3\x00" {
 		return 0, fmt.Errorf("%w: %q has an invalid SQLite header", ErrNotQuantDatabase, dbPath)

@@ -7,10 +7,14 @@ run:
 linters:
   default: none
   enable:
+    - bodyclose
+    - copyloopvar
     - errcheck
+    - errorlint
     - gosec
     - govet
     - ineffassign
+    - misspell
     - staticcheck
     - unused
   exclusions:
@@ -18,6 +22,13 @@ linters:
       - path: '(.+)_test\.go'
         linters:
           - gosec
+      # staticcheck does not model t.Fatal as terminating, so every
+      # `if x == nil { t.Fatal(...) }` guard followed by a dereference is
+      # reported as a possible nil dereference. The guards are correct.
+      - path: '(.+)_test\.go'
+        text: 'SA5011'
+        linters:
+          - staticcheck
 
 issues:
   max-issues-per-linter: 0

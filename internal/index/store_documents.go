@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -443,7 +444,7 @@ func (s *Store) GetDocumentByPath(ctx context.Context, path string) (*Document, 
 		`SELECT id, path, hash, modified_at, indexed_at, file_type, language, title, tags, collection FROM documents WHERE path = ?`,
 		path,
 	).Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

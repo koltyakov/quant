@@ -62,6 +62,10 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    env:
+      # Minimum total statement coverage. Raise this as coverage improves;
+      # never lower it to make a red build green.
+      COVERAGE_FLOOR: '78.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -76,13 +80,18 @@ jobs:
 
       - name: Report coverage
         run: |
+          total=$(go tool cover -func=coverage.out | tail -n 1 | awk '{print $NF}' | tr -d '%')
           {
             echo '## Coverage'
             echo '```'
-            go tool cover -func=coverage.out | tail -n 1
+            echo "total: ${total}% (floor: ${COVERAGE_FLOOR}%)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          go tool cover -func=coverage.out | tail -n 1
+          echo "total: ${total}% (floor: ${COVERAGE_FLOOR}%)"
+          if awk "BEGIN { exit !($total < $COVERAGE_FLOOR) }"; then
+            echo "::error::coverage ${total}% is below the ${COVERAGE_FLOOR}% floor"
+            exit 1
+          fi
 
       - name: Upload coverage profile
         uses: actions/upload-artifact@v7

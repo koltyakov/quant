@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 type OpenAICompatible struct {
@@ -186,8 +185,4 @@ func openAIEmbedURL(raw string) (string, error) {
 	embedURL.RawPath = ""
 	embedURL.Fragment = ""
 	return embedURL.String(), nil
-}
-
-func init() {
-	_ = utf8.RuneCountInString
 }

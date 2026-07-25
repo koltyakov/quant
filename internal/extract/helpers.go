@@ -122,7 +122,7 @@ func readAllLimited(ctx context.Context, r io.Reader, limit int64, name string) 
 			}
 			out = append(out, buf[:n]...)
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return out, nil
 		}
 		if err != nil {

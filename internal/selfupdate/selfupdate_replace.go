@@ -147,7 +147,7 @@ func replaceBinaryCopyStaged(stagedPath, exe string, mode os.FileMode, caps stri
 			if restoreErr := ops.rename(backupPath, exe); restoreErr != nil {
 				_ = ops.remove(exe)
 				if copyRestoreErr := ops.copy(backupPath, exe, mode); copyRestoreErr != nil {
-					return fmt.Errorf("create new binary: %w (restore old binary failed: %v; copy restore failed: %v)", err, restoreErr, copyRestoreErr)
+					return fmt.Errorf("create new binary: %w (restore old binary failed: %w; copy restore failed: %w)", err, restoreErr, copyRestoreErr)
 				}
 			}
 		}

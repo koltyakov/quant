@@ -199,6 +199,8 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 		if len(filtered) > 0 {
 			s.loadHNSWChunkRows(ctx, filtered, queryEmbed, limit, nil, vectorOnly, nil)
 		}
+	} else if err := s.findSimilarBruteForce(ctx, chunkID, queryEmbed, limit, vectorOnly); err != nil {
+		return nil, err
 	}
 
 	candidates := mergeCandidates(nil, vectorOnly)
@@ -220,6 +222,35 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 	}
 	s.hydrateResultContents(ctx, results)
 	return results, nil
+}
+
+// findSimilarBruteForce is the FindSimilar counterpart to the brute-force
+// fallback in SearchFiltered: when the HNSW graph is unavailable (still
+// building at startup, or disabled) a linear scan keeps find_similar useful
+// instead of silently returning no matches. The scan is gated by the same
+// max-vector-candidates budget as search, so a large index degrades to an
+// empty result rather than an expensive full table scan.
+func (s *Store) findSimilarBruteForce(ctx context.Context, chunkID int64, queryEmbed []float32, limit int, vectorOnly map[int]*searchCandidate) error {
+	ok, err := s.canRunVectorFallback(ctx, "", "", nil)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+		FROM chunks c
+		JOIN documents d ON c.document_id = d.id
+		WHERE c.id != ?`, chunkID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	_, err = s.scanVectorRows(rows, queryEmbed, limit, nil, vectorOnly)
+	return err
 }
 
 // hydrateResultContents fills ChunkContent for final results. Candidate
