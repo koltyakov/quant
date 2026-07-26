@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -98,12 +99,27 @@ func (idx *indexer) handleWatchEvent(ctx context.Context, event watch.Event) {
 	idx.ensureInner().HandleWatchEvent(ctx, event)
 }
 
+// syncDocument and indexFile address documents by plain filesystem path. The
+// app package works in resolved DocumentRefs, so the resolution happens here
+// rather than as a path-based wrapper in the production API.
+
 func (idx *indexer) syncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (indexAction, error) {
-	return idx.ensureInner().SyncDocument(ctx, key, path, modTime, doc)
+	if path != "" {
+		return idx.ensureInner().SyncDocumentRef(ctx, app.DocumentRef{Key: key, AbsPath: path}, modTime, doc)
+	}
+	ref, err := app.ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
+	if err != nil {
+		return indexNoop, fmt.Errorf("resolving document key: %w", err)
+	}
+	return idx.ensureInner().SyncDocumentRef(ctx, ref, modTime, doc)
 }
 
 func (idx *indexer) indexFile(ctx context.Context, path string, modTime time.Time) (indexAction, error) {
-	return idx.ensureInner().IndexFile(ctx, path, modTime)
+	ref, err := app.ResolveDocumentRef(idx.cfg.WatchDir, path)
+	if err != nil {
+		return indexNoop, fmt.Errorf("computing document key: %w", err)
+	}
+	return idx.ensureInner().IndexDocument(ctx, ref, modTime)
 }
 
 func documentKey(root, path string) (string, error) {

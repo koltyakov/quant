@@ -28,6 +28,13 @@ type Store struct {
 	reranker                  Reranker
 
 	writeMu sync.Mutex
+
+	// embeddingMeta caches the embedding_metadata row set. It is read on every
+	// document reindex and every vector operation but only ever written by
+	// putEmbeddingMetadata, which invalidates the cache.
+	metaMu       sync.RWMutex
+	metaCached   bool
+	embeddingMet *EmbeddingMetadata
 }
 
 const defaultMaxVectorSearchCandidates = 20000

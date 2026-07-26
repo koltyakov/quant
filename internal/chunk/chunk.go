@@ -3,6 +3,7 @@ package chunk
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // SplitWithPath splits text into chunks using a code-aware strategy when the
@@ -442,15 +443,56 @@ func lastWords(text string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	words := strings.Fields(text)
-	if len(words) <= n {
-		return strings.Join(words, " ")
+	// Keep only the trailing n words in a ring buffer instead of materializing
+	// every field: text is a whole chunk body while n is the overlap size.
+	ring := make([]string, n)
+	count := 0
+	for word := range strings.FieldsSeq(text) {
+		ring[count%n] = word
+		count++
 	}
-	return strings.Join(words[len(words)-n:], " ")
+	if count == 0 {
+		return ""
+	}
+	if count <= n {
+		return strings.Join(ring[:count], " ")
+	}
+	start := count % n
+	return strings.Join(append(ring[start:n:n], ring[:start]...), " ")
 }
 
+// wordCount counts whitespace-separated fields using strings.Fields semantics.
+// It runs on every unit and every line of every unit, so it walks the text once
+// with an ASCII fast path rather than allocating the field slice itself.
 func wordCount(text string) int {
-	return len(strings.Fields(text))
+	count := 0
+	inField := false
+	for i := 0; i < len(text); {
+		c := text[i]
+		if c < utf8.RuneSelf {
+			if isASCIISpace(c) {
+				inField = false
+			} else if !inField {
+				inField = true
+				count++
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if unicode.IsSpace(r) {
+			inField = false
+		} else if !inField {
+			inField = true
+			count++
+		}
+		i += size
+	}
+	return count
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
 func runeCount(text string) int {

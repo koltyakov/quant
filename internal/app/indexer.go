@@ -188,6 +188,11 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 		err     error
 	}
 
+	// Snapshot the skip list once instead of querying it per scanned file. A
+	// file quarantined by a worker mid-scan is one this pass has already
+	// visited, so the snapshot cannot let a quarantined file slip through.
+	quarantined := idx.quarantinedKeys(ctx)
+
 	workers := idx.workerCount(0)
 
 	jobs := make(chan pendingItem)
@@ -199,7 +204,7 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	for range workers {
 		wg.Go(func() {
 			for item := range jobs {
-				if idx.isQuarantined(ctx, item.ref.Key) {
+				if quarantined[item.ref.Key] {
 					continue
 				}
 				modTime := item.result.ModifiedAt
@@ -365,15 +370,6 @@ func (idx *Indexer) enqueueLiveDocument(ctx context.Context, ref DocumentRef, mo
 	}
 }
 
-func (idx *Indexer) processLiveIndexRequest(ctx context.Context, path string) {
-	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
-	if err != nil {
-		logx.Error("computing document key failed", "path", path, "err", err)
-		return
-	}
-	idx.processLiveIndexRequestKey(ctx, ref.Key)
-}
-
 func (idx *Indexer) processLiveIndexRequestKey(ctx context.Context, key string) {
 	modTime, ok := idx.live.StartProcessing(key)
 	if !ok {
@@ -400,15 +396,6 @@ func (idx *Indexer) processLiveIndexRequestKey(ctx context.Context, key string) 
 			idx.RequestResync(ctx)
 		}
 	}
-}
-
-func (idx *Indexer) processLiveIndexRequestDirect(ctx context.Context, path string, modTime time.Time) {
-	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
-	if err != nil {
-		logx.Error("computing document key failed", "path", path, "err", err)
-		return
-	}
-	idx.processLiveIndexDocumentDirect(ctx, ref, modTime)
 }
 
 func (idx *Indexer) processLiveIndexDocumentDirect(ctx context.Context, ref DocumentRef, modTime time.Time) {
@@ -604,17 +591,6 @@ func (idx *Indexer) setIndexState(state runtimestate.IndexState, message string)
 	idx.IndexState.Set(state, message)
 }
 
-func (idx *Indexer) SyncDocument(ctx context.Context, key, path string, modTime *time.Time, doc *index.Document) (IndexAction, error) {
-	if path != "" {
-		return idx.SyncDocumentRef(ctx, DocumentRef{Key: key, AbsPath: path}, modTime, doc)
-	}
-	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
-	if err != nil {
-		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
-	}
-	return idx.SyncDocumentRef(ctx, ref, modTime, doc)
-}
-
 func (idx *Indexer) SyncDocumentRef(ctx context.Context, ref DocumentRef, modTime *time.Time, doc *index.Document) (IndexAction, error) {
 	if ref.AbsPath == "" {
 		var err error
@@ -639,17 +615,6 @@ func (idx *Indexer) SyncDocumentRef(ctx context.Context, ref DocumentRef, modTim
 		currentDoc = nil
 		currentVersion = nextVersion
 	}
-}
-
-func (idx *Indexer) syncDocumentOnce(ctx context.Context, key, path string, doc *index.Document, version uint64) (IndexAction, error) {
-	if path != "" {
-		return idx.syncDocumentOnceRef(ctx, DocumentRef{Key: key, AbsPath: path}, doc, version)
-	}
-	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
-	if err != nil {
-		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
-	}
-	return idx.syncDocumentOnceRef(ctx, ref, doc, version)
 }
 
 func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, doc *index.Document, version uint64) (IndexAction, error) {
@@ -740,14 +705,6 @@ func (idx *Indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path
 	return !matcher.Matches(path), nil
 }
 
-func (idx *Indexer) IndexFile(ctx context.Context, path string, modTime time.Time) (IndexAction, error) {
-	ref, err := ResolveDocumentRef(idx.cfg.WatchDir, path)
-	if err != nil {
-		return IndexNoop, fmt.Errorf("computing document key: %w", err)
-	}
-	return idx.IndexDocument(ctx, ref, modTime)
-}
-
 func (idx *Indexer) IndexDocument(ctx context.Context, ref DocumentRef, modTime time.Time) (IndexAction, error) {
 	return idx.SyncDocumentRef(ctx, ref, &modTime, nil)
 }
@@ -767,17 +724,6 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 		}
 	}
 	return idx.pipeline
-}
-
-func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
-	if path != "" {
-		return idx.indexFileCoreRef(ctx, DocumentRef{Key: key, AbsPath: path}, modTime, precomputedHash, doc, version)
-	}
-	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
-	if err != nil {
-		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
-	}
-	return idx.indexFileCoreRef(ctx, ref, modTime, precomputedHash, doc, version)
 }
 
 func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
@@ -878,6 +824,24 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 	return !matcher.ShouldIndex(relPath)
 }
 
+// quarantinedKeys returns the current skip list as a set. A read failure yields
+// an empty set, matching isQuarantined's fail-open behavior.
+func (idx *Indexer) quarantinedKeys(ctx context.Context) map[string]bool {
+	if idx.quarantine == nil {
+		return nil
+	}
+	entries, err := idx.quarantine.ListQuarantined(ctx)
+	if err != nil {
+		logx.Warn("failed to load quarantine list", "err", err)
+		return nil
+	}
+	keys := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		keys[entry.Path] = true
+	}
+	return keys
+}
+
 func (idx *Indexer) isQuarantined(ctx context.Context, key string) bool {
 	if idx.quarantine == nil {
 		return false
@@ -915,15 +879,6 @@ func SameModTime(a, b time.Time) bool {
 
 func normalizeModTime(t time.Time) time.Time {
 	return t.UTC().Round(0)
-}
-
-func (idx *Indexer) scheduleIndexRetry(ctx context.Context, path string, modTime time.Time, err error) {
-	ref, refErr := ResolveDocumentRef(idx.cfg.WatchDir, path)
-	if refErr != nil {
-		logx.Warn("computing retry document key failed", "path", path, "err", refErr)
-		return
-	}
-	idx.scheduleIndexRetryRef(ctx, ref, modTime, err)
 }
 
 func (idx *Indexer) scheduleIndexRetryRef(ctx context.Context, ref DocumentRef, modTime time.Time, err error) {
@@ -984,18 +939,6 @@ func shouldQuarantineIndexError(err error) bool {
 	default:
 		return false
 	}
-}
-
-func (idx *Indexer) quarantineFailedPath(ctx context.Context, path string, failure error) {
-	if idx == nil || idx.cfg == nil || path == "" || failure == nil {
-		return
-	}
-	ref, refErr := ResolveDocumentRef(idx.cfg.WatchDir, path)
-	if refErr != nil {
-		logx.Warn("computing key for quarantine failed", "path", path, "err", refErr)
-		return
-	}
-	idx.quarantineFailedRef(ctx, ref, failure)
 }
 
 func (idx *Indexer) quarantineFailedRef(ctx context.Context, ref DocumentRef, failure error) {

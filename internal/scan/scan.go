@@ -2,6 +2,7 @@ package scan
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -137,5 +138,9 @@ func FileHash(path string) (string, error) {
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+
+	// Sum into a stack array and hex-encode directly; fmt.Sprintf("%x", ...)
+	// costs an extra allocation and a reflection-based format pass per file.
+	var sum [sha256.Size]byte
+	return hex.EncodeToString(h.Sum(sum[:0])), nil
 }

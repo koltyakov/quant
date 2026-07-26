@@ -49,7 +49,38 @@ func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc *Document) (int64, er
 	return id, nil
 }
 
+// embeddingMetadata returns the stored embedding metadata, caching it after the
+// first read. Every reindexed document and every vector operation needs it, so
+// the uncached version issued a query per indexed file.
 func (s *Store) embeddingMetadata(ctx context.Context) (*EmbeddingMetadata, error) {
+	s.metaMu.RLock()
+	cached, ok := s.embeddingMet, s.metaCached
+	s.metaMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
+	meta, err := s.loadEmbeddingMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s.metaMu.Lock()
+	s.embeddingMet = meta
+	s.metaCached = true
+	s.metaMu.Unlock()
+	return meta, nil
+}
+
+// invalidateEmbeddingMetadata drops the cache after a metadata write.
+func (s *Store) invalidateEmbeddingMetadata() {
+	s.metaMu.Lock()
+	s.embeddingMet = nil
+	s.metaCached = false
+	s.metaMu.Unlock()
+}
+
+func (s *Store) loadEmbeddingMetadata(ctx context.Context) (*EmbeddingMetadata, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM embedding_metadata`)
 	if err != nil {
 		return nil, fmt.Errorf("querying embedding metadata: %w", err)
@@ -85,6 +116,10 @@ func (s *Store) embeddingMetadata(ctx context.Context) (*EmbeddingMetadata, erro
 }
 
 func (s *Store) putEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata) error {
+	// Invalidate on both success and failure: a rolled-back write still leaves
+	// the cache untrusted if the transaction partially applied before erroring.
+	defer s.invalidateEmbeddingMetadata()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning metadata transaction: %w", err)

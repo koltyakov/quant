@@ -13,9 +13,12 @@ import (
 	"github.com/koltyakov/quant/internal/logx"
 )
 
+// ContentDedupStore caches embeddings by content hash so that identical chunks
+// are embedded once. Both operations are batched: a document is diffed and
+// embedded as a whole, and per-chunk calls made every document an N+1.
 type ContentDedupStore interface {
-	LookupContentDedup(ctx context.Context, contentHash string) ([]byte, bool)
-	StoreContentDedup(ctx context.Context, contentHash string, embedding []byte) error
+	LookupContentDedupBatch(ctx context.Context, contentHashes []string) (map[string][]byte, error)
+	StoreContentDedupBatch(ctx context.Context, entries map[string][]byte) error
 }
 
 type Pipeline struct {
@@ -46,8 +49,14 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 	var toEmbed []chunk.Chunk
 	var positions []PendingEmbed
 
+	keys := make([]string, len(chunks))
 	for i, c := range chunks {
-		key := index.ChunkDiffKey(c.Content)
+		keys[i] = index.ChunkDiffKey(c.Content)
+	}
+	deduped := p.lookupDedup(ctx, keys, existing)
+
+	for i, c := range chunks {
+		key := keys[i]
 		if existingRecord, ok := existing[key]; ok {
 			records = append(records, index.ChunkRecord{
 				Content:      c.Content,
@@ -57,27 +66,55 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 				SectionTitle: c.SectionTitle,
 				Summary:      existingRecord.Summary,
 			})
-		} else if p.DedupStore != nil {
-			if embedding, found := p.DedupStore.LookupContentDedup(ctx, key); found {
-				records = append(records, index.ChunkRecord{
-					Content:      c.Content,
-					ChunkIndex:   c.Index,
-					Embedding:    embedding,
-					Depth:        c.Depth,
-					SectionTitle: c.SectionTitle,
-				})
-			} else {
-				positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
-				toEmbed = append(toEmbed, c)
-				records = append(records, index.ChunkRecord{})
-			}
-		} else {
-			positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
-			toEmbed = append(toEmbed, c)
-			records = append(records, index.ChunkRecord{})
+			continue
 		}
+		if embedding, ok := deduped[key]; ok {
+			records = append(records, index.ChunkRecord{
+				Content:      c.Content,
+				ChunkIndex:   c.Index,
+				Embedding:    embedding,
+				Depth:        c.Depth,
+				SectionTitle: c.SectionTitle,
+			})
+			continue
+		}
+		positions = append(positions, PendingEmbed{ChunkIdx: i, BatchPos: len(toEmbed)})
+		toEmbed = append(toEmbed, c)
+		records = append(records, index.ChunkRecord{})
 	}
 	return records, toEmbed, positions, nil
+}
+
+// lookupDedup resolves cached embeddings for the chunk keys that the document's
+// own existing chunks do not already cover. A dedup read failure is not fatal:
+// the affected chunks are simply re-embedded.
+func (p *Pipeline) lookupDedup(ctx context.Context, keys []string, existing map[string]index.ChunkRecord) map[string][]byte {
+	if p.DedupStore == nil {
+		return nil
+	}
+
+	wanted := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		wanted = append(wanted, key)
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+
+	deduped, err := p.DedupStore.LookupContentDedupBatch(ctx, wanted)
+	if err != nil {
+		logx.Warn("content dedup lookup failed; re-embedding chunks", "chunks", len(wanted), "err", err)
+		return nil
+	}
+	return deduped
 }
 
 func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
@@ -186,6 +223,11 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 			}
 		}
 
+		var dedupEntries map[string][]byte
+		if p.DedupStore != nil {
+			dedupEntries = make(map[string][]byte, len(batch))
+		}
+
 		for i, c := range batch {
 			globalIdx := positions[result.batchStart+i].ChunkIdx
 			emb := index.EncodeInt8(index.NormalizeFloat32(result.embeddings[i]))
@@ -201,9 +243,16 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 				SectionTitle: c.SectionTitle,
 				Summary:      summary,
 			}
-			if p.DedupStore != nil {
-				key := index.ChunkDiffKey(c.Content)
-				_ = p.DedupStore.StoreContentDedup(ctx, key, emb)
+			if dedupEntries != nil {
+				dedupEntries[index.ChunkDiffKey(c.Content)] = emb
+			}
+		}
+
+		// The dedup cache is an optimization: a failed write costs a re-embed
+		// later, so it never fails the document being indexed.
+		if len(dedupEntries) > 0 {
+			if err := p.DedupStore.StoreContentDedupBatch(ctx, dedupEntries); err != nil {
+				logx.Warn("caching chunk embeddings failed", "chunks", len(dedupEntries), "err", err)
 			}
 		}
 	}
@@ -235,7 +284,7 @@ func PrepareChunks(text, filePath string, chunkSize int, overlap float64) []chun
 
 func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
 	contentBudget := max(embedContentBudget(c.Heading), 1)
-	if utf8.RuneCountInString(BuildEmbedInput(c.Heading, c.Content)) <= embed.MaxInputRunes {
+	if embedInputRunes(c.Heading, c.Content) <= embed.MaxInputRunes {
 		return []chunk.Chunk{c}
 	}
 
@@ -250,13 +299,36 @@ func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
 		part := c
 		part.Content = piece
 		parts = append(parts, part)
-		remainingRunes := []rune(remaining)
-		if consumed >= len(remainingRunes) {
-			break
-		}
-		remaining = strings.TrimSpace(string(remainingRunes[consumed:]))
+		remaining = strings.TrimSpace(dropRunes(remaining, consumed))
 	}
 	return parts
+}
+
+// dropRunes returns text with its first n runes removed. Slicing by byte offset
+// avoids the []rune round trip the caller used to pay on every iteration, which
+// made splitting one oversized chunk quadratic in its own length.
+func dropRunes(text string, n int) string {
+	if n <= 0 {
+		return text
+	}
+	count := 0
+	for offset := range text {
+		if count == n {
+			return text[offset:]
+		}
+		count++
+	}
+	return ""
+}
+
+// embedInputRunes is the rune length of BuildEmbedInput's result without
+// building the concatenated string.
+func embedInputRunes(heading, content string) int {
+	runes := utf8.RuneCountInString(content)
+	if heading != "" {
+		runes += utf8.RuneCountInString(heading) + 2 // the "\n\n" joiner
+	}
+	return runes
 }
 
 func embedContentBudget(heading string) int {

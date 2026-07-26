@@ -2,7 +2,9 @@ package index
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/koltyakov/quant/internal/logx"
@@ -137,6 +139,73 @@ func (s *Store) LookupContentDedup(ctx context.Context, contentHash string) ([]b
 		return nil, false
 	}
 	return embedding, true
+}
+
+// LookupContentDedupBatch resolves many content hashes in one round trip.
+// Ingestion looks up every chunk of a document, so the single-hash variant
+// turned each document into an N+1 against the dedup table.
+func (s *Store) LookupContentDedupBatch(ctx context.Context, contentHashes []string) (map[string][]byte, error) {
+	if len(contentHashes) == 0 {
+		return nil, nil
+	}
+
+	found := make(map[string][]byte, len(contentHashes))
+	for batch := range slices.Chunk(contentHashes, maxIDsPerQuery) {
+		args := make([]any, len(batch))
+		for i, hash := range batch {
+			args[i] = hash
+		}
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT content_hash, embedding FROM content_dedup WHERE content_hash IN (` + sqlPlaceholders(len(batch)) + `)`
+		if err := s.forEachRow(ctx, query, args, func(rows *sql.Rows) error {
+			var hash string
+			var embedding []byte
+			if err := rows.Scan(&hash, &embedding); err != nil {
+				return err
+			}
+			found[hash] = embedding
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("looking up content dedup entries: %w", err)
+		}
+	}
+	return found, nil
+}
+
+// StoreContentDedupBatch writes many dedup entries in a single transaction,
+// replacing one write transaction per chunk.
+func (s *Store) StoreContentDedupBatch(ctx context.Context, entries map[string][]byte) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning content dedup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO content_dedup (content_hash, embedding) VALUES (?, ?)
+		 ON CONFLICT(content_hash) DO UPDATE SET embedding = excluded.embedding`)
+	if err != nil {
+		return fmt.Errorf("preparing content dedup insert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for hash, embedding := range entries {
+		if _, err := stmt.ExecContext(ctx, hash, embedding); err != nil {
+			return fmt.Errorf("writing content dedup entry: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing content dedup transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) StoreContentDedup(ctx context.Context, contentHash string, embedding []byte) error {

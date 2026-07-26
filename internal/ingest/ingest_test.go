@@ -3,9 +3,12 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/koltyakov/quant/internal/chunk"
@@ -56,26 +59,39 @@ func (m *mockEmbedder) Dimensions() int {
 func (m *mockEmbedder) Close() error { return nil }
 
 type mockDedupStore struct {
-	store    map[string][]byte
-	lookups  int
-	storeErr error
+	store       map[string][]byte
+	lookups     int
+	lookupCalls int
+	storeCalls  int
+	storeErr    error
+	lookupErr   error
 }
 
 func newMockDedupStore() *mockDedupStore {
 	return &mockDedupStore{store: make(map[string][]byte)}
 }
 
-func (m *mockDedupStore) LookupContentDedup(_ context.Context, key string) ([]byte, bool) {
-	m.lookups++
-	v, ok := m.store[key]
-	return v, ok
+func (m *mockDedupStore) LookupContentDedupBatch(_ context.Context, keys []string) (map[string][]byte, error) {
+	m.lookupCalls++
+	if m.lookupErr != nil {
+		return nil, m.lookupErr
+	}
+	found := make(map[string][]byte, len(keys))
+	for _, key := range keys {
+		m.lookups++
+		if v, ok := m.store[key]; ok {
+			found[key] = v
+		}
+	}
+	return found, nil
 }
 
-func (m *mockDedupStore) StoreContentDedup(_ context.Context, key string, embedding []byte) error {
+func (m *mockDedupStore) StoreContentDedupBatch(_ context.Context, entries map[string][]byte) error {
+	m.storeCalls++
 	if m.storeErr != nil {
 		return m.storeErr
 	}
-	m.store[key] = embedding
+	maps.Copy(m.store, entries)
 	return nil
 }
 
@@ -230,6 +246,64 @@ func TestDiffChunks_DedupHit(t *testing.T) {
 	}
 	if dedup.lookups != 2 {
 		t.Fatalf("expected 2 dedup lookups, got %d", dedup.lookups)
+	}
+}
+
+// TestDedupStore_IsBatched pins the round-trip count: diffing and embedding a
+// document must each hit the dedup store once, not once per chunk.
+func TestDedupStore_IsBatched(t *testing.T) {
+	t.Parallel()
+	dedup := newMockDedupStore()
+	p := &Pipeline{
+		Embedder:   &mockEmbedder{},
+		BatchSize:  16,
+		DedupStore: dedup,
+	}
+	ctx := context.Background()
+
+	chunks := make([]chunk.Chunk, 8)
+	for i := range chunks {
+		chunks[i] = chunk.Chunk{Content: fmt.Sprintf("chunk body %d", i), Index: i}
+	}
+
+	records, toEmbed, positions, err := p.DiffChunks(ctx, chunks, nil)
+	if err != nil {
+		t.Fatalf("DiffChunks() error: %v", err)
+	}
+	if dedup.lookupCalls != 1 {
+		t.Fatalf("expected 1 batched dedup lookup for %d chunks, got %d", len(chunks), dedup.lookupCalls)
+	}
+	if len(toEmbed) != len(chunks) {
+		t.Fatalf("expected %d chunks to embed, got %d", len(chunks), len(toEmbed))
+	}
+
+	if err := p.EmbedChunks(ctx, toEmbed, positions, records); err != nil {
+		t.Fatalf("EmbedChunks() error: %v", err)
+	}
+	if dedup.storeCalls != 1 {
+		t.Fatalf("expected 1 batched dedup write for %d chunks, got %d", len(chunks), dedup.storeCalls)
+	}
+	if len(dedup.store) != len(chunks) {
+		t.Fatalf("expected %d cached embeddings, got %d", len(chunks), len(dedup.store))
+	}
+}
+
+// TestDiffChunks_DedupLookupError falls back to re-embedding when the dedup
+// cache cannot be read; a cache failure must not fail the document.
+func TestDiffChunks_DedupLookupError(t *testing.T) {
+	t.Parallel()
+	dedup := newMockDedupStore()
+	dedup.lookupErr = errors.New("dedup unavailable")
+	p := &Pipeline{DedupStore: dedup}
+	ctx := context.Background()
+
+	chunks := []chunk.Chunk{{Content: "alpha", Index: 0}, {Content: "beta", Index: 1}}
+	_, toEmbed, _, err := p.DiffChunks(ctx, chunks, nil)
+	if err != nil {
+		t.Fatalf("DiffChunks() should tolerate dedup errors, got: %v", err)
+	}
+	if len(toEmbed) != 2 {
+		t.Fatalf("expected both chunks queued for embedding, got %d", len(toEmbed))
 	}
 }
 
@@ -645,6 +719,71 @@ func TestPrepareChunks_RespectsEmbeddingBudget(t *testing.T) {
 		if len([]rune(input)) > embed.MaxInputRunes {
 			t.Fatalf("chunk %d exceeds embedding budget: %d", i, len([]rune(input)))
 		}
+	}
+}
+
+func TestDropRunes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		text string
+		n    int
+		want string
+	}{
+		{name: "zero", text: "abc", n: 0, want: "abc"},
+		{name: "negative", text: "abc", n: -1, want: "abc"},
+		{name: "partial ascii", text: "abcdef", n: 3, want: "def"},
+		{name: "all", text: "abc", n: 3, want: ""},
+		{name: "past end", text: "abc", n: 10, want: ""},
+		{name: "empty", text: "", n: 2, want: ""},
+		{name: "multibyte", text: "日本語テキスト", n: 3, want: "テキスト"},
+		{name: "mixed width", text: "aé日b", n: 2, want: "日b"},
+		{name: "combining", text: "éxyz", n: 2, want: "xyz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dropRunes(tc.text, tc.n); got != tc.want {
+				t.Fatalf("dropRunes(%q, %d) = %q, want %q", tc.text, tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSplitChunkForEmbeddingBudget_Multibyte guards the byte-offset advance:
+// mixing rune counts with byte offsets would slice mid-character and either
+// corrupt content or overrun the embedding budget.
+func TestSplitChunkForEmbeddingBudget_Multibyte(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("日本語のテキストです。", (embed.MaxInputRunes/10)+50)
+	c := chunk.Chunk{Content: content, Heading: "見出し"}
+
+	parts := splitChunkForEmbeddingBudget(c)
+	if len(parts) < 2 {
+		t.Fatalf("expected oversized multibyte chunk to split, got %d part(s)", len(parts))
+	}
+
+	var rebuilt strings.Builder
+	for i, part := range parts {
+		if got := utf8.RuneCountInString(BuildEmbedInput(part.Heading, part.Content)); got > embed.MaxInputRunes {
+			t.Fatalf("part %d exceeds embedding budget: %d runes", i, got)
+		}
+		if !utf8.ValidString(part.Content) {
+			t.Fatalf("part %d is not valid UTF-8", i)
+		}
+		rebuilt.WriteString(part.Content)
+	}
+
+	// Splitting trims whitespace at the seams, so compare on the non-space runes.
+	stripSpace := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	if got, want := stripSpace(rebuilt.String()), stripSpace(content); got != want {
+		t.Fatalf("split lost or corrupted content: got %d runes, want %d", utf8.RuneCountInString(got), utf8.RuneCountInString(want))
 	}
 }
 

@@ -5,12 +5,26 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
+
+// maxIDsPerQuery bounds how many ids go into a generated `IN (?, ?, ...)` list.
+// SQLite rejects any statement carrying more than 32766 bound variables, and an
+// id list that large is slow to parse anyway; callers also append filter
+// arguments on top of the ids, so the batch size keeps generous headroom.
+const maxIDsPerQuery = 2000
+
+// maxHNSWFetchK caps how many neighbors a single graph probe may request.
+// Filtered search would otherwise size the probe by the number of chunks
+// matching the SQL filter, turning a large filter into a near-complete graph
+// traversal. Callers fall back to a direct filtered scan when a capped probe
+// does not yield enough survivors.
+const maxHNSWFetchK = 10000
 
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	return s.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, SearchFilter{})
@@ -240,7 +254,7 @@ func (s *Store) findSimilarBruteForce(ctx context.Context, chunkID int64, queryE
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+		SELECT `+vectorScanColumns+`
 		FROM chunks c
 		JOIN documents d ON c.document_id = d.id
 		WHERE c.id != ?`, chunkID)
@@ -261,33 +275,31 @@ func (s *Store) hydrateResultContents(ctx context.Context, results []SearchResul
 	if len(results) == 0 {
 		return
 	}
-	placeholders := make([]string, len(results))
-	args := make([]any, len(results))
+	ids := make([]int64, len(results))
 	for i := range results {
-		placeholders[i] = "?"
-		args[i] = results[i].ChunkID
+		ids[i] = results[i].ChunkID
 	}
-	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT id, content FROM chunks WHERE id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		logx.Warn("search: loading result contents failed", "err", err)
-		return
-	}
-	defer func() { _ = rows.Close() }()
 
 	contents := make(map[int64]string, len(results))
-	for rows.Next() {
-		var id int64
-		var content string
-		if err := rows.Scan(&id, &content); err != nil {
-			logx.Warn("search: scanning result contents failed", "err", err)
+	for batch := range slices.Chunk(ids, maxIDsPerQuery) {
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT id, content FROM chunks WHERE id IN (` + sqlPlaceholders(len(batch)) + `)`
+		if err := s.forEachRow(ctx, query, args, func(rows *sql.Rows) error {
+			var id int64
+			var content string
+			if err := rows.Scan(&id, &content); err != nil {
+				return err
+			}
+			contents[id] = content
+			return nil
+		}); err != nil {
+			logx.Warn("search: loading result contents failed", "err", err)
 			return
 		}
-		contents[id] = content
-	}
-	if err := rows.Err(); err != nil {
-		logx.Warn("search: reading result contents failed", "err", err)
 	}
 	for i := range results {
 		if content, ok := contents[results[i].ChunkID]; ok {
@@ -306,15 +318,7 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string, met
 	}
 
 	var count int
-	query := `SELECT COUNT(*) FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
-	args := make([]any, 0, 1+len(metadataArgs))
-	if pathPrefix != "" {
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		query += ` AND d.path LIKE ? ESCAPE '\'`
-		args = append(args, pathPattern)
-	}
-	query += metadataWhere // #nosec G202
-	args = append(args, metadataArgs...)
+	query, args := filteredChunkQuery("COUNT(*)", pathPrefix, metadataWhere, metadataArgs)
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return false, err
 	}
@@ -351,19 +355,7 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 	if pathPrefix == "" && len(docFilter) > 0 && metadataWhere == "" {
 		rows, err = s.queryChunksByDocPaths(ctx, docFilter)
 	} else {
-		query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
-			 FROM chunks c
-			 JOIN documents d ON c.document_id = d.id
-			 WHERE 1=1`
-		args := make([]any, 0, 1+len(metadataArgs))
-
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		if pathPrefix != "" {
-			query += ` AND d.path LIKE ? ESCAPE '\'`
-			args = append(args, pathPattern)
-		}
-		query += metadataWhere // #nosec G202
-		args = append(args, metadataArgs...)
+		query, args := filteredChunkQuery(vectorScanColumns, pathPrefix, metadataWhere, metadataArgs)
 		rows, err = s.db.QueryContext(ctx, query, args...)
 	}
 	if err != nil {
@@ -372,6 +364,25 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 	defer func() { _ = rows.Close() }()
 
 	return s.scanVectorRows(rows, queryEmbedding, limit, keywordCandidates, vectorOnly)
+}
+
+// vectorScanColumns is the column list every vector-candidate scan selects.
+// Chunk content is deliberately absent: scoring never needs it, and it is
+// hydrated only for the rows that survive ranking.
+const vectorScanColumns = `c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title`
+
+// filteredChunkQuery builds a chunks-joined-documents statement restricted by
+// the path-prefix and metadata filters, returning the SQL and its arguments.
+func filteredChunkQuery(columns, pathPrefix, metadataWhere string, metadataArgs []any) (string, []any) {
+	query := `SELECT ` + columns + ` FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
+	args := make([]any, 0, 1+len(metadataArgs))
+	if pathPrefix != "" {
+		query += ` AND d.path LIKE ? ESCAPE '\'`
+		args = append(args, sqlLikePrefixPattern(pathPrefix))
+	}
+	query += metadataWhere // #nosec G202
+	args = append(args, metadataArgs...)
+	return query, args
 }
 
 func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
@@ -422,7 +433,7 @@ func (s *Store) buildMetadataFilter(filter SearchFilter) (string, []any) {
 }
 
 func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery string, queryEmbedding []float32, candidateLimit int, pathPrefix string, rankOffset int, candidates map[int]*searchCandidate, metadataWhere string, metadataArgs []any) (int, error) {
-	baseQuery := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+	baseQuery := `SELECT ` + vectorScanColumns + `
 			 FROM chunks_fts
 			 JOIN chunks c ON c.id = chunks_fts.rowid
 			 JOIN documents d ON c.document_id = d.id
@@ -525,15 +536,7 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 		}
 	}
 
-	query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id WHERE 1=1`
-	args := make([]any, 0, 1+len(metadataArgs))
-	if pathPrefix != "" {
-		pathPattern := sqlLikePrefixPattern(pathPrefix)
-		query += ` AND d.path LIKE ? ESCAPE '\'`
-		args = append(args, pathPattern)
-	}
-	query += metadataWhere // #nosec G202
-	args = append(args, metadataArgs...)
+	query, args := filteredChunkQuery("c.id", pathPrefix, metadataWhere, metadataArgs)
 
 	filterRows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -557,7 +560,7 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	}
 
 	// Ask HNSW for nearest neighbors and intersect with the SQLite filter set.
-	fetchK := limit*3 + len(keywordCandidates) + len(filterSet)
+	fetchK := min(limit*3+len(keywordCandidates)+len(filterSet), maxHNSWFetchK)
 	hnswIDs := s.hnsw.Search(queryEmbedding, fetchK)
 
 	var filtered []int
@@ -582,91 +585,115 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 		logx.Info("skipping brute-force filtered vector fallback", "matching_chunks", len(filterSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return
 	}
-	allFilteredIDs := make([]int, 0, len(filterSet))
-	for id := range filterSet {
-		allFilteredIDs = append(allFilteredIDs, id)
+	// Re-run the filter as a direct scan rather than feeding every matching id
+	// back in as a bound variable: the filter set can hold far more ids than
+	// SQLite accepts variables, which used to fail the query outright and drop
+	// vector results silently.
+	scanQuery, scanArgs := filteredChunkQuery(vectorScanColumns, pathPrefix, metadataWhere, metadataArgs)
+	scanRows, err := s.db.QueryContext(ctx, scanQuery, scanArgs...)
+	if err != nil {
+		logx.Warn("filtered vector search: brute-force fallback query failed; returning keyword-only results", "err", err)
+		return
 	}
-	s.loadHNSWChunkRows(ctx, allFilteredIDs, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
+	defer func() { _ = scanRows.Close() }()
+
+	if _, err := s.scanVectorRows(scanRows, queryEmbedding, limit, keywordCandidates, vectorOnly); err != nil {
+		logx.Warn("filtered vector search: brute-force fallback scan failed", "err", err)
+	}
 }
 
 // filterChunkIDs returns the subset of ids whose chunks pass the path-prefix
 // and metadata filters. Result order is unspecified; callers re-score by exact
 // dot product anyway.
 func (s *Store) filterChunkIDs(ctx context.Context, ids []int, pathPrefix string, metadataWhere string, metadataArgs []any) ([]int, error) {
-	placeholders := make([]string, len(ids))
-	args := make([]any, 0, len(ids)+1+len(metadataArgs))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id
-	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
-	if pathPrefix != "" {
-		query += ` AND d.path LIKE ? ESCAPE '\'`
-		args = append(args, sqlLikePrefixPattern(pathPrefix))
-	}
-	query += metadataWhere // #nosec G202
-	args = append(args, metadataArgs...)
+	out := make([]int, 0, len(ids))
+	for batch := range slices.Chunk(ids, maxIDsPerQuery) {
+		args := make([]any, 0, len(batch)+1+len(metadataArgs))
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT c.id FROM chunks c JOIN documents d ON c.document_id = d.id
+		          WHERE c.id IN (` + sqlPlaceholders(len(batch)) + `)`
+		if pathPrefix != "" {
+			query += ` AND d.path LIKE ? ESCAPE '\'`
+			args = append(args, sqlLikePrefixPattern(pathPrefix))
+		}
+		query += metadataWhere // #nosec G202
+		args = append(args, metadataArgs...)
 
+		if err := s.forEachRow(ctx, query, args, func(rows *sql.Rows) error {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out = append(out, id)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// sqlPlaceholders returns a comma-separated run of n bind placeholders.
+func sqlPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// forEachRow runs a query and applies scan to every row, closing the result set.
+func (s *Store) forEachRow(ctx context.Context, query string, args []any, scan func(*sql.Rows) error) error {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := make([]int, 0, len(ids))
 	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		if err := scan(rows); err != nil {
+			return err
 		}
-		out = append(out, id)
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
-	if len(ids) == 0 {
-		return
-	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
-	query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
-	          FROM chunks c JOIN documents d ON c.document_id = d.id
-	          WHERE c.id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		logx.Warn("vector search: loading hnsw candidate chunks failed", "err", err)
-		return
-	}
-	defer func() { _ = rows.Close() }()
+	for batch := range slices.Chunk(ids, maxIDsPerQuery) {
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+		query := `SELECT ` + vectorScanColumns + `
+		          FROM chunks c JOIN documents d ON c.document_id = d.id
+		          WHERE c.id IN (` + sqlPlaceholders(len(batch)) + `)`
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			logx.Warn("vector search: loading hnsw candidate chunks failed", "err", err)
+			return
+		}
 
-	if _, err := s.scanVectorRowsWithDocFilter(rows, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter); err != nil {
-		logx.Warn("vector search: scanning hnsw candidate chunks failed", "err", err)
-		return
+		_, err = s.scanVectorRowsWithDocFilter(rows, queryEmbedding, limit, keywordCandidates, vectorOnly, docFilter)
+		_ = rows.Close()
+		if err != nil {
+			logx.Warn("vector search: scanning hnsw candidate chunks failed", "err", err)
+			return
+		}
 	}
 }
 
 func (s *Store) queryChunksByDocPaths(ctx context.Context, docPaths map[string]float32) (*sql.Rows, error) {
-	paths := make([]string, 0, len(docPaths))
+	args := make([]any, 0, len(docPaths))
 	for p := range docPaths {
-		paths = append(paths, p)
+		args = append(args, p)
 	}
-	placeholders := make([]string, len(paths))
-	args := make([]any, len(paths))
-	for i, p := range paths {
-		placeholders[i] = "?"
-		args[i] = p
-	}
-	query := `SELECT c.id, c.chunk_index, c.embedding, d.path, d.modified_at, c.parent_id, c.depth, c.section_title
+	//nolint:gosec // placeholders are all literal "?" - no user input in the query string
+	query := `SELECT ` + vectorScanColumns + `
 	          FROM chunks c JOIN documents d ON c.document_id = d.id
-	          WHERE d.path IN (` + strings.Join(placeholders, ",") + `)`
+	          WHERE d.path IN (` + sqlPlaceholders(len(args)) + `)`
 	return s.db.QueryContext(ctx, query, args...)
 }
 
