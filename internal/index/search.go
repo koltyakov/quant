@@ -465,7 +465,8 @@ func (s *Store) collectFTSCandidatesFiltered(ctx context.Context, ftsQuery strin
 	for rows.Next() {
 		var id int
 		var chunkIndex int
-		var embeddingBytes []byte
+		// Read-only within the iteration; see scanVectorRowsWithDocFilter.
+		var embeddingBytes sql.RawBytes
 		var docPath string
 		var modifiedAt time.Time
 		var parentID *int64
@@ -702,7 +703,10 @@ func (s *Store) scanVectorRowsWithDocFilter(rows *sql.Rows, queryEmbedding []flo
 	for rows.Next() {
 		var id int
 		var chunkIndex int
-		var embeddingBytes []byte
+		// sql.RawBytes hands over the driver's buffer instead of cloning it.
+		// The embedding is only read by dotProductEncoded inside this iteration
+		// and never retained, which is exactly the contract RawBytes requires.
+		var embeddingBytes sql.RawBytes
 		var docPath string
 		var modifiedAt time.Time
 		var parentID *int64
