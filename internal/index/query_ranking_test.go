@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"reflect"
-	"slices"
 	"sort"
 	"testing"
 )
@@ -102,60 +101,6 @@ func TestRankingUsesDeterministicTieBreakers(t *testing.T) {
 	for i, want := range []int64{1, 2, 3} {
 		if tied[i].result.ChunkID != want {
 			t.Fatalf("sorted[%d].ChunkID = %d, want %d", i, tied[i].result.ChunkID, want)
-		}
-	}
-}
-
-func TestAnalyzeQueryAndHelpers(t *testing.T) {
-	t.Parallel()
-
-	identifier := AnalyzeQuery("HTTPServer config.go")
-	if !identifier.IsIdentifier || identifier.Intent != IntentDefinition {
-		t.Fatalf("expected identifier definition query, got %+v", identifier)
-	}
-	if identifier.PathPrefix != "" {
-		t.Fatalf("unexpected path prefix: %q", identifier.PathPrefix)
-	}
-
-	natural := AnalyzeQuery("how to update python config in internal/app")
-	if !natural.IsNaturalLang || natural.Intent != IntentSearch {
-		t.Fatalf("expected natural language search intent, got %+v", natural)
-	}
-	if got, want := natural.FileTypeFilter, []string{".py"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("file type filters mismatch: got %v want %v", got, want)
-	}
-	if natural.PathPrefix != "internal/app" {
-		t.Fatalf("unexpected path prefix: %q", natural.PathPrefix)
-	}
-
-	reference := AnalyzeQuery("auth_handler middleware.go loginFlow")
-	if !reference.IsIdentifier || reference.Intent != IntentReference {
-		t.Fatalf("expected reference intent, got %+v", reference)
-	}
-
-	if !isIdentifierToken("snake_case") || !isIdentifierToken("camelCase") || !isIdentifierToken("config.go") {
-		t.Fatal("expected identifier tokens to be detected")
-	}
-	if isIdentifierToken("plain") {
-		t.Fatal("plain token should not be treated as identifier")
-	}
-
-	filters := extractFileTypeFilters([]string{"Go,", "python.", "md", "GO"})
-	if got, want := filters, []string{".go", ".py", ".md"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("extractFileTypeFilters mismatch: got %v want %v", got, want)
-	}
-
-	if prefix := extractPathPrefix("find config inside docs,"); prefix != "docs" {
-		t.Fatalf("unexpected extracted prefix: %q", prefix)
-	}
-	if prefix := extractPathPrefix("search everywhere now please"); prefix != "" {
-		t.Fatalf("unexpected prefix for unqualified query: %q", prefix)
-	}
-
-	expanded := ExpandQuery("update auth test")
-	for _, want := range []string{"modify", "authentication", "spec"} {
-		if !slices.Contains(expanded, want) {
-			t.Fatalf("expected expanded query to contain %q: %v", want, expanded)
 		}
 	}
 }

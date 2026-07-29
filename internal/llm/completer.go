@@ -2,11 +2,16 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 )
+
+// ErrPermanent marks completion errors that retrying cannot fix (e.g. 4xx
+// responses other than rate limits). Callers should not retry them.
+var ErrPermanent = errors.New("llm: permanent error")
 
 type ProviderType string
 
@@ -73,7 +78,7 @@ func inferProvider(raw string) (ProviderType, error) {
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return ProviderOllama, nil
 	}
-	if strings.Contains(host, "openai.com") {
+	if host == "openai.com" || strings.HasSuffix(host, ".openai.com") {
 		return ProviderOpenAI, nil
 	}
 	return ProviderUnknown, fmt.Errorf("cannot determine provider from URL %q", raw)

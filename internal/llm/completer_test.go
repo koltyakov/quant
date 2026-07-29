@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -220,5 +221,86 @@ func TestOllamaCompleterUsesNormalizedChatURL(t *testing.T) {
 	}
 	if resp.Content != "ok" {
 		t.Fatalf("Complete() content = %q, want %q", resp.Content, "ok")
+	}
+}
+
+func TestCompleterDoesNotRetryPermanentErrors(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return testHTTPResponse(http.StatusNotFound, `model not found`), nil
+	})}
+
+	completer, err := newOllamaCompleter(Config{BaseURL: "http://localhost:11434", MaxRetries: 3}, client)
+	if err != nil {
+		t.Fatalf("newOllamaCompleter() error = %v", err)
+	}
+	_, err = completer.Complete(context.Background(), CompleteRequest{
+		Model:    "missing",
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatalf("expected permanent error, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("permanent error retried: got %d calls, want 1", calls)
+	}
+}
+
+func TestCompleterRetriesTransientErrors(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls < 3 {
+			return testHTTPResponse(http.StatusBadGateway, `bad gateway`), nil
+		}
+		return testHTTPResponse(http.StatusOK, `{"message":{"content":"ok"}}`), nil
+	})}
+
+	completer, err := newOllamaCompleter(Config{BaseURL: "http://localhost:11434", MaxRetries: 3}, client)
+	if err != nil {
+		t.Fatalf("newOllamaCompleter() error = %v", err)
+	}
+	resp, err := completer.Complete(context.Background(), CompleteRequest{
+		Model:    "llama3.2",
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Content != "ok" || calls != 3 {
+		t.Fatalf("expected success on third attempt, got content=%q calls=%d", resp.Content, calls)
+	}
+}
+
+func TestCompleterDefaultMaxRetries(t *testing.T) {
+	t.Parallel()
+
+	completer, err := NewOllamaCompleter(Config{BaseURL: "http://localhost:11434"})
+	if err != nil {
+		t.Fatalf("NewOllamaCompleter() error = %v", err)
+	}
+	if completer.maxRetries != 2 {
+		t.Fatalf("default maxRetries = %d, want 2", completer.maxRetries)
+	}
+}
+
+func TestInferProviderRejectsLookalikeHosts(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"https://openai.com.evil.example/v1",
+		"https://notopenai.com/v1",
+	} {
+		if _, err := inferProvider(raw); err == nil {
+			t.Fatalf("inferProvider(%q) unexpectedly inferred a provider", raw)
+		}
+	}
+	if got, err := inferProvider("https://api.openai.com/v1"); err != nil || got != ProviderOpenAI {
+		t.Fatalf("inferProvider(api.openai.com) = %q, %v; want %q, nil", got, err, ProviderOpenAI)
 	}
 }

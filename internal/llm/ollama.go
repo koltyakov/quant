@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +29,7 @@ func NewOllamaCompleter(cfg Config) (*OllamaCompleter, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	if cfg.MaxRetries < 0 {
+	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 2
 	}
 	return newOllamaCompleter(cfg, &http.Client{Timeout: cfg.Timeout})
@@ -59,6 +60,9 @@ func (o *OllamaCompleter) Complete(ctx context.Context, req CompleteRequest) (Co
 		if err == nil {
 			break
 		}
+		if errors.Is(err, ErrPermanent) {
+			return CompleteResponse{}, err
+		}
 		if attempt < o.maxRetries {
 			select {
 			case <-ctx.Done():
@@ -87,12 +91,12 @@ func (o *OllamaCompleter) doRequest(ctx context.Context, body []byte) (ollamaRes
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return ollamaResponse{}, fmt.Errorf("ollama chat %d: %s", resp.StatusCode, string(respBody))
 	}
 	if resp.StatusCode >= 400 {
-		return ollamaResponse{}, fmt.Errorf("ollama chat permanent error %d", resp.StatusCode)
+		return ollamaResponse{}, fmt.Errorf("%w: ollama chat status %d", ErrPermanent, resp.StatusCode)
 	}
 
 	var chatResp ollamaResponse

@@ -859,27 +859,6 @@ func TestSplitChunkForEmbeddingBudgetPreservesStructuralMetadata(t *testing.T) {
 	}
 }
 
-func TestCodeSignature_Basic(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"func main() {}", "func main() {}"},
-		{"\n  \nfunc main() {", "func main() {"},
-		{"", ""},
-		{"\n\n", ""},
-		{strings.Repeat("x", 150), strings.Repeat("x", 120) + "..."},
-		{"func Foo()", "func Foo()"},
-	}
-	for _, tt := range tests {
-		got := CodeSignature(tt.input)
-		if got != tt.want {
-			t.Errorf("CodeSignature(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestEmbedContentBudget(t *testing.T) {
 	t.Parallel()
 	budgetNoHeading := embedContentBudget("")

@@ -14,10 +14,11 @@ var (
 )
 
 const (
-	liveQueueMultiplier = 8
-	minLiveQueueSize    = 16
-	maxLiveQueueSize    = 512
-	maxRetryStates      = 256
+	liveQueueMultiplier      = 8
+	minLiveQueueSize         = 16
+	maxLiveQueueSize         = 512
+	maxRetryStates           = 256
+	maxConsecutiveSyncReruns = 3
 )
 
 // PathSyncTracker prevents concurrent indexing of the same file path.
@@ -82,6 +83,15 @@ func (t *PathSyncTracker) Finish(key string) (uint64, bool) {
 	}
 	delete(t.states, key)
 	return 0, false
+}
+
+// Reset drops the sync state for key, allowing the next Begin to start fresh.
+// Used to break a rerun loop for a continuously modified file; the caller is
+// responsible for re-queueing the path through the live queue.
+func (t *PathSyncTracker) Reset(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.states, key)
 }
 
 func (t *PathSyncTracker) IsCurrent(key string, version uint64) bool {

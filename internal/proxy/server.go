@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +27,7 @@ type Server struct {
 	listener net.Listener
 	server   *http.Server
 	addr     string
+	token    string
 
 	mu           sync.Mutex
 	ready        bool
@@ -38,7 +42,40 @@ func NewServer(store index.Searcher, state *runtimestate.IndexStateTracker, embe
 		store:    store,
 		embedder: embedder,
 		state:    state,
+		token:    generateToken(),
 	}
+}
+
+func generateToken() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("crypto/rand unavailable: %v", err))
+	}
+	return hex.EncodeToString(buf)
+}
+
+// Token returns the bearer token required on all proxy routes. It is shared
+// with worker processes through the lock file.
+func (s *Server) Token() string {
+	return s.token
+}
+
+// withAuth guards every proxy route with the per-instance bearer token and
+// rejects browser-originated requests (present Origin header), the same
+// policy as the MCP HTTP transport.
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.Header.Values("Origin")) > 0 {
+			s.writeError(w, http.StatusForbidden, "browser origins are not allowed")
+			return
+		}
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
+			s.writeError(w, http.StatusUnauthorized, "missing or invalid proxy token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Start(ctx context.Context) (string, error) {
@@ -64,7 +101,7 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux.HandleFunc("/proxy/delete_collection", s.handleDeleteCollection)
 
 	s.server = &http.Server{
-		Handler:           mux,
+		Handler:           s.withAuth(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -189,7 +226,11 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	docCount, _, _ := s.store.Stats(r.Context())
+	docCount, _, err := s.store.Stats(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	s.writeJSON(w, http.StatusOK, ListSourcesResponse{Documents: docs, Total: docCount})
 }
 

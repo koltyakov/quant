@@ -2,6 +2,7 @@ package extract
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -23,11 +24,18 @@ func (h *HTMLExtractor) Extract(ctx context.Context, path string) (string, error
 	}
 	defer func() { _ = f.Close() }()
 
-	if err := ensureFileSize(path, maxExtractorFileSize); err != nil {
+	// Stat the open handle (not the path, which could have been swapped) and
+	// cap the parsed stream so a file growing after the check cannot be read
+	// unboundedly into memory.
+	info, err := f.Stat()
+	if err != nil {
 		return "", err
 	}
+	if info.Size() > maxExtractorFileSize {
+		return "", fmt.Errorf("%w: %s (%s > %s)", ErrFileTooLarge, path, formatExtractBytes(info.Size()), formatExtractBytes(maxExtractorFileSize))
+	}
 
-	return extractHTMLText(ctx, f)
+	return extractHTMLText(ctx, io.LimitReader(f, maxExtractorFileSize+1))
 }
 
 func (h *HTMLExtractor) Supports(path string) bool {

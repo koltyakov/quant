@@ -280,7 +280,7 @@ func TestLock_UpdateProxyAddr(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = lk.Release() })
 
-	lk.UpdateProxyAddr("127.0.0.1:9001")
+	lk.UpdateProxyAddr("127.0.0.1:9001", "token")
 
 	if got := lk.ProxyAddr(); got != "127.0.0.1:9001" {
 		t.Fatalf("ProxyAddr() = %q, want %q", got, "127.0.0.1:9001")

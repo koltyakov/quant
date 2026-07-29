@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/koltyakov/quant/internal/logx"
 )
@@ -20,6 +21,19 @@ func sqlLikePrefixPattern(prefix string) string {
 	return replacer.Replace(prefix) + "%"
 }
 
+// truncateUTF8 returns s shortened to at most n bytes, ending on a rune
+// boundary so the result never splits a multi-byte UTF-8 sequence.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	end := n
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
+}
+
 func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc *Document) (int64, error) {
 	tagsJSON := ""
 	if doc.Tags != nil {
@@ -29,19 +43,20 @@ func upsertDocumentTx(ctx context.Context, tx *sql.Tx, doc *Document) (int64, er
 
 	var id int64
 	err := tx.QueryRowContext(ctx,
-		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_type, language, title, tags, collection)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_size, file_type, language, title, tags, collection)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path) DO UPDATE SET
 			hash = excluded.hash,
 			modified_at = excluded.modified_at,
 			indexed_at = CURRENT_TIMESTAMP,
+			file_size = excluded.file_size,
 			file_type = excluded.file_type,
 			language = excluded.language,
 			title = excluded.title,
 			tags = excluded.tags,
 			collection = excluded.collection
 		 RETURNING id`,
-		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
+		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileSize, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upserting document: %w", err)
@@ -107,11 +122,19 @@ func (s *Store) loadEmbeddingMetadata(ctx context.Context) (*EmbeddingMetadata, 
 	if err != nil {
 		return nil, fmt.Errorf("parsing embedding dimensions: %w", err)
 	}
+	inputVersion := 0
+	if value, ok := values["input_version"]; ok {
+		inputVersion, err = strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("parsing embedding input version: %w", err)
+		}
+	}
 
 	return &EmbeddingMetadata{
-		Model:      values["model"],
-		Dimensions: dims,
-		Normalized: values["normalized"] == "true",
+		Model:        values["model"],
+		Dimensions:   dims,
+		Normalized:   values["normalized"] == "true",
+		InputVersion: inputVersion,
 	}, nil
 }
 
@@ -131,10 +154,11 @@ func (s *Store) putEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata
 	}
 
 	values := map[string]string{
-		"model":      meta.Model,
-		"dimensions": strconv.Itoa(meta.Dimensions),
-		"normalized": strconv.FormatBool(meta.Normalized),
-		"schema":     "1",
+		"model":         meta.Model,
+		"dimensions":    strconv.Itoa(meta.Dimensions),
+		"normalized":    strconv.FormatBool(meta.Normalized),
+		"input_version": strconv.Itoa(meta.InputVersion),
+		"schema":        "1",
 	}
 	for key, value := range values {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO embedding_metadata(key, value) VALUES(?, ?)`, key, value); err != nil {

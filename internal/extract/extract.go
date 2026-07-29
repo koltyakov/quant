@@ -2,8 +2,11 @@ package extract
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
+
+	qerrors "github.com/koltyakov/quant/internal/errors"
 )
 
 // Extractor extracts plain text from a file for indexing.
@@ -43,7 +46,13 @@ func NewRouter(opts ...Options) *Router {
 	}
 }
 
-func (r *Router) Extract(ctx context.Context, path string) (string, error) {
+func (r *Router) Extract(ctx context.Context, path string) (text string, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			text = ""
+			err = fmt.Errorf("%w: %s: extractor panic: %v", qerrors.ErrExtractionFailed, filepath.Base(path), rec)
+		}
+	}()
 	for _, e := range r.extractors {
 		if e.Supports(path) {
 			return e.Extract(ctx, path)

@@ -218,9 +218,21 @@ func pathBoost(pathTokens []string) rankingStage {
 		if len(pathTokens) == 0 {
 			return candidates
 		}
+		lowered := make([]string, len(pathTokens))
+		for i, token := range pathTokens {
+			lowered[i] = strings.ToLower(token)
+		}
+		// Chunks from the same document share a path; tokenize each unique
+		// path once instead of per candidate.
+		matchByPath := make(map[string]bool)
 		for i := range candidates {
 			c := &candidates[i]
-			if pathMatchesAnyToken(c.result.DocumentPath, pathTokens) {
+			match, ok := matchByPath[c.result.DocumentPath]
+			if !ok {
+				match = pathMatchesAnyToken(c.result.DocumentPath, lowered)
+				matchByPath[c.result.DocumentPath] = match
+			}
+			if match {
 				c.score += 1.0 / float32(rrfK+1)
 			}
 		}

@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,7 +107,7 @@ func TestWatcher_AddsNewDirectoriesRecursively(t *testing.T) {
 	}
 }
 
-func TestWatcher_PopulatedDirectoryCreationRequestsResync(t *testing.T) {
+func TestWatcher_PopulatedDirectoryCreationEmitsFileCreates(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "watched")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -129,6 +131,21 @@ func TestWatcher_PopulatedDirectoryCreationRequestsResync(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(incoming, "file.txt"), []byte("hello"), 0644); err != nil {
 		t.Fatalf("unexpected file write error: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(incoming, ".env"), []byte("TOKEN=secret"), 0644); err != nil {
+		t.Fatalf("unexpected hidden file write error: %v", err)
+	}
+	hiddenDir := filepath.Join(incoming, ".hidden")
+	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+		t.Fatalf("unexpected hidden directory error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, "skip.txt"), []byte("skip"), 0644); err != nil {
+		t.Fatalf("unexpected hidden directory file error: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(filepath.Join(incoming, "file.txt"), filepath.Join(incoming, "link.txt")); err != nil {
+			t.Fatalf("unexpected symlink error: %v", err)
+		}
+	}
 
 	time.Sleep(700 * time.Millisecond)
 
@@ -136,9 +153,79 @@ func TestWatcher_PopulatedDirectoryCreationRequestsResync(t *testing.T) {
 		t.Fatalf("unexpected rename error: %v", err)
 	}
 
-	event := waitForOp(t, watcher.Events(), Resync, 3*time.Second)
-	if event.Path != dir {
-		t.Fatalf("expected resync path %s, got %+v", dir, event)
+	moved := filepath.Join(dir, "incoming")
+	events := waitForPaths(t, watcher.Events(), []string{
+		filepath.Join(moved, "file.txt"),
+		filepath.Join(moved, ".env"),
+	}, 3*time.Second)
+	for _, event := range events {
+		if event.Op != Create {
+			t.Fatalf("expected create event for moved-in file, got %+v", event)
+		}
+	}
+	ensureNoEventForPath(t, watcher.Events(), filepath.Join(moved, ".hidden", "skip.txt"), 1200*time.Millisecond)
+	if runtime.GOOS != "windows" {
+		ensureNoEventForPath(t, watcher.Events(), filepath.Join(moved, "link.txt"), 1200*time.Millisecond)
+	}
+}
+
+func TestWatcher_SubtreeCreatesMatchScanTraversal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("secret"), 0644); err != nil {
+		t.Fatalf("unexpected hidden file write error: %v", err)
+	}
+	hiddenDir := filepath.Join(dir, ".hidden")
+	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+		t.Fatalf("unexpected hidden directory error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, "skip.txt"), []byte("skip"), 0644); err != nil {
+		t.Fatalf("unexpected hidden directory file error: %v", err)
+	}
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("target"), 0644); err != nil {
+		t.Fatalf("unexpected target write error: %v", err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("unexpected symlink error: %v", err)
+		}
+	}
+
+	watcher := &Watcher{
+		matcher:     scan.NewGitIgnoreMatcher(dir, nil),
+		rootDir:     dir,
+		events:      make(chan Event, 4),
+		done:        make(chan struct{}),
+		timers:      make(map[string]*time.Timer),
+		pendingDirs: make(map[string]bool),
+	}
+	t.Cleanup(func() {
+		watcher.mu.Lock()
+		watcher.closed = true
+		for _, timer := range watcher.timers {
+			timer.Stop()
+		}
+		watcher.mu.Unlock()
+		close(watcher.done)
+	})
+
+	if err := watcher.emitSubtreeCreates(dir); err != nil {
+		t.Fatalf("emitSubtreeCreates() error: %v", err)
+	}
+	watcher.mu.Lock()
+	_, hiddenFileQueued := watcher.timers[filepath.Join(dir, ".env")]
+	_, hiddenDirFileQueued := watcher.timers[filepath.Join(hiddenDir, "skip.txt")]
+	_, symlinkQueued := watcher.timers[link]
+	watcher.mu.Unlock()
+	if !hiddenFileQueued {
+		t.Fatal("hidden file was not queued")
+	}
+	if hiddenDirFileQueued {
+		t.Fatal("file in hidden directory was queued")
+	}
+	if runtime.GOOS != "windows" && symlinkQueued {
+		t.Fatal("symlink was queued")
 	}
 }
 
@@ -280,8 +367,66 @@ func TestWatcher_DirectoryAddFailureRequestsResync(t *testing.T) {
 	if event.Path != dir {
 		t.Fatalf("expected resync path %s, got %+v", dir, event)
 	}
-	if !strings.Contains(buf.String(), "failed to add recursive directory") {
+	if !strings.Contains(buf.String(), "could not watch directory") {
 		t.Fatalf("expected add failure to be logged, got %q", buf.String())
+	}
+}
+
+func TestWatcher_RetriesPartialDynamicRegistration(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("unexpected mkdir error: %v", err)
+	}
+
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("unexpected watcher creation error: %v", err)
+	}
+	watcher := &Watcher{
+		fsw:         fsw,
+		matcher:     scan.NewGitIgnoreMatcher(dir, nil),
+		rootDir:     dir,
+		events:      make(chan Event, 4),
+		done:        make(chan struct{}),
+		timers:      make(map[string]*time.Timer),
+		pendingDirs: make(map[string]bool),
+		watchedDirs: map[string]struct{}{dir: {}},
+		retryDirs:   make(map[string]struct{}),
+		watchRetry:  make(chan struct{}, 1),
+	}
+	var attempts atomic.Int32
+	watcher.addWatch = func(path string) error {
+		attempt := attempts.Add(1)
+		if path == subdir && attempt == 1 {
+			return errors.New("too many open files")
+		}
+		return fsw.Add(path)
+	}
+	go watcher.loop()
+	t.Cleanup(func() {
+		if err := watcher.Close(); err != nil {
+			t.Fatalf("unexpected watcher close error: %v", err)
+		}
+	})
+
+	watcher.handleEvent(fsnotify.Event{Name: subdir, Op: fsnotify.Create})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		watcher.mu.Lock()
+		_, watched := watcher.watchedDirs[subdir]
+		watcher.mu.Unlock()
+		if watched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dynamic watch was not retried; attempts = %d", attempts.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if attempts.Load() < 2 {
+		t.Fatalf("watch attempts = %d, want at least 2", attempts.Load())
 	}
 }
 
@@ -299,6 +444,28 @@ func waitForPath(t *testing.T, events <-chan Event, wantPath string, timeout tim
 			t.Fatalf("timed out waiting for event for %s", wantPath)
 		}
 	}
+}
+
+func waitForPaths(t *testing.T, events <-chan Event, wantPaths []string, timeout time.Duration) map[string]Event {
+	t.Helper()
+
+	wanted := make(map[string]struct{}, len(wantPaths))
+	for _, path := range wantPaths {
+		wanted[path] = struct{}{}
+	}
+	got := make(map[string]Event, len(wantPaths))
+	deadline := time.After(timeout)
+	for len(got) < len(wanted) {
+		select {
+		case event := <-events:
+			if _, ok := wanted[event.Path]; ok {
+				got[event.Path] = event
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for events; got %v, want %v", got, wantPaths)
+		}
+	}
+	return got
 }
 
 func ensureNoEventForPath(t *testing.T, events <-chan Event, wantPath string, timeout time.Duration) {

@@ -91,20 +91,24 @@ func TestMainProcessClose_Idempotent(t *testing.T) {
 
 func TestMainConfigFingerprintTracksIndexingConfiguration(t *testing.T) {
 	root := t.TempDir()
-	base := config.Default()
-	base.WatchDir = root
-	base.DBPath = filepath.Join(root, ".index", "quant.db")
+	newBase := func() *config.Config {
+		c := config.Default()
+		c.WatchDir = root
+		c.DBPath = filepath.Join(root, ".index", "quant.db")
+		return c
+	}
+	base := newBase()
 
-	same := *base
-	if got, want := mainConfigFingerprint(&same), mainConfigFingerprint(base); got != want {
+	same := newBase()
+	if got, want := mainConfigFingerprint(same), mainConfigFingerprint(base); got != want {
 		t.Fatalf("equivalent config fingerprints differ: got %q want %q", got, want)
 	}
-	changed := *base
+	changed := newBase()
 	changed.ChunkSize++
-	if mainConfigFingerprint(&changed) == mainConfigFingerprint(base) {
+	if mainConfigFingerprint(changed) == mainConfigFingerprint(base) {
 		t.Fatal("chunk-size change did not change main config fingerprint")
 	}
-	if err := validateMainLockConfig(base, &lock.LockInfo{ConfigFingerprint: mainConfigFingerprint(&changed)}); err == nil {
+	if err := validateMainLockConfig(base, &lock.LockInfo{ConfigFingerprint: mainConfigFingerprint(changed)}); err == nil {
 		t.Fatal("expected incompatible main lock configuration error")
 	}
 	if err := validateMainLockConfig(base, &lock.LockInfo{}); err != nil {

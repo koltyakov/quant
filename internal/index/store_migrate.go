@@ -95,6 +95,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateCollectionColumn(); err != nil {
 		return err
 	}
+	if err := s.migrateFileSizeColumn(); err != nil {
+		return err
+	}
 	if err := s.migrateHNSWInvalidationTriggers(); err != nil {
 		return err
 	}
@@ -264,6 +267,26 @@ func (s *Store) migrateDocumentMetadata() error {
 			`ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT ''`,
 		); err != nil {
 			return fmt.Errorf("adding documents.tags column: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateFileSizeColumn() error {
+	var colCount int
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name='file_size'`,
+	).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("checking documents schema for file_size column: %w", err)
+	}
+	if colCount == 0 {
+		// -1 marks unknown size for pre-existing rows, which keeps them on
+		// the hash-verification path until they are re-indexed or touched.
+		if _, err := s.db.ExecContext(context.Background(),
+			`ALTER TABLE documents ADD COLUMN file_size INTEGER NOT NULL DEFAULT -1`,
+		); err != nil {
+			return fmt.Errorf("adding documents.file_size column: %w", err)
 		}
 	}
 	return nil

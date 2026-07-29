@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOllamaDimensions(t *testing.T) {
@@ -464,22 +465,87 @@ func TestOpenAICompatibleClientErrorIsPermanent(t *testing.T) {
 func TestOpenAICompatibleServerErrorIsNotPermanent(t *testing.T) {
 	t.Parallel()
 
+	calls := 0
 	o := &OpenAICompatible{
 		baseURL: "https://api.example.com/v1/embeddings",
 		model:   "test-model",
 		apiKey:  "key",
 		dims:    3,
 		httpClient: &http.Client{Transport: openAIRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-			return testHTTPResponse(http.StatusBadGateway, "bad gateway"), nil
+			calls++
+			if calls == 1 {
+				return testHTTPResponse(http.StatusBadGateway, "bad gateway"), nil
+			}
+			return testHTTPResponse(http.StatusOK, `{"data":[{"embedding":[0.1,0.2,0.3],"index":0}],"model":"test-model"}`), nil
 		})},
+		retryBackoff: func(int) time.Duration { return 0 },
 	}
 
-	_, err := o.EmbedBatch(context.Background(), []string{"hello"})
-	if errors.Is(err, ErrPermanent) {
-		t.Fatalf("expected non-permanent error for 5xx, got %v", err)
+	vecs, err := o.EmbedBatch(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("expected 5xx to be retried and succeed, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "status 502") {
-		t.Fatalf("expected status in error, got %v", err)
+	if calls != 2 {
+		t.Fatalf("expected 1 retry after 5xx, got %d calls", calls)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != 3 {
+		t.Fatalf("unexpected embeddings: %v", vecs)
+	}
+}
+
+func TestOpenAICompatibleRetryBudgetExhaustedIsTransient(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+
+			o := &OpenAICompatible{
+				baseURL: "https://api.example.com/v1/embeddings",
+				model:   "test-model",
+				apiKey:  "key",
+				dims:    3,
+				httpClient: &http.Client{Transport: openAIRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return testHTTPResponse(status, http.StatusText(status)), nil
+				})},
+				retryBackoff: func(int) time.Duration { return 0 },
+			}
+
+			_, err := o.EmbedBatch(context.Background(), []string{"hello"})
+			if err == nil {
+				t.Fatal("expected retry budget error")
+			}
+			if errors.Is(err, ErrPermanent) {
+				t.Fatalf("expected transient error after retry budget exhausted, got %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleRateLimitIsRetried(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	o := &OpenAICompatible{
+		baseURL: "https://api.example.com/v1/embeddings",
+		model:   "test-model",
+		apiKey:  "key",
+		dims:    3,
+		httpClient: &http.Client{Transport: openAIRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return testHTTPResponse(http.StatusTooManyRequests, "rate limited"), nil
+			}
+			return testHTTPResponse(http.StatusOK, `{"data":[{"embedding":[0.1,0.2,0.3],"index":0}],"model":"test-model"}`), nil
+		})},
+		retryBackoff: func(int) time.Duration { return 0 },
+	}
+
+	if _, err := o.EmbedBatch(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("expected 429 to be retried and succeed, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 1 retry after 429, got %d calls", calls)
 	}
 }
 

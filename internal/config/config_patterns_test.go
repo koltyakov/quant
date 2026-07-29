@@ -458,7 +458,7 @@ func TestApplyEnv_AllVars(t *testing.T) {
 	t.Setenv("QUANT_INDEX_WORKERS", "4")
 	t.Setenv("QUANT_EMBED_BATCH_SIZE", "64")
 
-	applyEnv(cfg)
+	applyEnv(cfg, nil)
 
 	if cfg.WatchDir != dir {
 		t.Errorf("expected %s, got %s", dir, cfg.WatchDir)
@@ -509,7 +509,7 @@ func TestApplyEnv_InvalidValuesUseDefaults(t *testing.T) {
 	wantChunkSize := cfg.ChunkSize
 	wantChunkOverlap := cfg.ChunkOverlap
 
-	applyEnv(cfg)
+	applyEnv(cfg, nil)
 
 	if cfg.ChunkSize != wantChunkSize {
 		t.Errorf("expected default chunk size to be preserved, got %d", cfg.ChunkSize)
@@ -846,15 +846,27 @@ func TestParseArgs_EnvOverrides(t *testing.T) {
 	}
 }
 
-func TestParseArgs_EnvAppliedAfterFlags(t *testing.T) {
+func TestParseArgs_EnvDoesNotOverrideFlags(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("QUANT_EMBED_MODEL", "env-model")
 	cfg, err := ParseArgs([]string{"--dir", dir, "--embed-model", "flag-model"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if cfg.EmbedModel != "flag-model" {
+		t.Errorf("expected flag-model (CLI takes precedence over env), got %s", cfg.EmbedModel)
+	}
+}
+
+func TestParseArgs_EnvAppliedWhenFlagNotSet(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUANT_EMBED_MODEL", "env-model")
+	cfg, err := ParseArgs([]string{"--dir", dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if cfg.EmbedModel != "env-model" {
-		t.Errorf("expected env-model (env applied after flags), got %s", cfg.EmbedModel)
+		t.Errorf("expected env-model, got %s", cfg.EmbedModel)
 	}
 }
 

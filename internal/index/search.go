@@ -26,6 +26,11 @@ const maxIDsPerQuery = 2000
 // does not yield enough survivors.
 const maxHNSWFetchK = 10000
 
+// maxFilterSetIDs bounds how many chunk ids a metadata/path filter scan may
+// materialize for the HNSW intersection, keeping broad filters from growing
+// memory without bound.
+const maxFilterSetIDs = 500000
+
 func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]SearchResult, error) {
 	return s.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, SearchFilter{})
 }
@@ -71,7 +76,12 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding
 	}
 
 	var docFilter map[string]float32
-	if queryEmbedding != nil && pathPrefix == "" && metadataWhere == "" {
+	hnswServing := s.hnsw != nil && s.hnsw.ready.Load()
+	if queryEmbedding != nil && pathPrefix == "" && metadataWhere == "" && !hnswServing {
+		// The doc filter exists to bound the brute-force vector scan to the
+		// most relevant documents. When HNSW is serving, its neighbors are
+		// already the approximate nearest chunks, and filtering them by
+		// document only discards valid candidates.
 		docFilter = s.docEmbeds.topDocPaths(queryEmbedding, docFilterTopK)
 	}
 
@@ -545,16 +555,27 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 		return
 	}
 	filterSet := make(map[int]bool)
+	truncated := false
 	for filterRows.Next() {
 		var id int
 		if filterRows.Scan(&id) == nil {
 			filterSet[id] = true
+			if len(filterSet) >= maxFilterSetIDs {
+				truncated = true
+				break
+			}
 		}
 	}
 	_ = filterRows.Close()
 	if rowsErr := filterRows.Err(); rowsErr != nil {
 		logx.Warn("filtered vector search: candidate scan failed; returning keyword-only results", "err", rowsErr)
 		return
+	}
+	if truncated {
+		// The HNSW probe below can return at most maxHNSWFetchK neighbors, so
+		// a partial filter set costs some recall but bounds memory for very
+		// broad filters.
+		logx.Info("filtered vector search: filter set truncated", "cap", maxFilterSetIDs, "path_prefix", pathPrefix)
 	}
 	if len(filterSet) == 0 {
 		return

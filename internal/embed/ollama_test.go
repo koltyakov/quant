@@ -294,21 +294,25 @@ func TestOllamaEmbedBatchSplitsBatchBeforeShrinkingSingleton(t *testing.T) {
 	}
 }
 
-func TestOllamaEmbedBatchMarksRetryBudgetExceededPermanent(t *testing.T) {
-	o := &Ollama{
-		baseURL: "http://ollama.test",
-		model:   "test-model",
-		httpClient: newTestHTTPClient(t, http.StatusInternalServerError, map[string]string{
-			"error": "backend unavailable",
-		}),
-		retryBackoff: func(int) time.Duration { return 0 },
-	}
+func TestOllamaEmbedBatchRetryBudgetExceededIsTransient(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			o := &Ollama{
+				baseURL: "http://ollama.test",
+				model:   "test-model",
+				httpClient: newTestHTTPClient(t, status, map[string]string{
+					"error": "backend unavailable",
+				}),
+				retryBackoff: func(int) time.Duration { return 0 },
+			}
 
-	_, err := o.EmbedBatch(context.Background(), []string{"short input"})
-	if !errors.Is(err, ErrPermanent) {
-		t.Fatalf("expected permanent error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "max retry budget") {
-		t.Fatalf("expected max retry budget error, got %v", err)
+			_, err := o.EmbedBatch(context.Background(), []string{"short input"})
+			if err == nil || !strings.Contains(err.Error(), "max retry budget") {
+				t.Fatalf("expected max retry budget error, got %v", err)
+			}
+			if errors.Is(err, ErrPermanent) {
+				t.Fatalf("expected transient error, got %v", err)
+			}
+		})
 	}
 }

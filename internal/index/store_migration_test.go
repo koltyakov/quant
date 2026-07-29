@@ -743,6 +743,112 @@ func TestEnsureEmbeddingMetadata_SameMeta(t *testing.T) {
 	}
 }
 
+func TestEnsureEmbeddingMetadata_LegacyInputVersionResetsPersistedEmbeddings(t *testing.T) {
+	tests := []struct {
+		name   string
+		legacy string
+	}{
+		{name: "missing"},
+		{name: "old", legacy: "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+			if err != nil {
+				t.Fatalf("NewStore() error: %v", err)
+			}
+			mustCloseStore(t, store)
+
+			ctx := context.Background()
+			meta := EmbeddingMetadata{Model: "legacy-input", Dimensions: 1, Normalized: true}
+			if _, err := store.EnsureEmbeddingMetadata(ctx, meta); err != nil {
+				t.Fatalf("initial EnsureEmbeddingMetadata() error: %v", err)
+			}
+			docID, err := store.UpsertDocument(ctx, &Document{
+				Path: "legacy/input.txt", Hash: "h1", ModifiedAt: time.Now(),
+			})
+			if err != nil {
+				t.Fatalf("UpsertDocument() error: %v", err)
+			}
+			if err := store.InsertChunk(ctx, &ChunkRecord{
+				DocumentID: docID, Content: "legacy input", ChunkIndex: 0, Embedding: EncodeFloat32([]float32{1}),
+			}); err != nil {
+				t.Fatalf("InsertChunk() error: %v", err)
+			}
+			dedupHash := ChunkDiffKey("legacy input")
+			if err := store.StoreContentDedup(ctx, dedupHash, EncodeFloat32([]float32{1})); err != nil {
+				t.Fatalf("StoreContentDedup() error: %v", err)
+			}
+
+			var result sql.Result
+			if tt.legacy == "" {
+				result, err = store.db.ExecContext(ctx, `DELETE FROM embedding_metadata WHERE key = 'input_version'`)
+			} else {
+				result, err = store.db.ExecContext(ctx, `UPDATE embedding_metadata SET value = ? WHERE key = 'input_version'`, tt.legacy)
+			}
+			if err != nil {
+				t.Fatalf("making metadata legacy: %v", err)
+			}
+			if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+				t.Fatalf("legacy metadata rows affected = %d, err = %v", affected, err)
+			}
+			store.invalidateEmbeddingMetadata()
+
+			needsReset, err := store.EnsureEmbeddingMetadata(ctx, meta)
+			if err != nil {
+				t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+			}
+			if !needsReset {
+				t.Fatal("legacy embedding input version did not trigger reset")
+			}
+			docCount, chunkCount, err := store.Stats(ctx)
+			if err != nil {
+				t.Fatalf("Stats() error: %v", err)
+			}
+			if docCount != 0 || chunkCount != 0 {
+				t.Fatalf("reset left %d documents and %d chunks", docCount, chunkCount)
+			}
+			if _, found := store.LookupContentDedup(ctx, dedupHash); found {
+				t.Fatal("reset left a legacy content dedup embedding")
+			}
+			stored, err := store.embeddingMetadata(ctx)
+			if err != nil {
+				t.Fatalf("embeddingMetadata() error: %v", err)
+			}
+			if stored == nil || stored.InputVersion != EmbeddingInputVersion {
+				t.Fatalf("stored input version = %+v, want %d", stored, EmbeddingInputVersion)
+			}
+		})
+	}
+}
+
+func TestEnsureEmbeddingMetadata_MissingMetadataClearsDedupOnlyStore(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
+
+	ctx := context.Background()
+	dedupHash := ChunkDiffKey("legacy dedup")
+	if err := store.StoreContentDedup(ctx, dedupHash, EncodeFloat32([]float32{1})); err != nil {
+		t.Fatalf("StoreContentDedup() error: %v", err)
+	}
+	needsReset, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{
+		Model: "missing-metadata", Dimensions: 1, Normalized: true,
+	})
+	if err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
+	}
+	if !needsReset {
+		t.Fatal("missing metadata did not reset dedup-only store")
+	}
+	if _, found := store.LookupContentDedup(ctx, dedupHash); found {
+		t.Fatal("reset left a legacy content dedup embedding")
+	}
+}
+
 func TestEnsureEmbeddingMetadata_DifferentMetaTriggersReset(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")

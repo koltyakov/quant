@@ -205,6 +205,43 @@ func TestClientDoRequestAndServerHandlers(t *testing.T) {
 		t.Fatalf("unexpected writeJSON status: %d", rr.Code)
 	}
 
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	authed := server.withAuth(okHandler)
+
+	req = httptest.NewRequest(http.MethodPost, "/proxy/search", nil)
+	rr = httptest.NewRecorder()
+	authed.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/proxy/search", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr = httptest.NewRecorder()
+	authed.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/proxy/search", nil)
+	req.Header.Set("Authorization", "Bearer "+server.Token())
+	rr = httptest.NewRecorder()
+	authed.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected request with valid token to pass auth, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/proxy/search", nil)
+	req.Header.Set("Authorization", "Bearer "+server.Token())
+	req.Header.Set("Origin", "https://evil.example")
+	rr = httptest.NewRecorder()
+	authed.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for browser origin, got %d", rr.Code)
+	}
+
 	postJSON := func(target string, body string, handler func(http.ResponseWriter, *http.Request)) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))

@@ -29,6 +29,11 @@ func (l *unixLockFile) unlock() error {
 }
 
 func (l *unixLockFile) writeInfo(info LockInfo) error {
+	// Existing lock files may predate proxy tokens and have been created 0644.
+	// Tighten the open file before writing any potentially sensitive content.
+	if err := syscall.Fchmod(l.fd, lockFileMode); err != nil {
+		return fmt.Errorf("setting lock file permissions: %w", err)
+	}
 	data, err := json.Marshal(info)
 	if err != nil {
 		return err

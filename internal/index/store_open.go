@@ -132,6 +132,35 @@ func readOnlySQLiteDSN(dbPath string) string {
 	return u.String()
 }
 
+// readWriteSQLiteDSN builds the DSN for the main store connection pool.
+// Per-connection pragmas are passed as _pragma parameters so that every
+// connection opened by the pool inherits them; setting them with a one-shot
+// Exec would only configure whichever connection happened to run it.
+func readWriteSQLiteDSN(dbPath string) string {
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		absPath = dbPath
+	}
+	path := filepath.ToSlash(absPath)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	query := u.Query()
+	for _, pragma := range []string{
+		"synchronous(1)", // NORMAL
+		"temp_store(2)",  // MEMORY
+		"busy_timeout(5000)",
+		"foreign_keys(1)",
+		"mmap_size(268435456)",
+		"cache_size(-64000)",
+	} {
+		query.Add("_pragma", pragma)
+	}
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
 func hasLegacyQuantSchema(ctx context.Context, db *sql.DB) (bool, error) {
 	required := []struct {
 		table   string
@@ -282,7 +311,7 @@ func openStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", readWriteSQLiteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
@@ -308,19 +337,12 @@ func openStore(dbPath string) (*Store, error) {
 		hnswGraphPath:             dbPath + ".hnsw",
 		docEmbeds:                 newDocEmbeddingIndex(),
 	}
-	for _, pragma := range []string{
-		`PRAGMA journal_mode = WAL`,
-		`PRAGMA synchronous = NORMAL`,
-		`PRAGMA temp_store = MEMORY`,
-		`PRAGMA busy_timeout = 5000`,
-		`PRAGMA foreign_keys = ON`,
-		`PRAGMA mmap_size = 268435456`,
-		`PRAGMA cache_size = -64000`,
-	} {
-		if _, err := s.db.Exec(pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("configuring sqlite pragma %q: %w", pragma, err)
-		}
+	// journal_mode is persisted in the database header, so it only needs to be
+	// set once rather than per connection. The remaining pragmas are applied
+	// per connection via the DSN (see readWriteSQLiteDSN).
+	if _, err := s.db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configuring sqlite pragma %q: %w", "PRAGMA journal_mode = WAL", err)
 	}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()

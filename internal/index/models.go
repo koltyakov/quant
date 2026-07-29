@@ -12,6 +12,7 @@ type Document struct {
 	Hash       string
 	ModifiedAt time.Time
 	IndexedAt  time.Time
+	FileSize   int64             `json:"file_size"`
 	FileType   string            `json:"file_type"`
 	Language   string            `json:"language"`
 	Title      string            `json:"title"`
@@ -34,9 +35,10 @@ type ChunkRecord struct {
 
 // EmbeddingMetadata stores information about the embedding model configuration.
 type EmbeddingMetadata struct {
-	Model      string
-	Dimensions int
-	Normalized bool
+	Model        string
+	Dimensions   int
+	Normalized   bool
+	InputVersion int
 }
 
 // FTSDiagnostics describes the logical and physical state of the FTS index.
@@ -152,6 +154,7 @@ type DocumentWriter interface {
 	DeleteDocument(ctx context.Context, path string) error
 	DeleteDocumentsByPrefix(ctx context.Context, prefix string) error
 	RenameDocumentPath(ctx context.Context, oldPath, newPath string) error
+	UpdateDocumentStat(ctx context.Context, path string, modTime time.Time, size int64) error
 	DocumentRepository
 	ChunkRepository
 	StatsProvider

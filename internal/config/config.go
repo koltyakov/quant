@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/koltyakov/quant/internal/logx"
@@ -66,7 +67,8 @@ type Config struct {
 	SummarizerEnabled       bool          `yaml:"-"`
 	SummarizerModel         string        `yaml:"-"`
 
-	pathMatcher *PathMatcher
+	pathMatcher     *PathMatcher
+	pathMatcherOnce sync.Once
 }
 
 // Default returns a Config populated with sensible defaults.
@@ -169,16 +171,15 @@ func (c *Config) Validate() error {
 // PathMatcher returns the configured path matcher for include/exclude patterns.
 // If no patterns are configured, returns nil (all paths included).
 func (c *Config) PathMatcher() *PathMatcher {
-	if c.pathMatcher != nil {
-		return c.pathMatcher
-	}
-	if len(c.IncludePatterns) == 0 && len(c.ExcludePatterns) == 0 {
-		return nil
-	}
-	c.pathMatcher = &PathMatcher{
-		IncludePatterns: c.IncludePatterns,
-		ExcludePatterns: c.ExcludePatterns,
-	}
+	c.pathMatcherOnce.Do(func() {
+		if len(c.IncludePatterns) == 0 && len(c.ExcludePatterns) == 0 {
+			return
+		}
+		c.pathMatcher = &PathMatcher{
+			IncludePatterns: c.IncludePatterns,
+			ExcludePatterns: c.ExcludePatterns,
+		}
+	})
 	return c.pathMatcher
 }
 
@@ -276,7 +277,7 @@ func ParseArgs(args []string) (*Config, error) {
 		}
 	}
 
-	applyEnv(cfg)
+	applyEnv(cfg, cliSet)
 
 	if cfg.WatchDir == "" {
 		wd, err := os.Getwd()
@@ -465,68 +466,72 @@ func resolveConfigPath(baseDir, path string) string {
 	return filepath.Join(baseDir, path)
 }
 
-func applyEnv(cfg *Config) {
-	if v := os.Getenv("QUANT_DIR"); v != "" {
+// applyEnv applies QUANT_* environment variables to the config.
+// Environment variables override YAML config values but never override
+// flags explicitly passed on the command line (precedence: CLI > env > file).
+func applyEnv(cfg *Config, cliSet map[string]bool) {
+	set := func(flagName string) bool { return cliSet[flagName] }
+	if v := os.Getenv("QUANT_DIR"); v != "" && !set("dir") {
 		cfg.WatchDir = v
 	}
-	if v := os.Getenv("QUANT_DB"); v != "" {
+	if v := os.Getenv("QUANT_DB"); v != "" && !set("db") {
 		cfg.DBPath = v
 	}
-	if v := os.Getenv("QUANT_TRANSPORT"); v != "" {
+	if v := os.Getenv("QUANT_TRANSPORT"); v != "" && !set("transport") {
 		cfg.Transport = Transport(strings.ToLower(v))
 	}
-	if v := os.Getenv("QUANT_LISTEN"); v != "" {
+	if v := os.Getenv("QUANT_LISTEN"); v != "" && !set("listen") {
 		cfg.ListenAddr = v
 	}
-	if v := os.Getenv("QUANT_EMBED_URL"); v != "" {
+	if v := os.Getenv("QUANT_EMBED_URL"); v != "" && !set("embed-url") {
 		cfg.EmbedURL = v
 	}
-	if v := os.Getenv("QUANT_EMBED_MODEL"); v != "" {
+	if v := os.Getenv("QUANT_EMBED_MODEL"); v != "" && !set("embed-model") {
 		cfg.EmbedModel = v
 	}
-	if v := os.Getenv("QUANT_EMBED_PROVIDER"); v != "" {
+	if v := os.Getenv("QUANT_EMBED_PROVIDER"); v != "" && !set("embed-provider") {
 		cfg.EmbedProvider = v
 	}
-	if v := os.Getenv("QUANT_EMBED_API_KEY"); v != "" {
+	if v := os.Getenv("QUANT_EMBED_API_KEY"); v != "" && !set("embed-api-key") {
 		cfg.EmbedAPIKey = v
 	}
-	if v := os.Getenv("QUANT_LLM_URL"); v != "" {
+	if v := os.Getenv("QUANT_LLM_URL"); v != "" && !set("llm-url") {
 		cfg.LLMURL = v
 	}
-	if v := os.Getenv("QUANT_LLM_MODEL"); v != "" {
+	if v := os.Getenv("QUANT_LLM_MODEL"); v != "" && !set("llm-model") {
 		cfg.LLMModel = v
 	}
-	if v := os.Getenv("QUANT_LLM_PROVIDER"); v != "" {
+	if v := os.Getenv("QUANT_LLM_PROVIDER"); v != "" && !set("llm-provider") {
 		cfg.LLMProvider = v
 	}
-	if v := os.Getenv("QUANT_LLM_API_KEY"); v != "" {
+	if v := os.Getenv("QUANT_LLM_API_KEY"); v != "" && !set("llm-api-key") {
 		cfg.LLMAPIKey = v
 	}
-	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" {
+	if v := os.Getenv("QUANT_PDF_OCR_LANG"); v != "" && !set("pdf-ocr-lang") {
 		cfg.PDFOCRLang = v
 	}
-	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" {
+	if v := os.Getenv("QUANT_CHUNK_SIZE"); v != "" && !set("chunk-size") {
 		cfg.ChunkSize = mustParseIntEnv("QUANT_CHUNK_SIZE", v, cfg.ChunkSize)
 	}
-	if v := os.Getenv("QUANT_CHUNK_OVERLAP"); v != "" {
+	if v := os.Getenv("QUANT_CHUNK_OVERLAP"); v != "" && !set("chunk-overlap") {
 		cfg.ChunkOverlap = mustParseFloatEnv("QUANT_CHUNK_OVERLAP", v, cfg.ChunkOverlap)
 	}
-	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" {
+	if v := os.Getenv("QUANT_INDEX_WORKERS"); v != "" && !set("index-workers") {
 		cfg.IndexWorkers = mustParseIntEnv("QUANT_INDEX_WORKERS", v, cfg.IndexWorkers)
 	}
-	if v := os.Getenv("QUANT_EMBED_BATCH_SIZE"); v != "" {
+	if v := os.Getenv("QUANT_EMBED_BATCH_SIZE"); v != "" && !set("embed-batch-size") {
 		cfg.EmbedBatchSize = mustParseIntEnv("QUANT_EMBED_BATCH_SIZE", v, cfg.EmbedBatchSize)
 	}
-	if v := os.Getenv("QUANT_RERANKER"); v != "" {
+	if v := os.Getenv("QUANT_RERANKER"); v != "" && !set("reranker") {
 		cfg.RerankerType = v
 	}
-	if v := os.Getenv("QUANT_RERANKER_MODEL"); v != "" {
+	if v := os.Getenv("QUANT_RERANKER_MODEL"); v != "" && !set("reranker-model") {
 		cfg.RerankerModel = v
 	}
-	if v := os.Getenv("QUANT_SUMMARIZER"); v != "" {
+	if v := os.Getenv("QUANT_SUMMARIZER"); v != "" && !set("summarizer") {
 		cfg.SummarizerEnabled = v == "true" || v == "1" || v == "yes"
 	}
-	if v := os.Getenv("QUANT_SUMMARIZER_MODEL"); v != "" {
+	if v := os.Getenv("QUANT_SUMMARIZER_MODEL"); v != "" && !set("summarizer-model") {
 		cfg.SummarizerModel = v
 	}
 }

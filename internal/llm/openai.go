@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,7 +32,7 @@ func NewOpenAICompleter(cfg Config) (*OpenAICompleter, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	if cfg.MaxRetries < 0 {
+	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = 2
 	}
 	return newOpenAICompleter(cfg, &http.Client{Timeout: cfg.Timeout})
@@ -62,6 +63,9 @@ func (o *OpenAICompleter) Complete(ctx context.Context, req CompleteRequest) (Co
 		resp, err = o.doRequest(ctx, body)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, ErrPermanent) {
+			return CompleteResponse{}, err
 		}
 		if attempt < o.maxRetries {
 			select {
@@ -98,13 +102,13 @@ func (o *OpenAICompleter) doRequest(ctx context.Context, body []byte) (openAICha
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return openAIChatResponse{}, fmt.Errorf("openai chat %d: %s", resp.StatusCode, string(respBody))
 	}
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return openAIChatResponse{}, fmt.Errorf("openai chat permanent error %d: %s", resp.StatusCode, string(respBody))
+		return openAIChatResponse{}, fmt.Errorf("%w: openai chat status %d: %s", ErrPermanent, resp.StatusCode, string(respBody))
 	}
 
 	var chatResp openAIChatResponse

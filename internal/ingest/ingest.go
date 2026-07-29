@@ -51,7 +51,7 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 
 	keys := make([]string, len(chunks))
 	for i, c := range chunks {
-		keys[i] = index.ChunkDiffKey(c.Content)
+		keys[i] = index.ChunkDiffKey(index.EmbedInputText(c.Heading, c.Content))
 	}
 	deduped := p.lookupDedup(ctx, keys, existing)
 
@@ -244,7 +244,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 				Summary:      summary,
 			}
 			if dedupEntries != nil {
-				dedupEntries[index.ChunkDiffKey(c.Content)] = emb
+				dedupEntries[index.ChunkDiffKey(index.EmbedInputText(c.Heading, c.Content))] = emb
 			}
 		}
 
@@ -260,10 +260,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 }
 
 func BuildEmbedInput(heading, content string) string {
-	if heading != "" {
-		return heading + "\n\n" + content
-	}
-	return content
+	return index.EmbedInputText(heading, content)
 }
 
 func PrepareChunks(text, filePath string, chunkSize int, overlap float64) []chunk.Chunk {
@@ -337,18 +334,4 @@ func embedContentBudget(heading string) int {
 		budget -= utf8.RuneCountInString(heading) + 2
 	}
 	return budget
-}
-
-func CodeSignature(block string) string {
-	for line := range strings.SplitSeq(block, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			runes := []rune(trimmed)
-			if len(runes) > 120 {
-				return string(runes[:120]) + "..."
-			}
-			return trimmed
-		}
-	}
-	return ""
 }

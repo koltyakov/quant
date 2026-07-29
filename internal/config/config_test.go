@@ -91,7 +91,7 @@ func TestApplyEnv(t *testing.T) {
 	t.Setenv("QUANT_CHUNK_SIZE", "256")
 	t.Setenv("QUANT_INDEX_WORKERS", "6")
 
-	applyEnv(cfg)
+	applyEnv(cfg, nil)
 
 	if cfg.EmbedModel != "all-minilm" {
 		t.Errorf("expected embed model all-minilm, got %s", cfg.EmbedModel)
@@ -243,7 +243,7 @@ func TestApplyEnv_RerankerSummarizer(t *testing.T) {
 	t.Setenv("QUANT_SUMMARIZER", "true")
 	t.Setenv("QUANT_SUMMARIZER_MODEL", "llama3.2")
 
-	applyEnv(cfg)
+	applyEnv(cfg, nil)
 
 	if cfg.RerankerType != "cross-encoder" {
 		t.Errorf("expected reranker cross-encoder, got %s", cfg.RerankerType)
@@ -263,14 +263,14 @@ func TestApplyEnv_SummarizerBoolVariants(t *testing.T) {
 	for _, v := range []string{"true", "1", "yes"} {
 		cfg := Default()
 		t.Setenv("QUANT_SUMMARIZER", v)
-		applyEnv(cfg)
+		applyEnv(cfg, nil)
 		if !cfg.SummarizerEnabled {
 			t.Errorf("QUANT_SUMMARIZER=%q should enable summarizer", v)
 		}
 	}
 	cfg := Default()
 	t.Setenv("QUANT_SUMMARIZER", "false")
-	applyEnv(cfg)
+	applyEnv(cfg, nil)
 	if cfg.SummarizerEnabled {
 		t.Errorf("QUANT_SUMMARIZER=false should not enable summarizer")
 	}

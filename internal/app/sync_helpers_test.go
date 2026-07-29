@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,6 +411,7 @@ func TestIndexerConstructionAndSmallHelpers(t *testing.T) {
 		t.Fatal("expected quarantine lookup to be true")
 	}
 	quarantine.isErr = errors.New("lookup failed")
+	idx.invalidateQuarantineCache()
 	if idx.isQuarantined(context.Background(), "docs/a.md") {
 		t.Fatal("quarantine lookup errors should fall back to false")
 	}
@@ -480,6 +482,32 @@ func TestIndexerThinControlPathsAndSummarizerAdapter(t *testing.T) {
 	}
 }
 
+func TestQuarantineCacheDoesNotPublishLoadAfterInvalidation(t *testing.T) {
+	store := &blockingQuarantineStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	idx := &Indexer{quarantine: store}
+
+	loaded := make(chan bool, 1)
+	go func() {
+		loaded <- idx.isQuarantined(context.Background(), "stale.txt")
+	}()
+	<-store.started
+	idx.invalidateQuarantineCache()
+	close(store.release)
+	if <-loaded {
+		t.Fatal("lookup returned a stale quarantine result after invalidation")
+	}
+
+	if idx.isQuarantined(context.Background(), "stale.txt") {
+		t.Fatal("stale quarantine load was published after invalidation")
+	}
+	if got := store.calls.Load(); got != 2 {
+		t.Fatalf("ListQuarantined calls = %d, want 2", got)
+	}
+}
+
 func pathSyncTrackerSnapshot(tk *PathSyncTracker) map[string]uint64 {
 	tk.mu.Lock()
 	defer tk.mu.Unlock()
@@ -507,6 +535,9 @@ func (s *stubDocumentStore) DeleteDocument(_ context.Context, path string) error
 
 func (s *stubDocumentStore) DeleteDocumentsByPrefix(context.Context, string) error { return nil }
 func (s *stubDocumentStore) RenameDocumentPath(context.Context, string, string) error {
+	return nil
+}
+func (s *stubDocumentStore) UpdateDocumentStat(context.Context, string, time.Time, int64) error {
 	return nil
 }
 func (s *stubDocumentStore) GetDocumentByPath(context.Context, string) (*index.Document, error) {
@@ -539,6 +570,35 @@ func (s *stubQuarantineStore) IsQuarantined(context.Context, string) (bool, erro
 	return s.quarantined, s.isErr
 }
 func (s *stubQuarantineStore) ListQuarantined(context.Context) ([]index.QuarantineEntry, error) {
+	if s.isErr != nil {
+		return nil, s.isErr
+	}
+	if s.quarantined {
+		return []index.QuarantineEntry{{Path: "docs/a.md"}}, nil
+	}
 	return nil, nil
 }
 func (s *stubQuarantineStore) ClearQuarantine(context.Context) error { return nil }
+
+type blockingQuarantineStore struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (s *blockingQuarantineStore) AddToQuarantine(context.Context, string, string) error {
+	return nil
+}
+func (s *blockingQuarantineStore) RemoveFromQuarantine(context.Context, string) error { return nil }
+func (s *blockingQuarantineStore) IsQuarantined(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (s *blockingQuarantineStore) ListQuarantined(context.Context) ([]index.QuarantineEntry, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.started)
+		<-s.release
+		return []index.QuarantineEntry{{Path: "stale.txt"}}, nil
+	}
+	return nil, nil
+}
+func (s *blockingQuarantineStore) ClearQuarantine(context.Context) error { return nil }

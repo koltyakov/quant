@@ -188,7 +188,7 @@ func TestTryAcquireReadUpdateAndRelease(t *testing.T) {
 		t.Fatal("CheckMainAlive() = false, want true")
 	}
 
-	lock.UpdateProxyAddr("127.0.0.1:9001")
+	lock.UpdateProxyAddr("127.0.0.1:9001", "token")
 	if got := lock.ProxyAddr(); got != "127.0.0.1:9001" {
 		t.Fatalf("ProxyAddr() after update = %q, want %q", got, "127.0.0.1:9001")
 	}
@@ -216,6 +216,42 @@ func TestTryAcquireReadUpdateAndRelease(t *testing.T) {
 	}
 	if CheckMainAlive(dir) {
 		t.Fatal("CheckMainAlive() after release = true, want false")
+	}
+}
+
+func TestTryAcquireTightensExistingLockFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not use Unix file modes")
+	}
+
+	dir := t.TempDir()
+	lockPath := LockPath(dir)
+	if err := os.MkdirAll(filepath.Dir(lockPath), stateDirMode); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	lk, err := TryAcquire(dir, "instance", "")
+	if err != nil {
+		t.Fatalf("TryAcquire() error = %v", err)
+	}
+	defer func() { _ = lk.Release() }()
+
+	// Restore the legacy mode after acquisition to verify the token update
+	// itself tightens permissions before writing.
+	if err := os.Chmod(lockPath, 0644); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	lk.UpdateProxyAddr("127.0.0.1:9001", "secret-token")
+
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != lockFileMode {
+		t.Fatalf("lock file mode = %04o, want %04o", got, lockFileMode)
 	}
 }
 
@@ -254,7 +290,7 @@ func TestUpdateProxyAddrSkipsReleasedLocks(t *testing.T) {
 		held: false,
 	}
 
-	lock.UpdateProxyAddr("new")
+	lock.UpdateProxyAddr("new", "token")
 
 	if got := lock.ProxyAddr(); got != "old" {
 		t.Fatalf("ProxyAddr() = %q, want %q", got, "old")
@@ -278,7 +314,7 @@ func TestUpdateProxyAddrKeepsInMemoryStateWhenWriteFails(t *testing.T) {
 		held: true,
 	}
 
-	lock.UpdateProxyAddr("new")
+	lock.UpdateProxyAddr("new", "token")
 
 	if got := lock.ProxyAddr(); got != "new" {
 		t.Fatalf("ProxyAddr() = %q, want %q", got, "new")

@@ -13,7 +13,7 @@ import (
 
 const (
 	lockFileName = "quant.lock"
-	lockFileMode = 0644
+	lockFileMode = 0600
 	stateDirMode = 0750
 )
 
@@ -26,6 +26,7 @@ type LockInfo struct {
 	InstanceID        string `json:"instance_id"`
 	PID               int    `json:"pid"`
 	ProxyAddr         string `json:"proxy_addr"`
+	ProxyToken        string `json:"proxy_token,omitempty"`
 	ConfigFingerprint string `json:"config_fingerprint,omitempty"`
 }
 
@@ -206,13 +207,14 @@ func checkMainAlivePath(lockPath string) bool {
 	return isProcessAlive(info.PID)
 }
 
-func (l *Lock) UpdateProxyAddr(addr string) {
+func (l *Lock) UpdateProxyAddr(addr, token string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.held {
 		return
 	}
 	l.info.ProxyAddr = addr
+	l.info.ProxyToken = token
 	if err := l.lf.writeInfo(l.info); err != nil {
 		logx.Warn("updating proxy addr in lock failed", "err", err)
 	}

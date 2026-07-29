@@ -62,9 +62,10 @@ func Split(text string, chunkSize int, overlapFraction float64) []Chunk {
 			content = breadcrumb + "\n\n" + content
 		}
 		chunks = append(chunks, Chunk{
-			Content: content,
-			Index:   len(chunks),
-			Heading: breadcrumb,
+			Content:      content,
+			Index:        len(chunks),
+			Heading:      breadcrumb,
+			SectionTitle: breadcrumb,
 		})
 	}
 

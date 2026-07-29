@@ -155,10 +155,10 @@ func (o *Ollama) embedBatch(ctx context.Context, texts []string, retries int) ([
 				return o.embedBatch(ctx, []string{reduced}, retries)
 			}
 		}
-		// Retry transient server errors with exponential backoff.
-		if resp.StatusCode >= 500 {
+		// Retry rate limits and transient server errors with exponential backoff.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			if retries >= maxEmbedRetries {
-				return nil, fmt.Errorf("%w: ollama: max retry budget (%d) exceeded", ErrPermanent, maxEmbedRetries)
+				return nil, fmt.Errorf("ollama: max retry budget (%d) exceeded", maxEmbedRetries)
 			}
 			backoff := o.retryBackoff(retries)
 			select {

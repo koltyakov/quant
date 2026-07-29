@@ -150,7 +150,7 @@ func RunMCP(ctx context.Context, cfg *config.Config, version string, hooks AutoU
 	}
 
 	logx.Info("another instance is main; starting as worker", "main_addr", info.ProxyAddr, "main_pid", info.PID)
-	return runWorker(ctx, cfg, version, info.ProxyAddr)
+	return runWorker(ctx, cfg, version, info.ProxyAddr, info.ProxyToken)
 }
 
 func waitForLockAndRun(ctx context.Context, cfg *config.Config, version string, hooks AutoUpdateHooks, instanceID string) error {
@@ -176,7 +176,7 @@ func waitForLockAndRun(ctx context.Context, cfg *config.Config, version string, 
 			}
 			if readErr == nil && info.ProxyAddr != "" {
 				logx.Info("main instance discovered; starting as worker", "main_addr", info.ProxyAddr)
-				return runWorker(ctx, cfg, version, info.ProxyAddr)
+				return runWorker(ctx, cfg, version, info.ProxyAddr, info.ProxyToken)
 			}
 		}
 	}
@@ -192,8 +192,12 @@ func runMain(ctx context.Context, cfg *config.Config, version string, hooks Auto
 	return proc.Serve(hooks)
 }
 
-func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr string) error {
-	client := proxy.NewClient(mainAddr)
+func runWorker(ctx context.Context, cfg *config.Config, version string, mainAddr string, proxyToken ...string) error {
+	var token string
+	if len(proxyToken) > 0 {
+		token = proxyToken[0]
+	}
+	client := proxy.NewClient(mainAddr, token)
 
 	if !client.Alive(ctx) {
 		logx.Warn("main process not reachable; attempting to become main", "addr", mainAddr)

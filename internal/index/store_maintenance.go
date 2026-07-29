@@ -15,6 +15,7 @@ import (
 func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetadata) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	meta.InputVersion = EmbeddingInputVersion
 
 	current, err := s.embeddingMetadata(ctx)
 	if err != nil {
@@ -26,7 +27,11 @@ func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetad
 		if err != nil {
 			return false, err
 		}
-		needsReset := docCount > 0 || chunkCount > 0
+		var dedupCount int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM content_dedup`).Scan(&dedupCount); err != nil {
+			return false, fmt.Errorf("counting content dedup rows: %w", err)
+		}
+		needsReset := docCount > 0 || chunkCount > 0 || dedupCount > 0
 		if needsReset {
 			if err := s.resetIndex(ctx); err != nil {
 				return false, err

@@ -14,14 +14,16 @@ import (
 
 type Client struct {
 	addr       string
+	token      string
 	httpClient *http.Client
 }
 
 var _ index.Searcher = (*Client)(nil)
 
-func NewClient(addr string) *Client {
+func NewClient(addr, token string) *Client {
 	return &Client{
-		addr: "http://" + addr,
+		addr:  "http://" + addr,
+		token: token,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -38,6 +40,9 @@ func (c *Client) Alive(ctx context.Context) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.addr+"/proxy/ping", nil) //nolint:gosec // addr is localhost from lock file or config
 	if err != nil {
 		return false
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.httpClient.Do(req) //nolint:gosec // addr is localhost from lock file or config
 	if err != nil {
@@ -214,10 +219,18 @@ func (c *Client) doGet(ctx context.Context, path string, respBody any) error {
 	return c.doRequest(ctx, http.MethodGet, path, nil, "", respBody)
 }
 
+// maxProxyResponseBodyBytes bounds a single proxy response. Search and
+// chunk-window responses carry full chunk contents, so this must comfortably
+// exceed the largest legitimate result set.
+const maxProxyResponseBodyBytes = 64 << 20
+
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string, respBody any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.addr+path, body) //nolint:gosec // addr is localhost from lock file or config
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
@@ -229,7 +242,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respData, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respData, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyResponseBodyBytes))
 	if err != nil {
 		return fmt.Errorf("reading proxy response: %w", err)
 	}

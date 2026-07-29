@@ -186,7 +186,7 @@ func newProxyTestHarness(t *testing.T, keywordOnly ...bool) (*index.Store, *Clie
 		t.Fatalf("unexpected proxy start error: %v", err)
 	}
 
-	return store, NewClient(addr), embedder
+	return store, NewClient(addr, server.Token()), embedder
 }
 
 func TestServerShutdown_Idempotent(t *testing.T) {

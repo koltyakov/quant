@@ -19,6 +19,7 @@ import (
 type hnswIndex struct {
 	mu    sync.RWMutex
 	graph *hnsw.Graph[int]
+	build chan struct{}
 	ready atomic.Bool
 	mods  atomic.Int64
 	// flushedMods is the mods value at the time of the last successful graph
@@ -28,7 +29,7 @@ type hnswIndex struct {
 }
 
 func newHNSWIndex() *hnswIndex {
-	h := &hnswIndex{}
+	h := &hnswIndex{build: make(chan struct{}, 1)}
 	h.generation.Store(-1)
 	return h
 }
@@ -136,36 +137,61 @@ func newGraph(m, efSearch int) *hnsw.Graph[int] {
 	return g
 }
 
-func (s *Store) BuildHNSW(ctx context.Context) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+const maxHNSWBuildAttempts = 3
 
+func (s *Store) BuildHNSW(ctx context.Context) error {
 	if s.hnsw == nil {
 		return nil
 	}
 
+	select {
+	case s.hnsw.build <- struct{}{}:
+		defer func() { <-s.hnsw.build }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	for attempt := 0; attempt < maxHNSWBuildAttempts; attempt++ {
+		retry, err := s.buildHNSWAttempt(ctx)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("chunk generation kept changing while building hnsw graph after %d attempts", maxHNSWBuildAttempts)
+}
+
+func (s *Store) buildHNSWAttempt(ctx context.Context) (bool, error) {
 	meta, err := s.embeddingMetadata(ctx)
 	if err != nil {
-		return fmt.Errorf("reading embedding metadata for hnsw build: %w", err)
+		return false, fmt.Errorf("reading embedding metadata for hnsw build: %w", err)
 	}
 	if meta == nil || meta.Dimensions == 0 {
-		return nil
+		return false, nil
 	}
 	dims := meta.Dimensions
 
+	// Build from a read-only snapshot so writers are not blocked while the
+	// graph is constructed. Consistency is guaranteed by the generation
+	// re-check under writeMu before the new graph is published.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return fmt.Errorf("beginning hnsw snapshot: %w", err)
+		return false, fmt.Errorf("beginning hnsw snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	generation, err := chunkGenerationTx(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, embedding FROM chunks`)
 	if err != nil {
-		return fmt.Errorf("querying chunks for hnsw build: %w", err)
+		return false, fmt.Errorf("querying chunks for hnsw build: %w", err)
 	}
 
 	g := newGraph(s.hnswM, s.hnswEfSearch)
@@ -176,7 +202,7 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 		var embBytes []byte
 		if err := rows.Scan(&id, &embBytes); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scanning chunk for hnsw: %w", err)
+			return false, fmt.Errorf("scanning chunk for hnsw: %w", err)
 		}
 		vec := decodeEmbeddingForHNSW(embBytes, dims)
 		if len(vec) == 0 {
@@ -187,13 +213,27 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("reading chunks for hnsw: %w", err)
+		return false, fmt.Errorf("reading chunks for hnsw: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("closing hnsw chunk snapshot: %w", err)
+		return false, fmt.Errorf("closing hnsw chunk snapshot: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing hnsw snapshot: %w", err)
+		return false, fmt.Errorf("committing hnsw snapshot: %w", err)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	// All chunk writers hold writeMu, so if the generation still matches the
+	// snapshot the existing graph is unchanged and the publish below cannot
+	// race a concurrent write.
+	currentGeneration, err := s.chunkGeneration(ctx)
+	if err != nil {
+		return false, fmt.Errorf("re-checking chunk generation for hnsw build: %w", err)
+	}
+	if currentGeneration != generation {
+		return true, nil
 	}
 
 	s.hnsw.mu.Lock()
@@ -212,14 +252,14 @@ func (s *Store) BuildHNSW(ctx context.Context) error {
 		logx.Warn("failed to persist hnsw metadata snapshot", "err", err)
 	} else if !published {
 		s.resetRuntimeIndexes(false)
-		return fmt.Errorf("chunk generation changed while building hnsw graph")
+		return true, nil
 	}
 
 	if err := s.LoadDocEmbeddings(ctx); err != nil {
 		logx.Warn("failed to load document embeddings", "err", err)
 	}
 
-	return nil
+	return false, nil
 }
 
 func (s *Store) saveHNSWState(ctx context.Context, nodeCount int, generation int64) (bool, error) {

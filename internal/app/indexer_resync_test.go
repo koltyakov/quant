@@ -102,6 +102,39 @@ func TestResyncCoordinator_ErrorWithoutContextCancel(t *testing.T) {
 	}
 }
 
+func TestResyncCoordinator_ResyncBeforeInitialSyncStillReady(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	ready := make(chan struct{}, 1)
+	startupRan := false
+	rc := NewResyncCoordinator(ResyncCallbacks{
+		OnStartup: func(context.Context) (SyncReport, error) {
+			startupRan = true
+			return SyncReport{}, nil
+		},
+		OnResync: func(context.Context) (SyncReport, error) {
+			return SyncReport{}, nil
+		},
+		OnState: func(runtimestate.IndexState, string) {},
+		OnReady: func(context.Context, SyncReport) {
+			ready <- struct{}{}
+		},
+	})
+
+	rc.RequestResync(ctx)
+	rc.RunInitialSync(ctx)
+
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		t.Fatal("onReady was not called when a resync raced the initial sync")
+	}
+	if !startupRan {
+		t.Fatal("expected the startup sync path to run exactly once")
+	}
+}
+
 func TestResyncCoordinator_ResyncSuccessState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -119,7 +152,8 @@ func TestResyncCoordinator_ResyncSuccessState(t *testing.T) {
 	})
 
 	rc.running = true
-	rc.runLoop(ctx, false)
+	rc.startupDone = true
+	rc.runLoop(ctx)
 	if !stateCalled {
 		t.Fatal("expected ready state to be set after successful resync")
 	}

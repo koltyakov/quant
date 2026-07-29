@@ -340,6 +340,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 	fileType := ""
 	if v, ok := args["file_type"].(string); ok {
 		fileType = index.CanonicalFileType(v)
+		if fileType == "" && strings.TrimSpace(v) != "" {
+			return nil, fmt.Errorf("unrecognized file_type %q", v)
+		}
 		if fileType != "" {
 			filter.FileTypes = []string{fileType}
 		}
@@ -671,6 +674,9 @@ func (s *Server) handleGetContext(ctx context.Context, request mcplib.CallToolRe
 	if err != nil {
 		return nil, fmt.Errorf("getting context for chunk %d: %w", int64(chunkID), err)
 	}
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("chunk %d not found", int64(chunkID))
+	}
 
 	rows := make([]getContextToolResult, 0, len(chunks))
 	var output strings.Builder
@@ -741,7 +747,10 @@ func (s *Server) handleListCollections(ctx context.Context, request mcplib.CallT
 	output.WriteString("Collections:\n")
 
 	for _, name := range collections {
-		docs, chunks, _ := s.store.CollectionStats(ctx, name)
+		docs, chunks, err := s.store.CollectionStats(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("getting stats for collection %q: %w", name, err)
+		}
 		infos = append(infos, collectionInfo{Name: name, Documents: docs, Chunks: chunks})
 		fmt.Fprintf(&output, "  %s (%d docs, %d chunks)\n", name, docs, chunks)
 	}

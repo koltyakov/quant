@@ -13,11 +13,12 @@ import (
 )
 
 type OpenAICompatible struct {
-	baseURL    string
-	model      string
-	apiKey     string
-	dims       int
-	httpClient *http.Client
+	baseURL      string
+	model        string
+	apiKey       string
+	dims         int
+	httpClient   *http.Client
+	retryBackoff func(retry int) time.Duration
 }
 
 type openAIEmbedRequest struct {
@@ -46,10 +47,11 @@ func newOpenAICompatible(ctx context.Context, baseURL, model, apiKey string, htt
 		return nil, err
 	}
 	o := &OpenAICompatible{
-		baseURL:    embedURL,
-		model:      model,
-		apiKey:     apiKey,
-		httpClient: httpClient,
+		baseURL:      embedURL,
+		model:        model,
+		apiKey:       apiKey,
+		httpClient:   httpClient,
+		retryBackoff: defaultRetryBackoff,
 	}
 	dims, err := o.probeDimensions(ctx)
 	if err != nil {
@@ -74,6 +76,10 @@ func (o *OpenAICompatible) EmbedBatch(ctx context.Context, texts []string) ([][]
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	return o.embedBatch(ctx, texts, 0)
+}
+
+func (o *OpenAICompatible) embedBatch(ctx context.Context, texts []string, retries int) ([][]float32, error) {
 
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
@@ -107,6 +113,23 @@ func (o *OpenAICompatible) EmbedBatch(ctx context.Context, texts []string) ([][]
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
+		// Rate limits and transient server errors are retried with
+		// exponential backoff; other client errors are permanent.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			if retries >= maxEmbedRetries {
+				return nil, fmt.Errorf("openai-compatible: max retry budget (%d) exceeded", maxEmbedRetries)
+			}
+			backoff := defaultRetryBackoff(retries)
+			if o.retryBackoff != nil {
+				backoff = o.retryBackoff(retries)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			return o.embedBatch(ctx, texts, retries+1)
+		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			return nil, fmt.Errorf("%w: openai-compatible returned status %d: %s", ErrPermanent, resp.StatusCode, string(body))
 		}

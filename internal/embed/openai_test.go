@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type openAIRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -132,7 +133,7 @@ func TestOpenAICompatibleEmbedBatchErrors(t *testing.T) {
 		wantErr string
 	}{
 		{name: "permanent client error", status: http.StatusBadRequest, body: `bad request`, wantErr: ErrPermanent.Error()},
-		{name: "server error", status: http.StatusBadGateway, body: `gateway`, wantErr: "status 502"},
+		{name: "server error", status: http.StatusBadGateway, body: `gateway`, wantErr: "max retry budget"},
 		{name: "decode error", status: http.StatusOK, body: `{"data":`, wantErr: "decoding response"},
 		{name: "mismatched result count", status: http.StatusOK, body: `{"data":[]}`, wantErr: "returned 0 embeddings for 1 inputs"},
 		{name: "index out of range", status: http.StatusOK, body: `{"data":[{"embedding":[1,2,3],"index":1}]}`, wantErr: "index 1 out of range"},
@@ -152,11 +153,15 @@ func TestOpenAICompatibleEmbedBatchErrors(t *testing.T) {
 				httpClient: &http.Client{Transport: openAIRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 					return testHTTPResponse(tt.status, tt.body), nil
 				})},
+				retryBackoff: func(int) time.Duration { return 0 },
 			}
 
 			_, err := embedder.EmbedBatch(context.Background(), []string{"hello"})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("EmbedBatch() error = %v, want substring %q", err, tt.wantErr)
+			}
+			if (tt.status == http.StatusTooManyRequests || tt.status >= 500) && stderrors.Is(err, ErrPermanent) {
+				t.Fatalf("EmbedBatch() error = %v, want transient error", err)
 			}
 		})
 	}

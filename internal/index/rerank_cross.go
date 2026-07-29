@@ -146,11 +146,7 @@ func (r *CrossEncoderReranker) scoreSubBatch(ctx context.Context, query string, 
 
 	docs := make([]docEntry, len(pairs))
 	for i, p := range pairs {
-		content := p.document
-		if len(content) > 800 {
-			content = content[:800]
-		}
-		docs[i] = docEntry{Document: content}
+		docs[i] = docEntry{Document: truncateUTF8(p.document, 800)}
 	}
 
 	docsJSON, _ := json.Marshal(docs)

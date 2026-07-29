@@ -70,12 +70,28 @@ func NewRateLimiter(cfg RateLimiterConfig) *RateLimiter {
 // It blocks until a token is available or the context is cancelled.
 // Returns an error if the context is cancelled or max waiters is exceeded.
 func (r *RateLimiter) Acquire(ctx context.Context) error {
+	return r.AcquireN(ctx, 1)
+}
+
+// AcquireN acquires n tokens (one per text in a batch) plus a single
+// concurrency slot. Batches larger than maxTokens are allowed to borrow:
+// the bucket may go negative, and the refill pays off the debt before
+// later requests proceed.
+func (r *RateLimiter) AcquireN(ctx context.Context, n int) error {
+	if n < 1 {
+		n = 1
+	}
+	cost := float64(n)
+	needed := cost
+	if r.maxTokens > 0 && needed > r.maxTokens {
+		needed = r.maxTokens
+	}
 	for {
 		r.mu.Lock()
 		r.refill()
 
-		if r.tokens >= 1 {
-			r.tokens--
+		if r.tokens >= needed {
+			r.tokens -= cost
 			r.mu.Unlock()
 			break
 		}
@@ -101,7 +117,7 @@ func (r *RateLimiter) Acquire(ctx context.Context) error {
 			r.waiters--
 			r.mu.Unlock()
 			// Try again to acquire token
-		case <-time.After(r.waitDuration()):
+		case <-time.After(r.waitDuration(needed)):
 			r.mu.Lock()
 			r.waiters--
 			r.mu.Unlock()
@@ -114,6 +130,17 @@ func (r *RateLimiter) Acquire(ctx context.Context) error {
 		case r.concurrencyCh <- struct{}{}:
 			// Got a concurrency slot.
 		case <-ctx.Done():
+			// Return the tokens: the request they paid for will not run.
+			r.mu.Lock()
+			r.tokens += cost
+			if r.tokens > r.maxTokens {
+				r.tokens = r.maxTokens
+			}
+			r.mu.Unlock()
+			select {
+			case r.waiterCh <- struct{}{}:
+			default:
+			}
 			return ctx.Err()
 		}
 	}
@@ -184,18 +211,21 @@ func (r *RateLimiter) refill() {
 	r.lastRefill = now
 }
 
-func (r *RateLimiter) waitDuration() time.Duration {
+func (r *RateLimiter) waitDuration(needed float64) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.refillRate <= 0 {
 		return time.Second
 	}
-	// Time to wait for one token
-	tokensNeeded := 1.0 - r.tokens
+	tokensNeeded := needed - r.tokens
 	if tokensNeeded <= 0 {
 		return 0
 	}
-	return time.Duration(tokensNeeded/r.refillRate*1000) * time.Millisecond
+	wait := time.Duration(tokensNeeded / r.refillRate * float64(time.Second))
+	if wait <= 0 {
+		return time.Nanosecond
+	}
+	return wait
 }
 
 // ErrRateLimitExceeded is returned when too many requests are waiting.
@@ -230,7 +260,7 @@ func (r *RateLimitedEmbedder) Embed(ctx context.Context, text string) ([]float32
 }
 
 func (r *RateLimitedEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	if err := r.rateLimiter.Acquire(ctx); err != nil {
+	if err := r.rateLimiter.AcquireN(ctx, len(texts)); err != nil {
 		return nil, err
 	}
 	defer r.rateLimiter.Release()

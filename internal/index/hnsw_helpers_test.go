@@ -2,8 +2,10 @@ package index
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coder/hnsw"
 )
@@ -64,55 +66,79 @@ func TestHNSWIndexOperations(t *testing.T) {
 	}
 }
 
-func TestDiskBackedHNSWFlushAndLoad(t *testing.T) {
-	t.Parallel()
+func TestBuildHNSW_WaitingBuildHonorsContext(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	mustCloseStore(t, store)
 
-	graphPath := filepath.Join(t.TempDir(), "graph.bin")
-	disk := NewDiskBackedHNSW(graphPath, 8, 16, 1)
-	if disk.flushThresh != 1 {
-		t.Fatalf("unexpected flush threshold: %d", disk.flushThresh)
+	store.hnsw.build <- struct{}{}
+	defer func() { <-store.hnsw.build }()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := store.BuildHNSW(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("BuildHNSW() error = %v, want context deadline exceeded", err)
 	}
-	if disk.Ready() {
-		t.Fatal("new disk-backed HNSW should not be ready")
-	}
+}
 
-	graph := newGraph(8, 16)
-	graph.Add(hnsw.MakeNode(1, []float32{1, 0}))
-	disk.SetGraph(graph)
-	if !disk.Ready() || disk.Len() != 1 || disk.ModCount() != 0 {
-		t.Fatalf("unexpected disk-backed HNSW initial state: ready=%v len=%d mods=%d", disk.Ready(), disk.Len(), disk.ModCount())
+func TestBuildHNSW_RetriesAfterGenerationChange(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "quant.db"))
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
 	}
+	mustCloseStore(t, store)
 
-	disk.Add(2, []float32{0.8, 0.2})
-	if disk.Len() != 2 || disk.ModCount() != 1 {
-		t.Fatalf("unexpected state after Add: len=%d mods=%d", disk.Len(), disk.ModCount())
+	ctx := context.Background()
+	if _, err := store.EnsureEmbeddingMetadata(ctx, EmbeddingMetadata{Model: "generation-retry", Dimensions: 2, Normalized: true}); err != nil {
+		t.Fatalf("EnsureEmbeddingMetadata() error: %v", err)
 	}
-	if got := disk.Search([]float32{1, 0}, 2); len(got) != 2 || got[0] != 1 {
-		t.Fatalf("unexpected disk-backed search results: %v", got)
+	docID, err := store.UpsertDocument(ctx, &Document{Path: "retry.txt", Hash: "h1", ModifiedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("UpsertDocument() error: %v", err)
 	}
-
-	disk.Add(3, []float32{0, 1})
-
-	loader := NewDiskBackedHNSW(graphPath, 8, 16, 1)
-	if err := loader.LoadFromDisk(context.Background()); err != nil {
-		t.Fatalf("LoadFromDisk returned error: %v", err)
-	}
-	if !loader.Ready() || loader.Len() != 3 || loader.ModCount() != 0 {
-		t.Fatalf("unexpected loaded graph state: ready=%v len=%d mods=%d", loader.Ready(), loader.Len(), loader.ModCount())
-	}
-
-	if got := loader.Search([]float32{0, 1}, 2); len(got) != 2 || got[0] != 3 {
-		t.Fatalf("unexpected loaded search results: %v", got)
+	if err := store.InsertChunk(ctx, &ChunkRecord{
+		DocumentID: docID, Content: "first", ChunkIndex: 0, Embedding: EncodeFloat32([]float32{1, 0}),
+	}); err != nil {
+		t.Fatalf("InsertChunk() error: %v", err)
 	}
 
-	loader.BatchDelete([]int{1})
-	loader.Delete(99)
-	if loader.Len() != 2 {
-		t.Fatalf("unexpected len after delete: %d", loader.Len())
+	// Hold publication after the snapshot has had time to complete, then make
+	// that snapshot stale without taking writeMu.
+	store.writeMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			store.writeMu.Unlock()
+		}
+	}()
+	errCh := make(chan error, 1)
+	go func() { errCh <- store.BuildHNSW(ctx) }()
+	deadline := time.Now().Add(time.Second)
+	for len(store.hnsw.build) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
+	if len(store.hnsw.build) == 0 {
+		store.writeMu.Unlock()
+		locked = false
+		t.Fatal("BuildHNSW did not start")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO chunks (document_id, content, chunk_index, embedding) VALUES (?, ?, ?, ?)`,
+		docID, "second", 1, EncodeFloat32([]float32{0, 1}),
+	); err != nil {
+		store.writeMu.Unlock()
+		locked = false
+		t.Fatalf("concurrent chunk insert error: %v", err)
+	}
+	store.writeMu.Unlock()
+	locked = false
 
-	empty := NewDiskBackedHNSW("", 8, 16, 0)
-	if err := empty.LoadFromDisk(context.Background()); err != nil {
-		t.Fatalf("LoadFromDisk with empty path should succeed, got %v", err)
+	if err := <-errCh; err != nil {
+		t.Fatalf("BuildHNSW() error after generation change: %v", err)
+	}
+	if !store.HNSWReady() || store.HNSWLen() != 2 {
+		t.Fatalf("rebuilt HNSW ready=%v len=%d, want ready with 2 nodes", store.HNSWReady(), store.HNSWLen())
 	}
 }

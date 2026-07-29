@@ -79,7 +79,9 @@ func buildFTSQueries(query string) (andQuery, orQuery, nearQuery string) {
 		phrase := strings.TrimSpace(remaining[start+1 : start+1+end])
 		if phrase != "" {
 			phrase = ftsSanitizePhrase(phrase)
-			phrases = append(phrases, `"`+phrase+`"`)
+			if phrase != "" {
+				phrases = append(phrases, `"`+phrase+`"`)
+			}
 		}
 		remaining = remaining[:start] + " " + remaining[start+1+end+1:]
 	}

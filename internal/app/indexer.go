@@ -61,6 +61,10 @@ type Indexer struct {
 	live    *LiveIndexQueue
 	retries *RetryScheduler
 
+	quarantineMu    sync.RWMutex
+	quarantineCache map[string]bool
+	quarantineGen   uint64
+
 	IndexState *runtimestate.IndexStateTracker
 	Resync     *ResyncCoordinator
 }
@@ -508,14 +512,26 @@ func (idx *Indexer) RunHNSWReoptimizer(ctx context.Context, store reoptimizeStor
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
+	notReadyLogged := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if !store.HNSWReady() {
+				// The graph can be lost at runtime (e.g. a transient error
+				// during indexing reset it). Rebuild instead of degrading
+				// to brute-force search for the rest of the process.
+				if !notReadyLogged {
+					logx.Info("hnsw graph not ready; attempting rebuild")
+					notReadyLogged = true
+				}
+				if err := store.BuildHNSW(ctx); err != nil {
+					logx.Warn("hnsw rebuild failed", "err", err)
+				}
 				continue
 			}
+			notReadyLogged = false
 			if !store.HNSWReoptimizationNeeded(threshold) {
 				continue
 			}
@@ -606,10 +622,22 @@ func (idx *Indexer) SyncDocumentRef(ctx context.Context, ref DocumentRef, modTim
 
 	currentDoc := doc
 	currentVersion := version
+	reruns := 0
 	for {
 		action, err := idx.syncDocumentOnceRef(ctx, ref, currentDoc, currentVersion)
 		nextVersion, rerun := idx.paths.Finish(ref.Key)
 		if !rerun {
+			return action, err
+		}
+		reruns++
+		if reruns >= maxConsecutiveSyncReruns {
+			// A continuously modified file (e.g. an appended log) would
+			// otherwise pin this worker in a rerun loop forever. Requeue
+			// through the live queue so other paths make progress.
+			idx.paths.Reset(ref.Key)
+			if idx.live != nil {
+				idx.enqueueLiveDocument(ctx, ref, time.Now())
+			}
 			return action, err
 		}
 		currentDoc = nil
@@ -654,11 +682,20 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 			return IndexNoop, fmt.Errorf("hashing file: %w", err)
 		}
 		if doc.Hash == precomputedHash {
+			idx.refreshDocumentStat(ctx, ref.Key, effectiveModTime, info.Size())
 			return IndexNoop, nil
 		}
 	}
 
-	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, precomputedHash, doc, version)
+	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, info.Size(), precomputedHash, doc, version)
+}
+
+// refreshDocumentStat keeps the stored filesystem metadata current when the
+// content hash already matches. Failures are non-fatal.
+func (idx *Indexer) refreshDocumentStat(ctx context.Context, key string, modTime time.Time, size int64) {
+	if err := idx.store.UpdateDocumentStat(ctx, key, modTime, size); err != nil {
+		logx.Warn("failed to persist document stat", "path", key, "err", err)
+	}
 }
 
 func (idx *Indexer) loadDocument(ctx context.Context, key string, doc *index.Document) (*index.Document, error) {
@@ -726,7 +763,7 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 	return idx.pipeline
 }
 
-func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
+func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, fileSize int64, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
 	hash := precomputedHash
 	if hash == "" {
 		var err error
@@ -736,6 +773,7 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		}
 	}
 	if doc != nil && doc.Hash == hash {
+		idx.refreshDocumentStat(ctx, ref.Key, modTime, fileSize)
 		return IndexNoop, nil
 	}
 
@@ -760,7 +798,13 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 	}
 
-	existingByContent, _ := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
+	existingByContent, err := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
+	if err != nil {
+		// A transient read failure here would silently drop the embedding
+		// cache for the whole document and re-embed every chunk, so fail
+		// the file and let the retry scheduler handle it.
+		return IndexNoop, fmt.Errorf("loading existing chunks: %w", err)
+	}
 
 	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(ctx, chunks, existingByContent)
 	if err != nil {
@@ -776,6 +820,7 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		Path:       ref.Key,
 		Hash:       hash,
 		ModifiedAt: modTime,
+		FileSize:   fileSize,
 		FileType:   fileType,
 		Language:   language,
 	}
@@ -846,12 +891,43 @@ func (idx *Indexer) isQuarantined(ctx context.Context, key string) bool {
 	if idx.quarantine == nil {
 		return false
 	}
-	quarantined, err := idx.quarantine.IsQuarantined(ctx, key)
-	if err != nil {
-		logx.Warn("failed to check quarantine status", "path", key, "err", err)
-		return false
+	for {
+		idx.quarantineMu.RLock()
+		cache := idx.quarantineCache
+		generation := idx.quarantineGen
+		idx.quarantineMu.RUnlock()
+		if cache != nil {
+			return cache[key]
+		}
+		// Retry if invalidation races this load so even the current lookup cannot
+		// act on a stale quarantine snapshot.
+		entries, err := idx.quarantine.ListQuarantined(ctx)
+		if err != nil {
+			logx.Warn("failed to check quarantine status", "path", key, "err", err)
+			return false
+		}
+		fresh := make(map[string]bool, len(entries))
+		for _, entry := range entries {
+			fresh[entry.Path] = true
+		}
+		idx.quarantineMu.Lock()
+		if idx.quarantineGen == generation {
+			idx.quarantineCache = fresh
+			idx.quarantineMu.Unlock()
+			return fresh[key]
+		}
+		idx.quarantineMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return false
+		}
 	}
-	return quarantined
+}
+
+func (idx *Indexer) invalidateQuarantineCache() {
+	idx.quarantineMu.Lock()
+	idx.quarantineCache = nil
+	idx.quarantineGen++
+	idx.quarantineMu.Unlock()
 }
 
 func DocumentKey(root, path string) (string, error) {
@@ -867,10 +943,6 @@ func DocumentKey(root, path string) (string, error) {
 		return "", fmt.Errorf("path %q is outside watch root %q", path, root)
 	}
 	return filepath.ToSlash(rel), nil
-}
-
-func NormalizeStoredDocumentPath(root, storedPath string) (string, error) {
-	return DocumentKey(root, filepath.Join(root, storedDocumentPath(storedPath)))
 }
 
 func SameModTime(a, b time.Time) bool {
@@ -954,6 +1026,7 @@ func (idx *Indexer) quarantineFailedRef(ctx context.Context, ref DocumentRef, fa
 		logx.Warn("adding path to quarantine failed", "path", ref.AbsPath, "err", err)
 		return
 	}
+	idx.invalidateQuarantineCache()
 
 	if delErr := idx.store.DeleteDocument(ctx, ref.Key); delErr != nil {
 		logx.Warn("removing quarantined document from index failed", "path", ref.AbsPath, "err", delErr)

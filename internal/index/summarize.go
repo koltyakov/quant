@@ -38,9 +38,7 @@ type SummaryResult struct {
 }
 
 func (s *ChunkSummarizer) Summarize(ctx context.Context, content string) (*SummaryResult, error) {
-	if len(content) > 2000 {
-		content = content[:2000]
-	}
+	content = truncateUTF8(content, 2000)
 
 	prompt := fmt.Sprintf(
 		"Summarize this text in 1-2 concise sentences and extract up to 3 key topics. "+
@@ -132,10 +130,7 @@ func (s *ChunkSummarizer) summarizeSubBatch(ctx context.Context, contents []stri
 
 	entries := make([]textEntry, len(contents))
 	for i, c := range contents {
-		if len(c) > 2000 {
-			c = c[:2000]
-		}
-		entries[i] = textEntry{Text: c}
+		entries[i] = textEntry{Text: truncateUTF8(c, 2000)}
 	}
 
 	entriesJSON, _ := json.Marshal(entries)

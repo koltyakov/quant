@@ -52,6 +52,9 @@ func (s *trackingDocumentStore) DeleteDocumentsByPrefix(_ context.Context, prefi
 }
 
 func (s *trackingDocumentStore) RenameDocumentPath(context.Context, string, string) error { return nil }
+func (s *trackingDocumentStore) UpdateDocumentStat(context.Context, string, time.Time, int64) error {
+	return nil
+}
 func (s *trackingDocumentStore) GetDocumentByPath(_ context.Context, _ string) (*index.Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,6 +200,56 @@ func newSyncTestIndexer(root string, store *trackingDocumentStore, ext extract.E
 		Embedder:   emb,
 		Quarantine: &stubQuarantineStore{},
 	})
+}
+
+func TestSyncDocumentOnce_DetectsSameSizeSameModTimeReplacement(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "a.txt")
+	writeFile(t, file, "first value")
+
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatalf("Stat() error: %v", err)
+	}
+	originalHash, err := scan.FileHash(file)
+	if err != nil {
+		t.Fatalf("FileHash() error: %v", err)
+	}
+
+	store := &trackingDocumentStore{
+		chunksByPath: map[string]index.ChunkRecord{},
+		docByPath: &index.Document{
+			Path:       "a.txt",
+			Hash:       originalHash,
+			ModifiedAt: info.ModTime(),
+			FileSize:   info.Size(),
+		},
+	}
+	ext := &stubExtractor{supportsPath: file, text: "other value"}
+	idx := newSyncTestIndexer(root, store, ext, &stubEmbedder{dimensions: 3})
+
+	writeFile(t, file, "other value")
+	if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("Chtimes() error: %v", err)
+	}
+	replacedInfo, err := os.Stat(file)
+	if err != nil {
+		t.Fatalf("Stat() after replacement error: %v", err)
+	}
+	if replacedInfo.Size() != info.Size() || !SameModTime(replacedInfo.ModTime(), info.ModTime()) {
+		t.Fatalf("replacement stat changed: before=%d/%v after=%d/%v", info.Size(), info.ModTime(), replacedInfo.Size(), replacedInfo.ModTime())
+	}
+
+	action, err := idx.SyncDocumentRef(context.Background(), DocumentRef{Key: "a.txt", AbsPath: file}, nil, nil)
+	if err != nil {
+		t.Fatalf("SyncDocumentRef() error: %v", err)
+	}
+	if action != IndexUpdated {
+		t.Fatalf("SyncDocumentRef() = %q, want %q", action, IndexUpdated)
+	}
+	if len(store.reindexed) != 1 || store.reindexed[0].Hash == originalHash {
+		t.Fatalf("replacement was not reindexed: %+v", store.reindexed)
+	}
 }
 
 func TestProcessLiveIndexRequestDirect_Indexes(t *testing.T) {

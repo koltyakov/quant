@@ -117,7 +117,7 @@ func newMainProcess(ctx context.Context, cfg *config.Config, version string, lk 
 	}
 
 	if lk != nil {
-		lk.UpdateProxyAddr(proc.proxyAddr)
+		lk.UpdateProxyAddr(proc.proxyAddr, proc.proxyServer.Token())
 	}
 
 	proc.watcher, err = newMainWatcher(cfg)

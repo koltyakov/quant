@@ -80,13 +80,11 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 		return vec, nil
 	}
 	if flight, ok := c.flights[cacheKey]; ok {
-		flight.waiters++
 		c.mu.Unlock()
 		return c.waitForFlight(ctx, flight)
 	}
 	flight := &embeddingFlight{
-		done:    make(chan struct{}),
-		waiters: 1,
+		done: make(chan struct{}),
 	}
 	c.flights[cacheKey] = flight
 	c.mu.Unlock()
@@ -113,7 +111,8 @@ func (c *CachingEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 func (c *CachingEmbedder) waitForFlight(ctx context.Context, flight *embeddingFlight) ([]float32, error) {
 	select {
 	case <-ctx.Done():
-		c.releaseFlight(flight)
+		// The flight still completes in the background so its result is
+		// cached for other callers; only this caller stops waiting.
 		return nil, ctx.Err()
 	case <-flight.done:
 		return flight.vec, flight.err
@@ -144,14 +143,6 @@ func (c *CachingEmbedder) runFlight(cacheKey, text string, flight *embeddingFlig
 		close(flight.done)
 	}
 	c.mu.Unlock()
-}
-
-func (c *CachingEmbedder) releaseFlight(flight *embeddingFlight) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if flight.waiters > 0 {
-		flight.waiters--
-	}
 }
 
 // EmbedBatch passes through to the underlying embedder (no caching).
@@ -224,10 +215,9 @@ func (c *embeddingLRU) Put(key string, value []float32) {
 // ---------------------------------------------------------------------------
 
 type embeddingFlight struct {
-	done    chan struct{}
-	waiters int
-	vec     []float32
-	err     error
+	done chan struct{}
+	vec  []float32
+	err  error
 }
 
 // ---------------------------------------------------------------------------

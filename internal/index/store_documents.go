@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
-	"unicode/utf8"
+	"time"
 
 	"github.com/coder/hnsw"
 	"github.com/koltyakov/quant/internal/logx"
@@ -28,19 +28,20 @@ func (s *Store) UpsertDocument(ctx context.Context, doc *Document) (int64, error
 	}
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_type, language, title, tags, collection)
-		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+		`INSERT INTO documents (path, hash, modified_at, indexed_at, file_size, file_type, language, title, tags, collection)
+		 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path) DO UPDATE SET
 			hash = excluded.hash,
 			modified_at = excluded.modified_at,
 			indexed_at = CURRENT_TIMESTAMP,
+			file_size = excluded.file_size,
 			file_type = excluded.file_type,
 			language = excluded.language,
 			title = excluded.title,
 			tags = excluded.tags,
 			collection = excluded.collection
 		 RETURNING id`,
-		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
+		doc.Path, doc.Hash, doc.ModifiedAt, doc.FileSize, doc.FileType, doc.Language, doc.Title, tagsJSON, doc.Collection,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upserting document: %w", err)
@@ -225,7 +226,7 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 		if err := rows.Scan(&cr.ID, &cr.ChunkIndex, &cr.Content, &cr.Embedding, &cr.ParentID, &cr.Depth, &cr.SectionTitle, &cr.Summary); err != nil {
 			return nil, err
 		}
-		key := ChunkDiffKey(cr.Content)
+		key := ChunkDiffKey(EmbedInputText(cr.SectionTitle, cr.Content))
 		result[key] = cr
 	}
 	return result, rows.Err()
@@ -234,6 +235,22 @@ func (s *Store) GetDocumentChunksByPath(ctx context.Context, path string) (map[s
 func ChunkDiffKey(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h[:])
+}
+
+// EmbeddingInputVersion identifies the serialization performed by
+// EmbedInputText. Increment it whenever that model input changes.
+const EmbeddingInputVersion = 1
+
+// EmbedInputText returns the exact text sent to the embedding model for a
+// chunk: its heading context joined to the content, unless the content
+// already carries that context (the chunker prepends it in that case).
+// Diffing and dedup keying must use this text so an embedding is only reused
+// for the identical model input.
+func EmbedInputText(heading, content string) string {
+	if heading == "" || strings.HasPrefix(content, heading+"\n\n") {
+		return content
+	}
+	return heading + "\n\n" + content
 }
 
 func (s *Store) DeleteChunksByDocument(ctx context.Context, docID int64) error {
@@ -255,36 +272,30 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	hnswDeleteComplete := !hnswReady
 	var hnswDeleteIDs []int
 	var docID int64
+	doc, err := s.GetDocumentByPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	if doc == nil {
+		return nil
+	}
+	docID = doc.ID
 	if hnswReady {
-		doc, err := s.GetDocumentByPath(ctx, path)
-		if err == nil && doc != nil {
-			docID = doc.ID
-			rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, doc.ID)
-			if err == nil {
-				for rows.Next() {
-					var id int
-					if rows.Scan(&id) == nil {
-						hnswDeleteIDs = append(hnswDeleteIDs, id)
-					}
-				}
-				_ = rows.Close()
-				if rows.Err() != nil {
-					hnswDeleteIDs = nil
-				} else {
-					hnswDeleteComplete = true
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, docID)
+		if err == nil {
+			for rows.Next() {
+				var id int
+				if rows.Scan(&id) == nil {
+					hnswDeleteIDs = append(hnswDeleteIDs, id)
 				}
 			}
+			_ = rows.Close()
+			if rows.Err() != nil {
+				hnswDeleteIDs = nil
+			} else {
+				hnswDeleteComplete = true
+			}
 		}
-	}
-	if docID == 0 {
-		doc, err := s.GetDocumentByPath(ctx, path)
-		if err != nil {
-			return err
-		}
-		if doc == nil {
-			return nil
-		}
-		docID = doc.ID
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -437,13 +448,29 @@ func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string)
 	return err
 }
 
+// UpdateDocumentStat refreshes the stored modification time and size for a
+// document whose content hash already matches the file on disk, so future
+// syncs can skip re-hashing it.
+func (s *Store) UpdateDocumentStat(ctx context.Context, path string, modTime time.Time, size int64) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE documents SET modified_at = ?, file_size = ? WHERE path = ?`,
+		modTime, size, path,
+	)
+	if err != nil {
+		return fmt.Errorf("updating document stat: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetDocumentByPath(ctx context.Context, path string) (*Document, error) {
 	doc := &Document{}
 	var tagsJSON string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, path, hash, modified_at, indexed_at, file_type, language, title, tags, collection FROM documents WHERE path = ?`,
+		`SELECT id, path, hash, modified_at, indexed_at, file_size, file_type, language, title, tags, collection FROM documents WHERE path = ?`,
 		path,
-	).Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection)
+	).Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileSize, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -465,7 +492,7 @@ func (s *Store) ListDocumentsLimit(ctx context.Context, limit int) ([]Document, 
 }
 
 func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error) {
-	query := `SELECT id, path, hash, modified_at, indexed_at, file_type, language, title, tags, collection FROM documents ORDER BY path`
+	query := `SELECT id, path, hash, modified_at, indexed_at, file_size, file_type, language, title, tags, collection FROM documents ORDER BY path`
 	args := []any{}
 	if limit > 0 {
 		query += ` LIMIT ?`
@@ -482,7 +509,7 @@ func (s *Store) listDocuments(ctx context.Context, limit int) ([]Document, error
 	for rows.Next() {
 		var doc Document
 		var tagsJSON string
-		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection); err != nil {
+		if err := rows.Scan(&doc.ID, &doc.Path, &doc.Hash, &doc.ModifiedAt, &doc.IndexedAt, &doc.FileSize, &doc.FileType, &doc.Language, &doc.Title, &tagsJSON, &doc.Collection); err != nil {
 			return nil, err
 		}
 		if tagsJSON != "" && tagsJSON != "{}" {
@@ -522,11 +549,7 @@ func (s *Store) EnrichWithParentContext(ctx context.Context, results []SearchRes
 		if err == nil && parent != nil {
 			content := parent.ChunkContent
 			if len(content) > 500 {
-				end := 500
-				for end > 0 && !utf8.RuneStart(content[end]) {
-					end--
-				}
-				content = content[:end] + "..."
+				content = truncateUTF8(content, 500) + "..."
 			}
 			for _, resultIdx := range resultIndexes {
 				results[resultIdx].ParentContext = content

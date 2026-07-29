@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,13 +44,17 @@ type Watcher struct {
 	events  chan Event
 	done    chan struct{}
 
-	mu            sync.Mutex
-	timers        map[string]*time.Timer
-	pendingDirs   map[string]bool
-	resyncTimer   *time.Timer
-	watchedDirs   map[string]struct{}
-	resyncPending bool
-	closed        bool
+	mu              sync.Mutex
+	timers          map[string]*time.Timer
+	pendingDirs     map[string]bool
+	resyncTimer     *time.Timer
+	watchRetryTimer *time.Timer
+	watchedDirs     map[string]struct{}
+	retryDirs       map[string]struct{}
+	watchRetry      chan struct{}
+	addWatch        func(string) error
+	resyncPending   bool
+	closed          bool
 }
 
 const (
@@ -78,9 +83,10 @@ func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 		done:        make(chan struct{}),
 		timers:      make(map[string]*time.Timer),
 		pendingDirs: make(map[string]bool),
-		watchedDirs: map[string]struct{}{
-			dir: {},
-		},
+		watchedDirs: make(map[string]struct{}),
+		retryDirs:   make(map[string]struct{}),
+		watchRetry:  make(chan struct{}, 1),
+		addWatch:    fsw.Add,
 	}
 
 	if err := w.addRecursive(dir); err != nil {
@@ -115,15 +121,28 @@ func (w *Watcher) Close() error {
 		w.resyncTimer.Stop()
 		w.resyncTimer = nil
 	}
+	if w.watchRetryTimer != nil {
+		w.watchRetryTimer.Stop()
+		w.watchRetryTimer = nil
+	}
 	close(w.done)
 	w.mu.Unlock()
 	return w.fsw.Close()
 }
 
+// errPartialWatch reports that one or more directories could not be watched
+// (e.g. hitting the kqueue fd limit on macOS).
+var errPartialWatch = errors.New("some directories could not be watched")
+
 func (w *Watcher) addRecursive(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	watchFailed := false
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			logx.Warn("watcher could not descend into path", "path", path, "err", err)
+			if path == dir || d != nil && d.IsDir() {
+				watchFailed = true
+				w.addRetryDir(path)
+			}
 			return nil
 		}
 		if !d.IsDir() {
@@ -138,12 +157,70 @@ func (w *Watcher) addRecursive(dir string) error {
 			}
 			w.matcher.Load(path)
 		}
-		if err := w.fsw.Add(path); err != nil {
-			return err
+		if err := w.watchPath(path); err != nil {
+			// Skip only the unwatched subtree instead of failing the whole walk.
+			logx.Warn("watcher could not watch directory", "path", path, "err", err)
+			watchFailed = true
+			w.addRetryDir(path)
+			return filepath.SkipDir
 		}
 		w.mu.Lock()
+		if w.watchedDirs == nil {
+			w.watchedDirs = make(map[string]struct{})
+		}
 		w.watchedDirs[path] = struct{}{}
+		delete(w.retryDirs, path)
 		w.mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if watchFailed {
+		return errPartialWatch
+	}
+	return nil
+}
+
+func (w *Watcher) addRetryDir(path string) {
+	w.mu.Lock()
+	if w.retryDirs == nil {
+		w.retryDirs = make(map[string]struct{})
+	}
+	w.retryDirs[path] = struct{}{}
+	w.mu.Unlock()
+}
+
+func (w *Watcher) watchPath(path string) error {
+	if w.addWatch != nil {
+		return w.addWatch(path)
+	}
+	return w.fsw.Add(path)
+}
+
+// emitSubtreeCreates walks a newly created directory and debounces a Create
+// event for every file in it, closing the gap between directory creation and
+// its fsnotify watch becoming active.
+func (w *Watcher) emitSubtreeCreates(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			if path != w.rootDir && path != dir {
+				if scan.IsHiddenName(d.Name()) || w.matcher.Matches(path) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if w.matcher.Matches(path) {
+			return nil
+		}
+		w.debounce(path, Create, false)
 		return nil
 	})
 }
@@ -163,6 +240,8 @@ func (w *Watcher) loop() {
 				return
 			}
 			w.handleBackendError(err)
+		case <-w.watchRetry:
+			w.retryUnwatched()
 		}
 	}
 }
@@ -198,11 +277,23 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 			w.matcher.Load(path)
 			if err := w.addRecursive(path); err != nil {
-				logx.Warn("watcher failed to add recursive directory", "path", path, "err", err)
+				if !errors.Is(err, errPartialWatch) {
+					logx.Warn("watcher failed to add recursive directory", "path", path, "err", err)
+					w.signalResync()
+					return
+				}
+				// Some subdirectories could not be watched; a resync will
+				// pick up anything missed while watch registration is retried.
+				w.scheduleWatchRetry()
 				w.signalResync()
-				return
 			}
-			w.signalResync()
+			// Files created between the mkdir and the watch being added
+			// generate no fsnotify events, so emit synthetic Create events
+			// for the new subtree instead of rescanning the entire tree.
+			if err := w.emitSubtreeCreates(path); err != nil {
+				logx.Warn("watcher failed to scan new directory", "path", path, "err", err)
+				w.signalResync()
+			}
 			return
 		}
 		w.debounce(path, Create, false)
@@ -231,6 +322,66 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 		w.debounce(path, Remove, isDir)
 	}
+}
+
+func (w *Watcher) scheduleWatchRetry() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || len(w.retryDirs) == 0 || w.watchRetryTimer != nil {
+		return
+	}
+	w.watchRetryTimer = time.AfterFunc(defaultResyncRetryDelay, func() {
+		w.mu.Lock()
+		w.watchRetryTimer = nil
+		closed := w.closed
+		w.mu.Unlock()
+		if closed {
+			return
+		}
+		select {
+		case <-w.done:
+		case w.watchRetry <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func (w *Watcher) retryUnwatched() {
+	w.mu.Lock()
+	dirs := make([]string, 0, len(w.retryDirs))
+	for dir := range w.retryDirs {
+		dirs = append(dirs, dir)
+	}
+	w.mu.Unlock()
+
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil && os.IsNotExist(err) || err == nil && !info.IsDir() {
+			w.mu.Lock()
+			delete(w.retryDirs, dir)
+			w.mu.Unlock()
+			continue
+		}
+		if err := w.addRecursive(dir); err != nil && !errors.Is(err, errPartialWatch) {
+			if os.IsNotExist(err) {
+				w.mu.Lock()
+				delete(w.retryDirs, dir)
+				w.mu.Unlock()
+			} else {
+				logx.Warn("watcher retry failed", "path", dir, "err", err)
+			}
+		}
+	}
+
+	w.mu.Lock()
+	pending := len(w.retryDirs) > 0
+	w.mu.Unlock()
+	if pending {
+		w.scheduleWatchRetry()
+		return
+	}
+	// Reconcile changes that occurred while the subtree was unwatched.
+	w.signalResync()
 }
 
 func (w *Watcher) handleGitIgnoreEvent(path string) {
@@ -294,8 +445,17 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 	isDir = isDir || w.pendingDirs[path]
 	w.pendingDirs[path] = isDir
 
-	w.timers[path] = time.AfterFunc(defaultDebounceDelay, func() {
+	var timer *time.Timer
+	timer = time.AfterFunc(defaultDebounceDelay, func() {
 		w.mu.Lock()
+		current, ok := w.timers[path]
+		if !ok || current != timer {
+			// Superseded by a newer timer for the same path while this
+			// callback was waiting on the mutex; the newer timer owns the
+			// map entries and will emit the event.
+			w.mu.Unlock()
+			return
+		}
 		delete(w.timers, path)
 		isDir := w.pendingDirs[path]
 		delete(w.pendingDirs, path)
@@ -314,6 +474,7 @@ func (w *Watcher) debounce(path string, op Op, isDir bool) {
 			w.signalResync()
 		}
 	})
+	w.timers[path] = timer
 }
 
 func (w *Watcher) signalResync() {

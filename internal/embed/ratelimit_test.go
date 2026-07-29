@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -186,16 +187,77 @@ func TestRateLimiterWaitDurationAndRefill(t *testing.T) {
 	rl.tokens = 0.25
 	rl.mu.Unlock()
 
-	wait := rl.waitDuration()
+	wait := rl.waitDuration(1)
 	if wait < 350*time.Millisecond || wait > 380*time.Millisecond {
 		t.Fatalf("waitDuration() = %s, want about 375ms", wait)
 	}
 
 	rl.mu.Lock()
+	rl.tokens = 1
+	rl.mu.Unlock()
+	if got := rl.waitDuration(rl.maxTokens); got != time.Second {
+		t.Fatalf("waitDuration() for capped oversized batch = %s, want %s", got, time.Second)
+	}
+
+	rl.mu.Lock()
 	rl.refillRate = 0
 	rl.mu.Unlock()
-	if got := rl.waitDuration(); got != time.Second {
+	if got := rl.waitDuration(1); got != time.Second {
 		t.Fatalf("waitDuration() with zero refill = %s, want %s", got, time.Second)
+	}
+}
+
+func TestRateLimiterCanceledConcurrencyWaitRefundWakesTokenWaiter(t *testing.T) {
+	rl := NewRateLimiter(RateLimiterConfig{
+		MaxTokens:     1,
+		RefillRate:    0,
+		MaxWaiters:    1,
+		MaxConcurrent: 1,
+	})
+	rl.concurrencyCh <- struct{}{}
+	rl.tokens = 0
+
+	acquired := make(chan error, 1)
+	go func() {
+		err := rl.Acquire(context.Background())
+		acquired <- err
+		if err == nil {
+			rl.Release()
+		}
+	}()
+	waitForRateLimiterStats(t, rl, func(stats RateLimiterStats) bool {
+		return stats.CurrentWaiters == 1
+	})
+
+	rl.mu.Lock()
+	rl.tokens = 1
+	rl.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rl.Acquire(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Acquire() error = %v, want %v", err, context.Canceled)
+	}
+
+	waitForRateLimiterStats(t, rl, func(stats RateLimiterStats) bool {
+		return stats.CurrentWaiters == 0 && stats.AvailableTokens == 0
+	})
+	<-rl.concurrencyCh
+	if err := <-acquired; err != nil {
+		t.Fatalf("waiting Acquire() error = %v", err)
+	}
+}
+
+func waitForRateLimiterStats(t *testing.T, rl *RateLimiter, match func(RateLimiterStats) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if stats := rl.Stats(); match(stats) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for rate limiter state")
+		}
+		runtime.Gosched()
 	}
 }
 
@@ -268,8 +330,9 @@ func TestRateLimitedEmbedderForwardsCallsAndReleasesSlotsOnError(t *testing.T) {
 	if stats.Concurrency != 0 {
 		t.Fatalf("Concurrency after forwarded calls = %d, want 0", stats.Concurrency)
 	}
-	if stats.AvailableTokens != 1 {
-		t.Fatalf("AvailableTokens after two calls = %v, want 1", stats.AvailableTokens)
+	if stats.AvailableTokens != 0 {
+		// One token for Embed plus two for the batch of two texts.
+		t.Fatalf("AvailableTokens after two calls = %v, want 0", stats.AvailableTokens)
 	}
 }
 
