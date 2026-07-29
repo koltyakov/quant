@@ -4,7 +4,7 @@
   <img src="./assets/logo.png" alt="quant logo" width="220" />
 </p>
 
-A lightweight, developer-focused RAG index exposed as an MCP server. Point it at a folder and it watches the filesystem, extracts supported files, chunks them with structure awareness, embeds them via Ollama, stores them in SQLite, and serves semantic search over MCP.
+A lightweight, developer-focused RAG index exposed as an MCP server. Point it at a folder and it watches the filesystem, extracts supported files, chunks them with structure awareness, embeds them through Ollama or an OpenAI-compatible API, stores them in SQLite, and serves semantic search over MCP.
 
 The index is a projection of the filesystem. Files added, changed, or removed on disk are reflected in the index automatically.
 
@@ -21,7 +21,7 @@ Zero CGO. Pure Go.
   `quant` handles Ollama setup automatically on first run:
   - If Ollama is installed but not running, `quant` starts it in the background (`ollama serve`)
   - If the configured embedding model isn't pulled yet, `quant` pulls it automatically (`ollama pull <model>`)
-  - If the embedding backend is still unavailable after recovery attempts, `quant` starts in keyword-only mode so the MCP server remains usable
+  - If local Ollama remains unavailable or its model cannot be pulled, `quant` starts in keyword-only mode so the MCP server remains usable. Other provider, authentication, URL, and protocol errors must be corrected before startup.
 
   To set up manually instead:
   ```
@@ -65,12 +65,14 @@ To uninstall the release binary and remove the install directory from your user 
 irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/uninstall.ps1 | iex
 ```
 
-### Alternative: Go install
+### Alternative: build from a clone
 
-If you already have Go installed, you can also install from source:
+The module uses a repository-local dependency shim, so `go install ...@latest` is not supported. If you already have Go installed, build from a clone instead:
 
 ```bash
-go install github.com/koltyakov/quant/cmd/quant@latest
+git clone https://github.com/koltyakov/quant.git
+cd quant
+make install
 ```
 
 After installing:
@@ -83,7 +85,7 @@ quant version
 
 You only need Go if you are building `quant` yourself instead of using a release binary.
 
-- Go 1.26.0+
+- Go 1.26.2+
 
 ```
 make install
@@ -140,19 +142,19 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 
 | Tool | Description |
 |---|---|
-| `search` | Semantic search over indexed chunks. Params: `query` (required), `limit`, `threshold`, `path`, `file_type`, `language`, `collection` |
-| `list_sources` | List indexed documents. Params: `limit` |
+| `search` | Semantic search over indexed chunks. Params: `query` (required, max 4,000 characters), `limit` (default 5, max 50), `threshold` (default 0), `path`, `file_type`, `language`, `collection` |
+| `list_sources` | List indexed documents. Params: `limit` (default 100, max 500) |
 | `index_status` | Stats: total docs, chunks, DB size, watch dir, model, embedding status, lifecycle state |
-| `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` |
-| `get_context` | Retrieve a chunk with ordered neighbors from the same document. Params: `chunk_id` (required), `before`, `after` |
-| `drill_down` | Explore a topic by finding diverse chunks related to a seed chunk from a previous search. Params: `chunk_id` (required), `limit` |
-| `summarize_matches` | Return a non-exhaustive overview of top matching chunks and source documents. Params: `query` (required), `limit` |
-| `list_collections` | List all named collections with their document and chunk counts |
+| `find_similar` | Find chunks similar to a given chunk by its ID. Params: `chunk_id` (required), `limit` (default 5, max 50) |
+| `get_context` | Retrieve a chunk with ordered neighbors from the same document. Params: `chunk_id` (required), `before`, `after` (each default 1, max 5) |
+| `drill_down` | Explore a topic by finding diverse chunks related to a seed chunk from a previous search. Params: `chunk_id` (required), `limit` (default 10, max 50) |
+| `summarize_matches` | Return a non-exhaustive overview of top matching chunks and source documents. Params: `query` (required, max 4,000 characters), `limit` (default 20, max 50) |
+| `list_collections` | List named collections in indexes populated with collection metadata |
 | `delete_collection` | Delete all documents and chunks in a named collection. Params: `collection` (required) |
 
-**`search`** embeds the query with the configured embedding model, uses SQLite FTS5 to prefilter candidate chunks, then reranks those candidates with normalized vector similarity. All results use Reciprocal Rank Fusion (RRF) scoring on a common 0-1 scale. If the embedding backend is unavailable, search falls back to keyword-only results automatically. The `embedding_status` field in the response indicates whether results are hybrid or keyword-only.
+**`search`** retrieves keyword candidates through SQLite FTS5 and semantic candidates through HNSW (or a bounded exact fallback), then combines their rankings with Reciprocal Rank Fusion (RRF) on a normalized 0-1 scale. If a query-time embedding call fails, search falls back to keyword-only results automatically. The `embedding_status` field in the response indicates whether results are hybrid or keyword-only.
 
-**`find_similar`** takes a chunk ID from a previous search result and returns the nearest neighbors from the HNSW index. Useful for discovering related content without formulating a new query.
+**`find_similar`** takes a chunk ID from a previous search result and returns nearest neighbors from HNSW when available, otherwise from a bounded exact scan. Useful for discovering related content without formulating a new query.
 
 **`get_context`** expands a search hit in source order, returning the target chunk plus up to five preceding and following chunks from the same document. Use it when the matching chunk needs surrounding definitions, setup, or continuation text.
 
@@ -161,6 +163,8 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 **`summarize_matches`** runs a bounded search and returns a high-level, non-exhaustive overview of the top matching documents and excerpts. The response reports the effective limit, match count, and embedding mode so agents can distinguish a quick map from complete corpus coverage.
 
 All MCP tools return structured payloads for clients that support `structuredContent`, while still including a readable text fallback. Tool concurrency is bounded by `--max-concurrent-tools` (auto-tuned by CPU by default).
+
+Filesystem indexing does not currently assign collection names. Collection filtering and management apply only to indexes populated with collection metadata through another integration.
 
 ## Supported File Types
 
@@ -185,19 +189,19 @@ Unsupported or binary files are skipped.
 flowchart TD
   WD([Watched directory]) --> INDEX[Initial scan and watch updates]
   INDEX --> PROC[Extract, chunk, and embed]
-  PROC --> OLLAMA[/Ollama API/]
+  PROC --> EMBED[/Embedding API/]
   PROC --> DB[(SQLite index)]
 
   CLIENT([MCP client]) --> MCP[MCP server]
   MCP --> QUERY[Embed query]
-  QUERY --> OLLAMA
+  QUERY --> EMBED
   MCP --> SEARCH[Hybrid search]
   DB --> SEARCH
   SEARCH --> MCP
 ```
 
 - **No CGO** - uses `modernc.org/sqlite` (pure Go SQLite)
-- **Hybrid retrieval** - SQLite FTS5 prefilter + normalized vector rerank via RRF
+- **Hybrid retrieval** - independent SQLite FTS5 and HNSW candidate retrieval fused with RRF
 - **Adaptive query weighting** - identifier-like queries (camelCase, short tokens) upweight keyword signals; longer natural-language queries upweight vector signals. Weights are selected automatically per query.
 - **HNSW approximate nearest neighbors** - in-memory HNSW graph (M=16, EfSearch=100) built from stored embeddings after initial sync; incremental add/delete during live indexing
 - **Int8 quantized embeddings** - embeddings are L2-normalized and quantized to 1 byte/dimension (~4x storage savings, <1% recall loss)

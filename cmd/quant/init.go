@@ -408,7 +408,7 @@ func renderAgentsMD(opts initOptions) string {
 
 ## Data sources
 
-Use the `+"`quant`"+` MCP tool to find information in the indexed documents.
+Use the `+"`quant`"+` MCP tools to find information in the indexed documents.
 Do not read files in the `+"`%s/`"+` folder directly - always search via MCP.
 
 ## How to answer
@@ -429,7 +429,7 @@ description: Use when researching source documents indexed by the quant MCP serv
 
 # Quant Research
 
-Use the ` + "`quant`" + ` MCP tool to search the indexed research documents before answering.
+Use the ` + "`quant`" + ` MCP tools to search the indexed research documents before answering.
 Do not read source files directly from the data folder.
 Ground every claim in retrieved source material and cite the specific documents used.
 If MCP search returns nothing relevant, say so instead of guessing.

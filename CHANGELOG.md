@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.15.3 (2026-07-29)
+
+### Security
+
+- **Authenticated internal proxy** - Main/worker proxy routes now require a per-process random bearer token shared through database lock metadata, reject browser-origin requests, and cap requests at 1 MiB.
+- **Restricted lock metadata** - Unix lock files use `0600` permissions, including existing files tightened before proxy credentials are written.
+- **Safer provider detection and extraction** - OpenAI LLM auto-detection accepts only OpenAI domains, extractor panics become indexing errors, and HTML reads remain bounded.
+
+### Improvements
+
+- **CLI-first configuration precedence** - Explicit command-line flags now override environment variables, which override YAML and built-in defaults.
+- **More precise backend retries** - Embedding and LLM clients retry rate limits, server failures, and transient transport errors while returning permanent client errors immediately for indexer handling.
+- **Exact embedding reuse and migration** - Deduplication keys now include the complete heading-plus-content model input. The input format is versioned so older indexes receive a one-time rebuild when embeddings are available.
+- **More available and accurate HNSW search** - Graph builds use generation-checked snapshots, unavailable graphs are rebuilt by periodic maintenance, and ready HNSW searches no longer discard nearest chunks through document prefiltering.
+- **More reliable live indexing** - Populated directories moved or created in scope emit file events, temporarily unwatched subtrees are retried and resynced, and continuously changing files are requeued instead of monopolizing a worker.
+- **Reliable startup readiness** - Resyncs racing initial startup no longer bypass completion, readiness publication, backup cleanup, or initial HNSW loading.
+- **Consistent SQLite connections** - Required busy timeout, foreign-key, cache, memory-map, and related pragmas are applied to every pooled connection.
+- **UTF-8-safe LLM inputs** - Reranker and summarizer truncation stops at valid UTF-8 boundaries.
+
+## v0.15.2 (2026-07-26)
+
+### Improvements
+
+- **`find_similar` fallback without HNSW** - Similarity lookup uses a bounded exact vector scan while HNSW is unavailable and respects `--max-vector-candidates`.
+- **Scalable filtered vector search** - Candidate queries are batched below SQLite's variable limit, individual HNSW probes are bounded, and exact filtered fallback fills missing results when allowed.
+- **Faster embedding reuse** - Content-deduplication reads and writes are batched per document; cache failures fall back to embedding affected chunks instead of failing indexing.
+- **Lower indexing overhead** - Embedding metadata, quarantine snapshots, chunk splitting, word counting, and file hashing avoid repeated work and allocations.
+- **Portable stored paths** - New document keys consistently use forward slashes across platforms while legacy Windows-form paths remain resolvable.
+- **More reliable Windows watching and locking** - Lock regions no longer overlap metadata writes, and debounced directory removals correctly remove descendants.
+- **Dependency updates** - Upgraded `mcp-go` to v0.57.0 and SQLite to v1.54.0.
+
+## v0.15.1 (2026-07-17)
+
+### Security
+
+- **Protection for unrelated databases** - Existing database paths are identified as Quant indexes before recovery. Unknown files and non-Quant SQLite databases are rejected instead of replaced.
+- **Database-scoped process locking** - Canonical database paths, including symlink aliases, share one lock while separate databases can run independently.
+- **Configuration compatibility checks** - Workers refuse to attach to a process serving the same database with incompatible index-affecting configuration.
+
+### Improvements
+
+- **Generation-safe HNSW persistence** - Every chunk mutation advances a transactional generation, and persisted graphs load only when their generation matches SQLite.
+- **Safer incremental graph updates** - Runtime HNSW changes occur only after successful commits and invalidate the graph when a complete update cannot be guaranteed.
+- **Reliable empty-graph recovery** - HNSW accepts new nodes after all previous nodes have been deleted.
+- **Less expensive deletion** - FTS triggers preserve search consistency without rebuilding the full-text index after each document, prefix, collection, or reset deletion.
+
 ## v0.15.0 (2026-07-12)
 
 ### Features
@@ -23,6 +69,23 @@
 ### Security
 
 - **Hardened local HTTP transports** - Streamable HTTP and legacy SSE reject browser-origin requests before tool dispatch, cap request bodies at 1 MiB, and use `mcp-go` v0.56.0 for default localhost DNS-rebinding protection and safer SSE session shutdown.
+
+## v0.14.1 (2026-07-10)
+
+### Security
+
+- **Loopback-only HTTP defaults** - SSE and streamable HTTP now listen on `127.0.0.1:8080` by default; documentation warns that deliberate network exposure requires external authentication.
+- **Safer filesystem scans** - Initial scans skip symbolic-link entries.
+- **Stronger process locking** - Lock ownership relies on operating-system locks rather than replacing lock files based on stale metadata, with corrected Windows behavior.
+
+### Improvements
+
+- **Working filesystem metadata filters** - Indexed documents persist canonical file type and language metadata for `search` filters.
+- **Complete keyword-only ingestion** - Chunks retain content and structural metadata when no embedding backend is available.
+- **Faster candidate processing** - Search hydrates full content only for final results and improves document preselection and vector scoring.
+- **Correct shared parent context** - Results sharing a parent all receive UTF-8-safe parent context.
+- **Safer database recovery** - Automatic backup and recreation is limited to recognized corruption or schema failures and rolls back partial file moves.
+- **Correct embedding-cache invalidation** - Embedding metadata changes clear content-deduplication entries from the previous model configuration.
 
 ## v0.14.0 (2026-07-02)
 

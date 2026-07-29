@@ -111,7 +111,7 @@ func TestInitProjectCreatesClientFiles(t *testing.T) {
 			}
 
 			agents := readFile(t, filepath.Join(dir, "AGENTS.md"))
-			if !strings.Contains(agents, "Use the `quant` MCP tool") || !strings.Contains(agents, "Do not read files in the `data/` folder directly") {
+			if !strings.Contains(agents, "Use the `quant` MCP tools") || !strings.Contains(agents, "Do not read files in the `data/` folder directly") {
 				t.Fatalf("unexpected AGENTS.md:\n%s", agents)
 			}
 			if tt.extraPath != "" {

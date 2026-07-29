@@ -21,13 +21,15 @@ quant init opencode --dir ./my-research-project
 
 Supported clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `gemini`.
 
-`quant init` writes relative MCP commands such as `quant mcp --dir ./data` so the project folder stays portable. Existing files are skipped by default; use `--force` to replace generated files. Use `--no-agents` to skip `AGENTS.md`, and `--skill` to add a project skill for clients that support it (`codex` and `claude`). For clients with narrow MCP permission controls, generated config also allows all `quant` MCP tools without prompting.
+`quant init` writes relative MCP commands such as `quant mcp --dir ./data` so the project folder stays portable. Existing files are skipped by default; use `--force` to replace generated files. Use `--no-agents` to skip `AGENTS.md`, and `--skill` to add a project skill for clients that support it (`codex` and `claude`). Auto-update is enabled in generated MCP configs by default; pass `--autoupdate=false` to disable it. For clients with narrow MCP permission controls, generated config also allows all `quant` MCP tools without prompting.
+
+When `--dir` is explicitly supplied, initialization also creates or updates `.gitignore` entries for the data directory and index files. Running `quant init <client>` without an explicit `--dir` does not modify `.gitignore`.
 
 | Client | MCP config | Instruction files |
 |---|---|---|
 | OpenCode | `opencode.json` | `AGENTS.md` referenced by `instructions` |
 | Codex | `.codex/config.toml` | `AGENTS.md`; optional `.agents/skills/quant-research/SKILL.md` |
-| Claude Code | `.mcp.json` | `AGENTS.md` plus `CLAUDE.md` shim; optional `.claude/skills/quant-research/SKILL.md` |
+| Claude Code | `.mcp.json` | `AGENTS.md` plus `CLAUDE.md` shim; `.claude/settings.json` tool permission; optional `.claude/skills/quant-research/SKILL.md` |
 | Cursor | `.cursor/mcp.json` | `AGENTS.md` |
 | GitHub Copilot (VS Code) | `.vscode/mcp.json` | `AGENTS.md` |
 | Gemini CLI | `.gemini/settings.json` | `AGENTS.md` via `contextFileName` |
@@ -43,6 +45,8 @@ quant launch claude -- --permission-mode plan
 ```
 
 By default, `quant launch` indexes `./data`, matching `quant init` workspaces. Pass `--dir .` or another path to index a different directory. Extra arguments after `--` are forwarded to the agent unchanged.
+
+Session launch enables `QUANT_AUTOUPDATE=true` for the injected MCP server.
 
 Supported launch clients are `opencode`, `codex`, `claude`, `cursor`, `copilot`, and `gemini`. The `copilot` launcher targets the GitHub Copilot CLI; use `quant init copilot` for VS Code workspace configuration.
 
@@ -117,7 +121,7 @@ Add a local MCP in `opencode.json` or `opencode.jsonc`:
       "type": "local",
       "command": ["quant", "mcp", "--dir", "/path/to/project"],
       "enabled": true,
-      "env": { "QUANT_AUTOUPDATE": "true" }
+      "environment": { "QUANT_AUTOUPDATE": "true" }
     }
   }
 }
@@ -186,6 +190,8 @@ quant mcp --dir ./my-project --transport sse --listen 127.0.0.1:9090
 | SSE | `http://localhost:9090/message` | Message endpoint for SSE transport |
 | HTTP | `http://localhost:9090/mcp` | Streamable HTTP MCP endpoint |
 | Both | `http://localhost:9090/healthz` | Liveness probe (always returns `ok`) |
-| Both | `http://localhost:9090/readyz` | Readiness probe (returns `ready` when index is initialized, `503` otherwise) |
+| Both | `http://localhost:9090/readyz` | Readiness probe. Returns `ready` for lifecycle states `ready` and `degraded`; returns `503` while `starting`/`indexing` or when SQLite is unavailable. |
 
 Most MCP clients that support remote servers accept a URL like `http://localhost:9090/sse` (SSE transport) or `http://localhost:9090/mcp` (streamable HTTP transport). Refer to your client's documentation for the exact connection format.
+
+SSE and HTTP transports do not provide request authentication. Keep the default loopback binding unless the server is protected by an authenticated, trusted proxy or equivalent access control. Requests carrying a browser `Origin` header are rejected, and MCP request bodies are limited to 1 MiB.

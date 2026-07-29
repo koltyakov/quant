@@ -2,7 +2,7 @@
 
 ## Embedding backend unavailable
 
-**Symptom:** `index_status` reports `embedding_status: "keyword_only"`, or startup logs show `embedding backend unavailable`.
+**Symptom:** Search responses report `embedding_status: "keyword_only"`, `index_status` reports that embeddings are unavailable, or startup logs show `embedding backend unavailable`.
 
 **Cause:** `quant` cannot reach the embedding backend (Ollama or OpenAI-compatible API).
 
@@ -21,13 +21,15 @@ ollama list
 ollama pull nomic-embed-text
 ```
 
-`quant` attempts these recovery steps automatically on startup. If recovery fails, it starts in keyword-only mode — search still works, but results rely on FTS5 keyword matching only.
+`quant` attempts these recovery steps automatically for local Ollama. If Ollama remains unavailable or its model cannot be pulled, it starts in keyword-only mode and search relies on FTS5 keyword matching.
 
 For remote or OpenAI-compatible backends, verify the URL, API key, and network connectivity:
 ```bash
 curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
   "$QUANT_EMBED_URL/v1/models"
 ```
+
+Remote custom hosts require an explicit `--embed-provider`. Provider, authentication, URL, and protocol errors can stop startup rather than entering keyword-only mode.
 
 ---
 
@@ -61,7 +63,7 @@ curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
      - "**/*_test.go"
    ```
 
-5. **Check for large files.** The text extractor skips files over 8 MB. If you have many large files that aren't being indexed, check `index_status` for the document count.
+5. **Check for large files.** Plain-text files are indexed from at most their first 8 MiB. Structured document extractors reject files over 100 MiB.
 
 ---
 
@@ -84,7 +86,7 @@ curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
      - "**/*.min.js"
    ```
 
-3. **SQLite vacuum.** `quant` runs periodic vacuuming automatically to reclaim freed space. If the database is large after many deletes, restart `quant` to trigger a vacuum cycle.
+3. **SQLite vacuum.** `quant` runs `VACUUM` approximately once per hour while the main process remains running. Restarting does not trigger an immediate vacuum and resets the hourly timer.
 
 ---
 
@@ -100,11 +102,11 @@ curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
 
 3. **Excluded by `.gitignore`.** `quant` respects `.gitignore` files. If a file is gitignored, it won't be indexed.
 
-4. **File too large.** The text extractor reads up to 8 MB per file. Larger files are skipped.
+4. **File too large.** Plain-text files are truncated to their first 8 MiB and indexed. PDF, notebook, HTML, Office/Open XML, OpenDocument, and RTF files over 100 MiB are rejected.
 
 5. **Index not yet up to date.** After adding files, `quant` may still be processing the queue. Check `index_status` to see the current `state`.
 
-6. **Embedding failure during indexing.** If the embedding backend was unavailable when the file was indexed, the file may be quarantined. Restart `quant` with the embedding backend available to trigger reindexing.
+6. **Permanent indexing failure.** OCR failures, oversized structured files, and permanent embedding errors can quarantine a file. Quarantine entries persist across restarts and are not retried automatically. There is currently no quarantine-management CLI; to force a complete retry, stop `quant`, remove `.index/`, and restart. This rebuilds the entire index.
 
 ---
 
@@ -125,9 +127,9 @@ curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
    search(query="...", path="src/auth/")
    ```
 
-5. **Check `threshold`.** The default threshold filters out low-confidence results. Lower it to see more candidates:
+5. **Check `threshold`.** The default is `0`, which applies no positive-score cutoff. If you supplied a higher value, lower it toward `0` to see more candidates; raise it to make results more selective:
    ```
-   search(query="...", threshold=0.1)
+   search(query="...", threshold=0)
    ```
 
 ---
@@ -222,4 +224,10 @@ Then restart `quant`. The index will be rebuilt from the current files.
 
 2. **Narrow the index scope** with `include`/`exclude` patterns to exclude large directories that aren't needed for search.
 
-3. **Check system memory limit.** `quant` sets a Go runtime memory soft limit based on available RAM (25% of system memory, capped at 4 GB). On systems with limited RAM, use `include` patterns to keep the corpus small.
+3. **Check system memory limit.** `quant` sets a Go runtime soft limit to 25% of physical RAM, with a 512 MiB minimum and 4 GiB maximum. It uses 2 GiB if physical memory cannot be detected. An existing `GOMEMLIMIT` environment variable takes precedence. On systems with limited RAM, use `include` patterns to keep the corpus small.
+
+---
+
+## Logs
+
+`quant` writes structured logs beside the database. The default `.index/quant.db` therefore uses `.index/quant.log`. Logs include search queries and result snippets, are created with `0600` permissions, and rotate at 10 MiB with five backups. Log path, level, size, and retention are not currently configurable.

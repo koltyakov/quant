@@ -14,7 +14,7 @@ All flags apply to `quant mcp`.
 | `--listen` | `127.0.0.1:8080` | Listen address for SSE/HTTP transport |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
 | `--embed-model` | `nomic-embed-text` | Embedding model name |
-| `--embed-provider` | auto-detected | Embedding backend: `ollama` or `openai`. Auto-detected from URL when not set. |
+| `--embed-provider` | auto-detected | Embedding backend: `ollama` or `openai`. Auto-detection recognizes loopback URLs as Ollama and OpenAI hostnames as OpenAI. |
 | `--embed-api-key` | - | API key for the embedding backend. Required for OpenAI and other authenticated providers. |
 | `--config` | - | Path to a YAML config file |
 
@@ -24,7 +24,7 @@ All flags apply to `quant mcp`.
 |------|---------|-------------|
 | `--llm-url` | `http://localhost:11434` | LLM API URL used by reranking and summarization |
 | `--llm-model` | - | Default LLM model for reranking and summarization |
-| `--llm-provider` | auto-detected | LLM backend: `ollama` or `openai`. Auto-detected from URL when not set. |
+| `--llm-provider` | auto-detected | LLM backend: `ollama` or `openai`. Auto-detection recognizes loopback URLs as Ollama and OpenAI hostnames as OpenAI. |
 | `--llm-api-key` | - | API key for the LLM backend. Required for OpenAI and other authenticated providers. |
 
 ### Indexing flags
@@ -43,7 +43,7 @@ All flags apply to `quant mcp`.
 | `--reranker` | - | Reranker type. Only accepted value: `cross-encoder` (requires `--reranker-model`). |
 | `--reranker-model` | `--llm-model` | Model used for cross-encoder reranking (e.g. `llama3.2`). Overrides the shared LLM model for this feature. |
 
-Cross-encoder reranking adds a second-pass LLM reranking step after the initial hybrid retrieval. The model sees each `(query, chunk)` pair and produces a relevance score that overrides the RRF score for final ranking.
+Cross-encoder reranking adds a second-pass LLM reranking step after the initial hybrid retrieval. The model scores up to the first 20 `(query, chunk)` pairs. `quant` normalizes the original and LLM scores, blends them 50/50, and reorders the candidates. Results currently retain `score_kind: "rrf"`.
 
 **When to use:** When retrieval precision matters more than latency. Reranking runs at query time and adds one LLM call per candidate batch, so it noticeably increases response time. Good for research workspaces where you want the single best result to be highly accurate.
 
@@ -58,9 +58,7 @@ Cross-encoder reranking adds a second-pass LLM reranking step after the initial 
 | `--summarizer` | `false` | Enable LLM-powered chunk summarization at index time. |
 | `--summarizer-model` | `--llm-model` | Model used for chunk summarization. Overrides the shared LLM model for this feature. |
 
-The summarizer generates a concise summary of each chunk at index time using the configured LLM backend. Summaries are stored alongside the chunk text and used to improve search signal.
-
-**When to use:** When your documents are dense or technical and keyword matching struggles because the terminology in queries differs from the source text. Summaries can bridge the vocabulary gap.
+The experimental summarizer generates a concise summary of each chunk at index time using the configured LLM backend. Summaries are stored alongside chunk text, but current search ranking and MCP responses do not consume them. Enabling this option therefore does not currently change retrieval results.
 
 **Cost:** Runs at index time, not query time — so search latency is unaffected. The tradeoff is significantly longer initial indexing and higher compute during reindexing. Large corpora with frequent updates can become expensive to maintain.
 
@@ -73,6 +71,16 @@ The summarizer generates a concise summary of each chunk at index time using the
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pdf-ocr-lang` | `eng` | Tesseract language(s) for scanned PDF OCR, e.g. `eng`, `spa`, `eng+spa` |
+| `--pdf-ocr-timeout` | `2m` | OCR timeout per PDF file; must be greater than zero |
+
+### Search and runtime flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-vector-candidates` | `20000` | Maximum chunks scanned by exact vector fallback; `-1` is unlimited and `0` disables fallback |
+| `--max-concurrent-tools` | auto (2--8) | Maximum concurrent MCP tool calls; explicitly setting `0` uses the server fallback of 4 |
+
+`--pdf-ocr-timeout`, `--max-vector-candidates`, and `--max-concurrent-tools` are CLI-only. They do not have YAML fields or `QUANT_*` environment variables.
 
 ## Environment variables
 
@@ -105,15 +113,16 @@ Auto-update is controlled separately:
 | Environment variable | Description |
 |---|---|
 | `QUANT_AUTOUPDATE` | Enable automatic self-update on startup and every 30 minutes. Accepted values: `true`, `1`, `yes` |
+| `QUANT_UPDATE_REPO` | Advanced: override the GitHub `owner/repository` used for update checks |
 
 ## Configuration precedence
 
-Settings are applied in this order, with later sources overriding earlier ones:
+Settings are applied with the following precedence, from lowest to highest:
 
 1. Built-in defaults
 2. YAML config file (`--config`)
-3. CLI flags
-4. Environment variables
+3. Environment variables
+4. Explicit CLI flags
 
 ## YAML config file
 
@@ -126,11 +135,11 @@ transport: stdio
 listen: "127.0.0.1:8080"
 embed_url: http://localhost:11434
 embed_model: nomic-embed-text
-embed_provider: ollama   # ollama (default) or openai
+embed_provider: ollama   # ollama or openai
 # embed_api_key: sk-...  # required for OpenAI and other authenticated providers
 llm_url: http://localhost:11434
 llm_model: llama3.2
-llm_provider: ollama     # ollama (default) or openai
+llm_provider: ollama     # ollama or openai
 # llm_api_key: sk-...    # required for OpenAI and other authenticated providers
 chunk_size: 512
 chunk_overlap: 0.15
@@ -165,17 +174,19 @@ exclude:
   - "dist/**"
 ```
 
-## Auto-tuned internals
+Scanning also respects nested `.gitignore` files, skips symlinks, and skips hidden directories. Include patterns cannot override those exclusions.
 
-The following parameters are automatically configured based on system resources and do not need manual tuning:
+## Defaults and auto-tuning
 
-- **HNSW graph** (M, efSearch, reoptimization threshold) — tuned for recall/memory balance
-- **Vector search candidates** — max chunks for brute-force fallback
-- **Search weights** — keyword/vector signal weights auto-selected per query
-- **Concurrent tool calls** — scaled to available CPUs
-- **Watcher event buffer** — internal channel sizing
-- **PDF OCR timeout** — internal timeout for OCR fallback
-- **Multi-instance locking** — automatic detection and coordination
+Most internal search settings use fixed defaults:
+
+- **HNSW graph:** M=16, efSearch=100, reoptimization threshold=0.2
+- **Exact vector fallback:** at most 20,000 chunks, configurable with `--max-vector-candidates`
+- **Watcher event buffer:** 256 events
+- **PDF OCR timeout:** two minutes, configurable with `--pdf-ocr-timeout`
+- **Search weights:** keyword/vector weights are selected from the query shape
+
+Indexing workers and concurrent MCP tool calls are derived from available CPUs, each capped at 8 by default. The Go runtime memory soft limit is derived from physical memory. Multi-instance locking and proxy coordination are automatic.
 
 ## Auto-update
 

@@ -34,9 +34,9 @@ Results are collected with their BM25 rank and initial vector similarity score (
 
 ## Stage 2: Vector search
 
-The query is embedded via Ollama and used to search the in-memory HNSW graph (M=16, EfSearch=100). This returns approximate nearest neighbors ranked by cosine distance.
+The query is embedded via the configured backend and used to search the in-memory HNSW graph (M=16, EfSearch=100). This returns approximate nearest neighbors ranked by cosine distance.
 
-When a `path` prefix filter is active, HNSW results are intersected with the prefix set from SQLite. If the intersection is too small, a bounded brute-force scan over prefix-matched chunks is used as a fallback (controlled by `--max-vector-candidates`).
+When a path or metadata filter is active, HNSW results are intersected with the matching set from SQLite. If the intersection is too small, a bounded exact scan over matching chunks is used as a fallback (controlled by `--max-vector-candidates`). Exceptionally broad filters cap the in-memory intersection at 500,000 chunk IDs.
 
 ## Stage 3: RRF fusion
 
@@ -79,11 +79,17 @@ Scores are divided by the theoretical maximum (rank 1 for both keyword and vecto
 
 Results are reordered so the single best chunk per unique document appears first, then remaining slots are filled with secondary chunks from the same documents. This prevents one large file from dominating all results.
 
+## Stage 7: Optional LLM reranking
+
+With `--reranker cross-encoder`, the configured LLM scores up to the first 20 results after diversity is applied. The original and LLM scores are normalized and blended 50/50 before the results are reordered. If reranking fails, the original order is retained.
+
 Search can be restricted by path prefix, canonical file type, programming language, or exact collection name. File type aliases and language names are normalized case-insensitively; collection names remain case-sensitive.
+
+Filesystem indexing does not currently assign collection names, so collection filters only affect indexes populated with collection metadata through another integration.
 
 ## Fallback behavior
 
-**At startup:** if the embedding backend is unavailable when `quant` starts, it attempts automatic recovery (start Ollama, pull model). If recovery fails, `quant` starts in keyword-only mode — the MCP server is fully operational and `index_status` reports the embedding status and the fix required.
+**At startup:** if local Ollama is unavailable when `quant` starts, it attempts automatic recovery by starting Ollama or pulling the model. If local Ollama remains unavailable or the model cannot be pulled, `quant` starts in keyword-only mode. Other provider, authentication, URL, or protocol errors can remain fatal.
 
 **At query time:** if the embedding backend becomes unavailable after a successful start:
 
@@ -94,7 +100,7 @@ Search can be restricted by path prefix, canonical file type, programming langua
 
 ## find_similar
 
-The `find_similar` tool bypasses keyword search entirely. It loads the stored embedding for the given chunk ID, then queries the HNSW graph for nearest neighbors. This is useful for "more like this" exploration when you already have a relevant chunk from a previous search.
+The `find_similar` tool bypasses keyword search entirely. It loads the stored embedding for the given chunk ID, then queries HNSW for nearest neighbors. While HNSW is unavailable, it uses a bounded exact scan controlled by `--max-vector-candidates`. This is useful for "more like this" exploration when you already have a relevant chunk from a previous search.
 
 ## get_context
 
@@ -114,5 +120,5 @@ Each result includes a `score_kind` field that indicates how the score was produ
 
 | Value | Source |
 |-------|--------|
-| `"rrf"` | Hybrid search (`search` tool) - score is from RRF fusion of keyword and vector signals |
+| `"rrf"` | Search (`search` tool) - score is from RRF fusion; when cross-encoder reranking is enabled, the score is the 50/50 normalized blend but currently retains this label |
 | `"similar"` | Similarity search (`find_similar`, `drill_down` tools) - score is raw vector similarity |

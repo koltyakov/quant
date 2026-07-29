@@ -4,7 +4,7 @@
 
 ## Plain text and source code
 
-The text extractor handles all common source code, markup, configuration, and data files. It reads up to 8 MB per file and skips files that appear to be binary (detects null bytes or excessive control characters in the first 8 KB).
+The text extractor handles all common source code, markup, configuration, and data files. It indexes at most the first 8 MiB of each file; larger files are truncated with a warning. Files that appear to be binary are skipped (detected from null bytes or excessive control characters in the first 8 KiB).
 
 ### Recognized extensions
 
@@ -39,6 +39,8 @@ The text extractor handles all common source code, markup, configuration, and da
 
 ## Document formats
 
+PDF, notebook, HTML, Office/Open XML, OpenDocument, and RTF extractors reject files over 100 MiB. ZIP-based document formats also reject individual expanded entries over 100 MiB.
+
 ### Jupyter notebooks (`.ipynb`)
 
 Extracts code cells and markdown cells. Code outputs (text only) are captured below their source cell. Each cell is marked with a type-specific header: `[Markdown Cell N]`, `[Code Cell N]`, or `[Raw Cell N]`.
@@ -60,7 +62,7 @@ OCR requires `ocrmypdf` to be installed and on `PATH`.
 | PowerPoint | `.pptx` `.pptm` `.ppsx` `.ppsm` `.potx` `.potm` |
 | Excel | `.xlsx` `.xlsm` `.xltx` `.xltm` `.xlam` |
 
-Slides are marked with `[Slide N]`. Sheets are marked with `[Sheet N]`.
+Word headers and footers are included with section markers. Slides are marked with `[Slide N]` and include speaker notes under `[Notes]` when present. Spreadsheet sections are marked with `[Sheet <name>]`; cell references, values, and formulas are preserved where available.
 
 ### OpenDocument
 
@@ -76,6 +78,6 @@ Plain text is extracted from RTF files. Formatting is discarded.
 
 ## Filtering
 
-You can restrict which files are indexed using include/exclude patterns in the YAML config or via `.gitignore` files, which are automatically respected.
+You can restrict which files are indexed using include/exclude patterns in the YAML config or via nested `.gitignore` files, which are automatically respected. Scans do not follow symlinks and skip every hidden directory, although supported hidden files such as `.env` can be indexed. Include patterns cannot override `.gitignore` or hidden-directory exclusions.
 
 See [docs/configuration.md](configuration.md#includeexclude-patterns) for pattern syntax.

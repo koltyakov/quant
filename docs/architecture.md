@@ -25,20 +25,25 @@ flowchart TD
 
 | Package | Responsibility |
 |---------|---------------|
-| `cmd/quant` | CLI entry point. Parses commands (`mcp`, `update`, `version`, `help`) and delegates to `internal/app`. |
+| `cmd/quant` | CLI entry point. Parses commands (`mcp`, `init`, `launch`, `update`, `version`, `help`) and delegates to the relevant subsystem. |
 | `internal/app` | Top-level orchestrator. `RunMCP()` wires together the embedder, store, indexer, watcher, and MCP server. Contains the `Indexer` which manages initial sync, live indexing via a work queue, retry scheduling, and resync coordination. |
 | `internal/config` | Configuration loading from flags, environment variables, and YAML files. Includes `PathMatcher` for include/exclude glob patterns. Validates all settings on startup. |
 | `internal/watch` | Filesystem watcher built on `fsnotify`. Recursively watches directories, respects `.gitignore`, debounces events (500ms), and emits create/write/remove/resync events. Self-heals on overflow by triggering a full resync. |
 | `internal/scan` | Filesystem walking, `.gitignore` loading, and file hashing. Used by the indexer for initial scans and resyncs. |
 | `internal/extract` | Content extraction. A `Router` dispatches to the appropriate extractor based on file extension. Handles plain text, Jupyter notebooks, PDF (with optional OCR), Office/Open XML, OpenDocument, and RTF. |
-| `internal/chunk` | Text splitting into chunks. Uses a strategy registry: code files get a code-aware chunker (function/class boundary detection), everything else uses a generic paragraph splitter with heading breadcrumbs and overlap. |
+| `internal/chunk` | Text splitting into chunks. Release builds use Go AST chunking for Go, heuristic declaration chunking for other code, and a generic paragraph splitter with heading breadcrumbs and overlap. Additional Tree-sitter implementations require the optional `treesitter` build tag. |
 | `internal/ingest` | The indexing pipeline. Takes extracted text, chunks it, diffs against existing chunks to reuse embeddings, batches new chunks for embedding, and produces `ChunkRecord`s ready for storage. |
-| `internal/embed` | Embedding backend. `Ollama` and `OpenAI` implement the `Embedder` interface with retry logic, input truncation, and dimension probing. Sentinel errors (`ErrOllamaUnavailable`, `ErrModelNotFound`) allow the app layer to attempt auto-recovery (start Ollama, pull model) before falling back to keyword-only mode. `CachingEmbedder` wraps the backend with an LRU cache, in-flight request deduplication, and a circuit breaker for query-time calls. |
-| `internal/index` | SQLite storage and search. Manages documents, chunks, FTS5 full-text index, embedding metadata, and the in-memory HNSW graph. Implements hybrid search combining FTS5 keyword results with vector similarity using RRF fusion. |
-| `internal/mcp` | MCP server. Registers tools (`search`, `list_sources`, `index_status`, `find_similar`, `drill_down`, `summarize_matches`, `list_collections`, `delete_collection`), handles tool calls with concurrency limiting, and serves over stdio, SSE, or streamable HTTP. Includes health/readiness endpoints for HTTP transports. |
+| `internal/embed` | Embedding backend. `Ollama` and `OpenAI` implement the `Embedder` interface with retry logic, input truncation, and dimension probing. Recognized local Ollama failures allow the app layer to attempt auto-recovery before falling back to keyword-only mode. `CachingEmbedder` adds an LRU cache, in-flight request deduplication, and a query-time circuit breaker. |
+| `internal/llm` | Ollama and OpenAI-compatible chat completion used by optional cross-encoder reranking and chunk summarization. |
+| `internal/index` | SQLite storage and search. Manages documents, chunks, FTS5, embedding metadata, document vectors, and HNSW persistence. Implements independent keyword and vector retrieval with RRF fusion. |
+| `internal/mcp` | MCP server. Registers tools (`search`, `list_sources`, `index_status`, `find_similar`, `get_context`, `drill_down`, `summarize_matches`, `list_collections`, `delete_collection`), limits concurrent calls, and serves over stdio, SSE, or streamable HTTP. Includes health/readiness endpoints for HTTP transports. |
+| `internal/lock` | Per-database process locking and metadata used to coordinate one main process with worker processes. |
+| `internal/proxy` | Authenticated loopback RPC between the main process that owns the index and additional worker processes sharing the database. |
 | `internal/runtime` | Index state tracking (`starting` -> `indexing` -> `ready` / `degraded`). Thread-safe snapshot reads used by the MCP server for readiness checks. |
 | `internal/selfupdate` | Binary self-update from GitHub Releases. Supports manual `quant update` and automatic background updates via `QUANT_AUTOUPDATE`. |
 | `internal/logx` | Structured logging shim used throughout the codebase. |
+| `internal/errors` | Shared error classification helpers used by indexing and backend retry paths. |
+| `internal/health` | Reusable health aggregation primitives. HTTP `/healthz` and `/readyz` currently perform their checks directly in the MCP server. |
 
 ## Key design decisions
 
@@ -46,10 +51,12 @@ flowchart TD
 
 **Incremental reindexing.** When a file changes, the ingest pipeline diffs the new chunks against existing ones by content hash. Only new or modified chunks are sent to the embedding backend. Unchanged chunks reuse their stored embeddings.
 
-**HNSW lifecycle.** The HNSW graph is built in-memory after the initial filesystem scan completes. It is reconstructed from stored embeddings on restart after validating the recorded model metadata snapshot. During live indexing, nodes are added and removed incrementally.
+**HNSW lifecycle.** The HNSW graph is persisted beside the database as `<db>.hnsw` and accepted only when its model, dimensions, node count, and chunk generation match SQLite. Otherwise it is rebuilt from stored embeddings. During live indexing, nodes are added and removed after database commits; the graph is flushed every two minutes and at shutdown.
 
 **Transactional writes.** All chunk replacements for a single document happen inside one SQLite transaction. HNSW updates are deferred until after the transaction commits.
 
-**Graceful degradation.** If the embedding backend is unavailable at startup, `quant` attempts automatic recovery: it tries to start Ollama (`ollama serve`) if the binary is on PATH and the URL is local, then pulls the configured model if the server is reachable but the model is missing. If both recovery steps fail, `quant` starts in keyword-only mode — the MCP server remains fully operational and `index_status` reports the embedding status and the fix required. At query time, the circuit breaker (5 consecutive failures, 30-second window) provides a second layer of fallback. The embedding status is included in search responses so agents know when results are limited.
+**Graceful degradation.** For recognized local Ollama availability and model errors, `quant` attempts to start Ollama or pull the configured model. If those recovery steps fail, it starts in keyword-only mode. Other provider, authentication, URL, and protocol errors can remain fatal. At query time, the circuit breaker (5 consecutive failures, 30-second reset) provides a second fallback layer. Search responses include the effective embedding mode.
 
 **Concurrency control.** MCP tool calls are bounded by a semaphore (`--max-concurrent-tools`, auto-tuned by CPU by default) to prevent resource exhaustion when multiple agents query simultaneously.
+
+**Multi-process coordination.** Processes sharing a database use a database-scoped lock. One main process owns indexing and storage; compatible workers route operations through an authenticated loopback proxy. Index-affecting configuration mismatches are rejected.
