@@ -532,3 +532,30 @@ func TestFormatExtractBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateZipArchiveBudgets(t *testing.T) {
+	entry := func(name string, compressed, uncompressed uint64) *zip.File {
+		return &zip.File{FileHeader: zip.FileHeader{
+			Name:               name,
+			CompressedSize64:   compressed,
+			UncompressedSize64: uncompressed,
+		}}
+	}
+
+	if err := validateZipArchive([]*zip.File{entry("ok.xml", 1024, 4096)}); err != nil {
+		t.Fatalf("valid archive rejected: %v", err)
+	}
+	if err := validateZipArchive([]*zip.File{entry("bomb.xml", 1, maxArchiveCompressionRatio+1)}); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("compression bomb error = %v, want ErrFileTooLarge", err)
+	}
+	if err := validateZipArchive([]*zip.File{
+		entry("a.xml", 1<<20, 65<<20),
+		entry("b.xml", 1<<20, 65<<20),
+	}); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("aggregate archive error = %v, want ErrFileTooLarge", err)
+	}
+	tooMany := make([]*zip.File, maxArchiveEntries+1)
+	if err := validateZipArchive(tooMany); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("entry count error = %v, want ErrFileTooLarge", err)
+	}
+}

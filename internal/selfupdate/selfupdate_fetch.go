@@ -49,6 +49,10 @@ func fetchLatestRelease(ctx context.Context) (*Release, error) {
 }
 
 func download(ctx context.Context, url string) ([]byte, error) {
+	return downloadWithLimit(ctx, url, maxDownloadBytes)
+}
+
+func downloadWithLimit(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -65,11 +69,34 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download returned %s", resp.Status)
 	}
-	if resp.ContentLength > maxDownloadBytes {
-		return nil, fmt.Errorf("download too large: %d bytes exceeds limit %d", resp.ContentLength, maxDownloadBytes)
+	if resp.ContentLength > limit {
+		return nil, fmt.Errorf("download too large: %d bytes exceeds limit %d", resp.ContentLength, limit)
 	}
 
-	return readAllWithLimit(resp.Body, maxDownloadBytes)
+	return readAllWithLimit(resp.Body, limit)
+}
+
+func checksumForAsset(data []byte, assetName string) (string, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name != assetName {
+			continue
+		}
+		if len(fields[0]) != 64 {
+			return "", fmt.Errorf("invalid checksum for %s", assetName)
+		}
+		for _, c := range fields[0] {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				return "", fmt.Errorf("invalid checksum for %s", assetName)
+			}
+		}
+		return fields[0], nil
+	}
+	return "", fmt.Errorf("%s does not contain a checksum for %s", checksumsAsset, assetName)
 }
 
 func readAllWithLimit(r io.Reader, limit int64) ([]byte, error) {

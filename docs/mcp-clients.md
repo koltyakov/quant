@@ -182,6 +182,15 @@ When using `sse` or `http`, start `quant` with `--transport` and `--listen`:
 quant mcp --dir ./my-project --transport sse --listen 127.0.0.1:9090
 ```
 
+For any non-loopback listener, configure a strong random bearer token:
+
+```bash
+export QUANT_MCP_TOKEN="$(openssl rand -hex 32)"
+quant mcp --dir ./my-project --transport http --listen 0.0.0.0:9090
+```
+
+Configure the client to send `Authorization: Bearer <token>` to `/mcp`, `/sse`, and `/message`. Put a TLS-terminating reverse proxy in front when traffic leaves the host.
+
 ### Endpoints
 
 | Transport | Endpoint | Description |
@@ -194,4 +203,4 @@ quant mcp --dir ./my-project --transport sse --listen 127.0.0.1:9090
 
 Most MCP clients that support remote servers accept a URL like `http://localhost:9090/sse` (SSE transport) or `http://localhost:9090/mcp` (streamable HTTP transport). Refer to your client's documentation for the exact connection format.
 
-SSE and HTTP transports do not provide request authentication. Keep the default loopback binding unless the server is protected by an authenticated, trusted proxy or equivalent access control. Requests carrying a browser `Origin` header are rejected, and MCP request bodies are limited to 1 MiB.
+SSE and HTTP MCP endpoints enforce the configured bearer token. Non-loopback binding without a token is rejected. Requests carrying a browser `Origin` header are rejected, request bodies are limited to 1 MiB, and slow request reads are timed out. `/healthz` and `/readyz` intentionally remain unauthenticated for probes.

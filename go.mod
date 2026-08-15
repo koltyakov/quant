@@ -1,6 +1,6 @@
 module github.com/koltyakov/quant
 
-go 1.26.2
+go 1.26.6
 
 replace github.com/google/renameio => ./internal/shim/renameio
 

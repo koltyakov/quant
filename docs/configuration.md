@@ -12,11 +12,13 @@ All flags apply to `quant mcp`.
 | `--db` | `<dir>/.index/quant.db` | SQLite database path |
 | `--transport` | `stdio` | MCP transport: `stdio`, `sse`, `http` |
 | `--listen` | `127.0.0.1:8080` | Listen address for SSE/HTTP transport |
+| `--mcp-token` | - | Bearer token required on SSE/HTTP MCP endpoints. Required for non-loopback listeners. |
 | `--embed-url` | `http://localhost:11434` | Embedding API URL |
 | `--embed-model` | `nomic-embed-text` | Embedding model name |
 | `--embed-provider` | auto-detected | Embedding backend: `ollama` or `openai`. Auto-detection recognizes loopback URLs as Ollama and OpenAI hostnames as OpenAI. |
 | `--embed-api-key` | - | API key for the embedding backend. Required for OpenAI and other authenticated providers. |
 | `--config` | - | Path to a YAML config file |
+| `--allow-insecure-model-http` | `false` | Allow plaintext model HTTP on non-loopback hosts. Use only on a trusted network. |
 
 ### LLM flags
 
@@ -90,6 +92,7 @@ The experimental summarizer generates a concise summary of each chunk at index t
 | `QUANT_DB` | `--db` |
 | `QUANT_TRANSPORT` | `--transport` |
 | `QUANT_LISTEN` | `--listen` |
+| `QUANT_MCP_TOKEN` | `--mcp-token` |
 | `QUANT_EMBED_URL` | `--embed-url` |
 | `QUANT_EMBED_MODEL` | `--embed-model` |
 | `QUANT_EMBED_PROVIDER` | `--embed-provider` |
@@ -107,6 +110,7 @@ The experimental summarizer generates a concise summary of each chunk at index t
 | `QUANT_RERANKER_MODEL` | `--reranker-model` |
 | `QUANT_SUMMARIZER` | `--summarizer` |
 | `QUANT_SUMMARIZER_MODEL` | `--summarizer-model` |
+| `QUANT_ALLOW_INSECURE_MODEL_HTTP` | `--allow-insecure-model-http` |
 
 Auto-update is controlled separately:
 
@@ -133,6 +137,7 @@ dir: ./my-project
 db: ./.index/quant.db
 transport: stdio
 listen: "127.0.0.1:8080"
+# mcp_token: replace-with-a-random-token
 embed_url: http://localhost:11434
 embed_model: nomic-embed-text
 embed_provider: ollama   # ollama or openai
@@ -141,6 +146,7 @@ llm_url: http://localhost:11434
 llm_model: llama3.2
 llm_provider: ollama     # ollama or openai
 # llm_api_key: sk-...    # required for OpenAI and other authenticated providers
+allow_insecure_model_http: false
 chunk_size: 512
 chunk_overlap: 0.15
 embed_batch_size: 16
@@ -154,7 +160,7 @@ exclude:
   - "node_modules/**"
 ```
 
-SSE and HTTP transports do not provide request authentication. The default listen address is loopback-only, browser requests with an `Origin` header are rejected, and the transport library validates loopback hostnames to prevent DNS rebinding. Binding to a non-loopback address exposes the MCP endpoint to that network and should only be done behind an authenticated, trusted proxy or equivalent access control. This does not affect the default `stdio` transport.
+SSE and HTTP transports accept an optional bearer token through `--mcp-token`, `QUANT_MCP_TOKEN`, or `mcp_token`. Non-loopback listen addresses are rejected unless a token is configured. Clients must send `Authorization: Bearer <token>` on MCP endpoints; health and readiness probes remain unauthenticated. Browser requests with an `Origin` header are rejected. Use TLS or a trusted TLS-terminating proxy when crossing an untrusted network. This does not affect the default `stdio` transport.
 
 ### Include/exclude patterns
 
@@ -174,7 +180,7 @@ exclude:
   - "dist/**"
 ```
 
-Scanning also respects nested `.gitignore` files, skips symlinks, and skips hidden directories. Include patterns cannot override those exclusions.
+Scanning and live updates also respect nested `.gitignore` files, reject symlinks and paths resolving outside the watch root, and skip hidden directories. Include patterns cannot override those exclusions.
 
 ## Defaults and auto-tuning
 
@@ -202,5 +208,7 @@ When `QUANT_AUTOUPDATE=true` is set for `quant mcp`:
 3. If an update is applied, the process restarts automatically with the same arguments.
 
 Development builds (`dev` or versions ending in `-dev`) never auto-update.
+
+Release installers and self-update verify the downloaded archive against the release's SHA-256 `checksums.txt` before extraction or replacement.
 
 For self-update to work, the running user must have write access to the binary on disk. A user-owned install location such as `~/.local/bin/quant` is the safest default.

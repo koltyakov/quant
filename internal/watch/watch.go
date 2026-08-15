@@ -267,8 +267,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	if event.Has(fsnotify.Create) {
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
+			return
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return
 		}
 		if info.IsDir() {
@@ -301,8 +304,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	if event.Has(fsnotify.Write) {
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
+			return
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return
 		}
 		if info.IsDir() {

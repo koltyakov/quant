@@ -103,6 +103,9 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	s.server = &http.Server{
 		Handler:           s.withAuth(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	s.mu.Lock()

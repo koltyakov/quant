@@ -582,6 +582,51 @@ func TestOriginProtectionAllowsNativeClients(t *testing.T) {
 	}
 }
 
+func TestBearerAuth(t *testing.T) {
+	called := false
+	handler := withBearerAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}), "secret-token")
+
+	for _, tc := range []struct {
+		name   string
+		header []string
+		want   int
+	}{
+		{name: "missing", want: http.StatusUnauthorized},
+		{name: "wrong", header: []string{"Bearer wrong"}, want: http.StatusUnauthorized},
+		{name: "duplicate", header: []string{"Bearer secret-token", "Bearer secret-token"}, want: http.StatusUnauthorized},
+		{name: "valid", header: []string{"Bearer secret-token"}, want: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(http.MethodPost, httpMCPPath, nil)
+			for _, value := range tc.header {
+				req.Header.Add("Authorization", value)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if called != (tc.want == http.StatusNoContent) {
+				t.Fatalf("downstream called = %t", called)
+			}
+		})
+	}
+}
+
+func TestHTTPServerHasResourceTimeouts(t *testing.T) {
+	srv := newHTTPServer("127.0.0.1:0", http.NewServeMux())
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadTimeout <= 0 || srv.IdleTimeout <= 0 || srv.MaxHeaderBytes <= 0 {
+		t.Fatalf("HTTP resource limits are incomplete: %+v", srv)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("SSE-compatible server must not set WriteTimeout, got %s", srv.WriteTimeout)
+	}
+}
+
 func TestMCPHTTPTransportsRejectOversizedBodies(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "quant.db")

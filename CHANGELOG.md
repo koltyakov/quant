@@ -1,6 +1,16 @@
 # Changelog
 
-## v0.15.3 (2026-07-29)
+## Unreleased
+
+### Security
+
+- **Authenticated remote MCP transports** - SSE and streamable HTTP accept bearer authentication and refuse non-loopback listeners without a configured token.
+- **Verified release downloads** - Installers and self-update verify release archives against `checksums.txt` before extraction or binary replacement.
+- **Safer filesystem and document parsing** - Live indexing rejects symlinks and root escapes; ZIP-based extractors enforce entry, expansion, compression-ratio, and output budgets.
+- **Secure network defaults** - Non-loopback model endpoints require HTTPS unless explicitly overridden, HTTP servers bound slow request reads, and CI/release actions use least privilege with commit-pinned dependencies.
+- **Current Go security fixes** - Release builds require Go 1.26.6 and CI runs `govulncheck` on pushes, pull requests, and a weekly schedule.
+
+## v0.15.4 (2026-07-29)
 
 ### Security
 

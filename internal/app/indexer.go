@@ -445,9 +445,13 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 		idx.RequestResync(ctx)
 
 	case watch.Create, watch.Write:
-		info, err := os.Stat(event.Path)
+		info, err := statDocumentPath(idx.cfg.WatchDir, event.Path)
 		if err != nil {
 			if os.IsNotExist(err) {
+				return
+			}
+			if errors.Is(err, errUnsafeDocumentPath) {
+				logx.Warn("skipping unsafe watched path", "path", event.Path, "err", err)
 				return
 			}
 			logx.Error("stating watched path failed", "path", event.Path, "err", err)
@@ -646,12 +650,19 @@ func (idx *Indexer) SyncDocumentRef(ctx context.Context, ref DocumentRef, modTim
 }
 
 func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, doc *index.Document, version uint64) (IndexAction, error) {
-	info, err := os.Stat(ref.AbsPath)
+	info, err := statDocumentPath(idx.cfg.WatchDir, ref.AbsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			doc, err = idx.loadDocument(ctx, ref.Key, doc)
 			if err != nil {
 				return IndexNoop, err
+			}
+			return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+		}
+		if errors.Is(err, errUnsafeDocumentPath) {
+			doc, loadErr := idx.loadDocument(ctx, ref.Key, doc)
+			if loadErr != nil {
+				return IndexNoop, loadErr
 			}
 			return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
 		}
@@ -710,9 +721,12 @@ func (idx *Indexer) loadDocument(ctx context.Context, key string, doc *index.Doc
 }
 
 func (idx *Indexer) shouldIndexExistingPath(matcher *scan.GitIgnoreMatcher, path string) (bool, error) {
-	info, err := os.Stat(path)
+	info, err := statDocumentPath(idx.cfg.WatchDir, path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if errors.Is(err, errUnsafeDocumentPath) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stating path: %w", err)

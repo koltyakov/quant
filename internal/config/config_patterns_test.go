@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -643,7 +644,7 @@ func TestLoadYAML_InvalidYAML(t *testing.T) {
 func TestParseArgs_ConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	content := "transport: http\nlisten: \":4000\"\nchunk_size: 2048\n"
+	content := "transport: http\nlisten: \":4000\"\nmcp_token: test-token\nchunk_size: 2048\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
 		t.Fatalf("unexpected write error: %v", err)
 	}
@@ -657,6 +658,9 @@ func TestParseArgs_ConfigFile(t *testing.T) {
 	}
 	if cfg.ListenAddr != ":4000" {
 		t.Errorf("expected :4000, got %s", cfg.ListenAddr)
+	}
+	if cfg.MCPToken != "test-token" {
+		t.Errorf("expected MCP token from config, got %q", cfg.MCPToken)
 	}
 	if cfg.ChunkSize != 2048 {
 		t.Errorf("expected 2048, got %d", cfg.ChunkSize)
@@ -1028,5 +1032,57 @@ func TestParseArgs_IndexWorkersFlag(t *testing.T) {
 	}
 	if cfg.IndexWorkers != 4 {
 		t.Errorf("expected 4, got %d", cfg.IndexWorkers)
+	}
+}
+
+func TestValidate_RemoteMCPRequiresToken(t *testing.T) {
+	cfg := Default()
+	cfg.WatchDir = t.TempDir()
+	cfg.DBPath = filepath.Join(cfg.WatchDir, ".index", "quant.db")
+	cfg.Transport = TransportHTTP
+	cfg.ListenAddr = "0.0.0.0:8080"
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires --mcp-token") {
+		t.Fatalf("Validate() error = %v, want missing MCP token error", err)
+	}
+	cfg.MCPToken = "test-token"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with token error = %v", err)
+	}
+	cfg.MCPToken = "bad token"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not contain whitespace") {
+		t.Fatalf("Validate() error = %v, want token whitespace error", err)
+	}
+}
+
+func TestValidate_RemoteModelHTTPRequiresExplicitOverride(t *testing.T) {
+	cfg := Default()
+	cfg.WatchDir = t.TempDir()
+	cfg.DBPath = filepath.Join(cfg.WatchDir, ".index", "quant.db")
+	cfg.EmbedURL = "http://models.example.test:8080"
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("Validate() error = %v, want insecure model URL error", err)
+	}
+	cfg.AllowInsecureModelHTTP = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with explicit override error = %v", err)
+	}
+}
+
+func TestParseArgs_SecurityEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUANT_TRANSPORT", "http")
+	t.Setenv("QUANT_LISTEN", "0.0.0.0:8080")
+	t.Setenv("QUANT_MCP_TOKEN", "environment-token")
+	t.Setenv("QUANT_EMBED_URL", "http://models.example.test:8080")
+	t.Setenv("QUANT_ALLOW_INSECURE_MODEL_HTTP", "true")
+
+	cfg, err := ParseArgs([]string{"--dir", dir})
+	if err != nil {
+		t.Fatalf("ParseArgs() error = %v", err)
+	}
+	if cfg.MCPToken != "environment-token" || !cfg.AllowInsecureModelHTTP {
+		t.Fatalf("security environment was not applied: %+v", cfg)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ type Config struct {
 	DBPath          string    `yaml:"db"`
 	Transport       Transport `yaml:"transport"`
 	ListenAddr      string    `yaml:"listen"`
+	MCPToken        string    `yaml:"mcp_token"`
 	EmbedURL        string    `yaml:"embed_url"`
 	EmbedModel      string    `yaml:"embed_model"`
 	EmbedProvider   string    `yaml:"embed_provider"`
@@ -66,6 +68,7 @@ type Config struct {
 	RerankerModel           string        `yaml:"-"`
 	SummarizerEnabled       bool          `yaml:"-"`
 	SummarizerModel         string        `yaml:"-"`
+	AllowInsecureModelHTTP  bool          `yaml:"allow_insecure_model_http"`
 
 	pathMatcher     *PathMatcher
 	pathMatcherOnce sync.Once
@@ -119,7 +122,12 @@ func (c *Config) Validate() error {
 	if c.Transport != TransportStdio && c.Transport != TransportSSE && c.Transport != TransportHTTP {
 		return fmt.Errorf("invalid transport %q; must be stdio, sse, or http", c.Transport)
 	}
-	if err := validateHTTPURL("embed_url", c.EmbedURL); err != nil {
+	if c.Transport == TransportSSE || c.Transport == TransportHTTP {
+		if err := validateMCPListenSecurity(c.ListenAddr, c.MCPToken); err != nil {
+			return err
+		}
+	}
+	if err := validateModelURL("embed_url", c.EmbedURL, c.AllowInsecureModelHTTP); err != nil {
 		return err
 	}
 	if err := validateEmbedProvider(c.EmbedProvider); err != nil {
@@ -161,7 +169,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("summarizer requires --summarizer-model or --llm-model")
 	}
 	if c.RerankerType != "" || c.SummarizerEnabled {
-		if err := validateHTTPURL("llm_url", c.LLMURL); err != nil {
+		if err := validateModelURL("llm_url", c.LLMURL, c.AllowInsecureModelHTTP); err != nil {
 			return err
 		}
 	}
@@ -211,6 +219,43 @@ func validateHTTPURL(name, raw string) error {
 	default:
 		return fmt.Errorf("%s scheme must be http or https", name)
 	}
+}
+
+func validateModelURL(name, raw string, allowInsecure bool) error {
+	if err := validateHTTPURL(name, raw); err != nil {
+		return err
+	}
+	parsed, _ := url.Parse(raw)
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) && !allowInsecure {
+		return fmt.Errorf("%s must use https for non-loopback hosts (set --allow-insecure-model-http to override)", name)
+	}
+	return nil
+}
+
+func validateMCPListenSecurity(addr, token string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("listen must be a host:port address: %w", err)
+	}
+	if token != "" {
+		if strings.TrimSpace(token) != token || strings.ContainsAny(token, "\r\n\t ") {
+			return fmt.Errorf("mcp_token must not contain whitespace")
+		}
+		return nil
+	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("non-loopback MCP listen address %q requires --mcp-token or QUANT_MCP_TOKEN", addr)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(host), "."))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateEmbedURL(raw string) error {
@@ -318,6 +363,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.DBPath, "db", "", "Path to SQLite database (default: <dir>/.index/quant.db)")
 	flagSet.StringVar((*string)(&cfg.Transport), "transport", string(cfg.Transport), "MCP transport: stdio, sse, http")
 	flagSet.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Listen address for SSE/HTTP transport")
+	flagSet.StringVar(&cfg.MCPToken, "mcp-token", cfg.MCPToken, "Bearer token required by SSE/HTTP MCP transports")
 	flagSet.StringVar(&cfg.EmbedURL, "embed-url", cfg.EmbedURL, "Embedding API URL")
 	flagSet.StringVar(&cfg.EmbedModel, "embed-model", cfg.EmbedModel, "Embedding model")
 	flagSet.StringVar(&cfg.EmbedProvider, "embed-provider", cfg.EmbedProvider, "Embedding backend: ollama or openai (auto-detected from URL when not set)")
@@ -338,6 +384,7 @@ func NewFlagSet(name string) (*flag.FlagSet, *Config) {
 	flagSet.StringVar(&cfg.RerankerModel, "reranker-model", cfg.RerankerModel, "Model for cross-encoder reranking (e.g. llama3.2)")
 	flagSet.BoolVar(&cfg.SummarizerEnabled, "summarizer", cfg.SummarizerEnabled, "Enable LLM-powered chunk summarization at index time")
 	flagSet.StringVar(&cfg.SummarizerModel, "summarizer-model", cfg.SummarizerModel, "Model for chunk summarization (default: same as llm model)")
+	flagSet.BoolVar(&cfg.AllowInsecureModelHTTP, "allow-insecure-model-http", cfg.AllowInsecureModelHTTP, "Allow plaintext HTTP model endpoints on non-loopback hosts")
 	flagSet.StringVar(&cfg.ConfigFile, "config", "", "Path to YAML config file")
 
 	return flagSet, cfg
@@ -356,29 +403,31 @@ func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 	baseDir := filepath.Dir(path)
 
 	type fileConfig struct {
-		WatchDir        string    `yaml:"dir"`
-		DBPath          string    `yaml:"db"`
-		Transport       Transport `yaml:"transport"`
-		ListenAddr      string    `yaml:"listen"`
-		EmbedURL        string    `yaml:"embed_url"`
-		EmbedModel      string    `yaml:"embed_model"`
-		EmbedProvider   string    `yaml:"embed_provider"`
-		EmbedAPIKey     string    `yaml:"embed_api_key"`
-		LLMURL          string    `yaml:"llm_url"`
-		LLMModel        string    `yaml:"llm_model"`
-		LLMProvider     string    `yaml:"llm_provider"`
-		LLMAPIKey       string    `yaml:"llm_api_key"`
-		EmbedBatchSize  *int      `yaml:"embed_batch_size"`
-		PDFOCRLang      string    `yaml:"pdf_ocr_lang"`
-		ChunkSize       *int      `yaml:"chunk_size"`
-		ChunkOverlap    *float64  `yaml:"chunk_overlap"`
-		IndexWorkers    *int      `yaml:"index_workers"`
-		IncludePatterns []string  `yaml:"include"`
-		ExcludePatterns []string  `yaml:"exclude"`
-		RerankerType    string    `yaml:"reranker"`
-		RerankerModel   string    `yaml:"reranker_model"`
-		Summarizer      *bool     `yaml:"summarizer"`
-		SummarizerModel string    `yaml:"summarizer_model"`
+		WatchDir               string    `yaml:"dir"`
+		DBPath                 string    `yaml:"db"`
+		Transport              Transport `yaml:"transport"`
+		ListenAddr             string    `yaml:"listen"`
+		MCPToken               string    `yaml:"mcp_token"`
+		EmbedURL               string    `yaml:"embed_url"`
+		EmbedModel             string    `yaml:"embed_model"`
+		EmbedProvider          string    `yaml:"embed_provider"`
+		EmbedAPIKey            string    `yaml:"embed_api_key"`
+		LLMURL                 string    `yaml:"llm_url"`
+		LLMModel               string    `yaml:"llm_model"`
+		LLMProvider            string    `yaml:"llm_provider"`
+		LLMAPIKey              string    `yaml:"llm_api_key"`
+		EmbedBatchSize         *int      `yaml:"embed_batch_size"`
+		PDFOCRLang             string    `yaml:"pdf_ocr_lang"`
+		ChunkSize              *int      `yaml:"chunk_size"`
+		ChunkOverlap           *float64  `yaml:"chunk_overlap"`
+		IndexWorkers           *int      `yaml:"index_workers"`
+		IncludePatterns        []string  `yaml:"include"`
+		ExcludePatterns        []string  `yaml:"exclude"`
+		RerankerType           string    `yaml:"reranker"`
+		RerankerModel          string    `yaml:"reranker_model"`
+		Summarizer             *bool     `yaml:"summarizer"`
+		SummarizerModel        string    `yaml:"summarizer_model"`
+		AllowInsecureModelHTTP *bool     `yaml:"allow_insecure_model_http"`
 	}
 
 	var parsed fileConfig
@@ -397,6 +446,9 @@ func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 	}
 	if parsed.ListenAddr != "" && !cliSet["listen"] {
 		cfg.ListenAddr = parsed.ListenAddr
+	}
+	if parsed.MCPToken != "" && !cliSet["mcp-token"] {
+		cfg.MCPToken = parsed.MCPToken
 	}
 	if parsed.EmbedURL != "" && !cliSet["embed-url"] {
 		cfg.EmbedURL = parsed.EmbedURL
@@ -455,6 +507,9 @@ func loadYAML(cfg *Config, path string, cliSet map[string]bool) error {
 	if parsed.SummarizerModel != "" && !cliSet["summarizer-model"] {
 		cfg.SummarizerModel = parsed.SummarizerModel
 	}
+	if parsed.AllowInsecureModelHTTP != nil && !cliSet["allow-insecure-model-http"] {
+		cfg.AllowInsecureModelHTTP = *parsed.AllowInsecureModelHTTP
+	}
 
 	return nil
 }
@@ -482,6 +537,9 @@ func applyEnv(cfg *Config, cliSet map[string]bool) {
 	}
 	if v := os.Getenv("QUANT_LISTEN"); v != "" && !set("listen") {
 		cfg.ListenAddr = v
+	}
+	if v := os.Getenv("QUANT_MCP_TOKEN"); v != "" && !set("mcp-token") {
+		cfg.MCPToken = v
 	}
 	if v := os.Getenv("QUANT_EMBED_URL"); v != "" && !set("embed-url") {
 		cfg.EmbedURL = v
@@ -533,6 +591,9 @@ func applyEnv(cfg *Config, cliSet map[string]bool) {
 	}
 	if v := os.Getenv("QUANT_SUMMARIZER_MODEL"); v != "" && !set("summarizer-model") {
 		cfg.SummarizerModel = v
+	}
+	if v := os.Getenv("QUANT_ALLOW_INSECURE_MODEL_HTTP"); v != "" && !set("allow-insecure-model-http") {
+		cfg.AllowInsecureModelHTTP = v == "true" || v == "1" || v == "yes"
 	}
 }
 

@@ -40,7 +40,7 @@ flowchart TD
 | `internal/lock` | Per-database process locking and metadata used to coordinate one main process with worker processes. |
 | `internal/proxy` | Authenticated loopback RPC between the main process that owns the index and additional worker processes sharing the database. |
 | `internal/runtime` | Index state tracking (`starting` -> `indexing` -> `ready` / `degraded`). Thread-safe snapshot reads used by the MCP server for readiness checks. |
-| `internal/selfupdate` | Binary self-update from GitHub Releases. Supports manual `quant update` and automatic background updates via `QUANT_AUTOUPDATE`. |
+| `internal/selfupdate` | Binary self-update from GitHub Releases with SHA-256 release-checksum verification. Supports manual `quant update` and automatic background updates via `QUANT_AUTOUPDATE`. |
 | `internal/logx` | Structured logging shim used throughout the codebase. |
 | `internal/errors` | Shared error classification helpers used by indexing and backend retry paths. |
 | `internal/health` | Reusable health aggregation primitives. HTTP `/healthz` and `/readyz` currently perform their checks directly in the MCP server. |

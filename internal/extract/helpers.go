@@ -12,7 +12,13 @@ import (
 	"os"
 )
 
-const maxExtractorFileSize int64 = 100 << 20
+const (
+	maxExtractorFileSize        int64  = 100 << 20
+	maxExtractedTextBytes              = 64 << 20
+	maxArchiveEntries                  = 4096
+	maxArchiveUncompressedBytes uint64 = 128 << 20
+	maxArchiveCompressionRatio  uint64 = 1000
+)
 
 var (
 	ErrFileTooLarge = errors.New("extractor file exceeds size limit")
@@ -98,6 +104,44 @@ func readZipFile(ctx context.Context, files []*zip.File, name string) ([]byte, e
 		return readAllLimited(ctx, rc, maxExtractorFileSize, name)
 	}
 	return nil, fmt.Errorf("zip entry not found: %s", name)
+}
+
+func openValidatedZip(path string) (*zip.ReadCloser, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateZipArchive(zr.File); err != nil {
+		_ = zr.Close()
+		return nil, err
+	}
+	return zr, nil
+}
+
+func validateZipArchive(files []*zip.File) error {
+	if len(files) > maxArchiveEntries {
+		return fmt.Errorf("%w: archive contains %d entries (limit %d)", ErrFileTooLarge, len(files), maxArchiveEntries)
+	}
+	var total uint64
+	for _, f := range files {
+		if f.UncompressedSize64 > uint64(maxExtractorFileSize) {
+			return fmt.Errorf("%w: zip entry %s exceeds %s", ErrFileTooLarge, f.Name, formatExtractBytes(maxExtractorFileSize))
+		}
+		if f.UncompressedSize64 > maxArchiveUncompressedBytes-total {
+			return fmt.Errorf("%w: archive expands beyond %s", ErrFileTooLarge, formatExtractBytes(int64(maxArchiveUncompressedBytes)))
+		}
+		total += f.UncompressedSize64
+		ratioExceeded := f.UncompressedSize64 > 0 && f.CompressedSize64 == 0
+		if f.CompressedSize64 > 0 {
+			quotient := f.UncompressedSize64 / f.CompressedSize64
+			remainder := f.UncompressedSize64 % f.CompressedSize64
+			ratioExceeded = quotient > maxArchiveCompressionRatio || quotient == maxArchiveCompressionRatio && remainder > 0
+		}
+		if ratioExceeded {
+			return fmt.Errorf("%w: zip entry %s exceeds compression ratio limit", ErrFileTooLarge, f.Name)
+		}
+	}
+	return nil
 }
 
 func readAllLimited(ctx context.Context, r io.Reader, limit int64, name string) ([]byte, error) {

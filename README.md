@@ -41,7 +41,7 @@ The quickest install path on macOS and Linux is the release installer:
 curl -fsSL https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.sh | sh
 ```
 
-It installs `quant` to `~/.local/bin`. The installer checks whether `ollama` is on `PATH`; if it is missing, it asks whether to install Ollama with the official shell installer and prints manual setup guidance if skipped.
+It installs `quant` to `~/.local/bin` after verifying the archive against the release's SHA-256 checksums. The installer checks whether `ollama` is on `PATH`; if it is missing, it asks whether to install Ollama with the official shell installer and prints manual setup guidance if skipped.
 
 To uninstall the release binary:
 
@@ -57,7 +57,7 @@ On Windows, use the PowerShell installer:
 irm https://raw.githubusercontent.com/koltyakov/quant/main/scripts/install.ps1 | iex
 ```
 
-It installs `quant.exe` to `%LOCALAPPDATA%\Programs\quant` and adds it to your user `PATH`. The installer also checks for Ollama and offers to install it via `winget`.
+It verifies the release checksum, installs `quant.exe` to `%LOCALAPPDATA%\Programs\quant`, and adds it to your user `PATH`. The installer also checks for Ollama and offers to install it via `winget`.
 
 To uninstall the release binary and remove the install directory from your user `PATH`:
 
@@ -85,7 +85,7 @@ quant version
 
 You only need Go if you are building `quant` yourself instead of using a release binary.
 
-- Go 1.26.2+
+- Go 1.26.6+
 
 ```
 make install

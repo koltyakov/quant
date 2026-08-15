@@ -55,7 +55,14 @@ func (r *Router) Extract(ctx context.Context, path string) (text string, err err
 	}()
 	for _, e := range r.extractors {
 		if e.Supports(path) {
-			return e.Extract(ctx, path)
+			text, err := e.Extract(ctx, path)
+			if err != nil {
+				return "", err
+			}
+			if len(text) > maxExtractedTextBytes {
+				return "", fmt.Errorf("%w: extracted text exceeds %s", ErrFileTooLarge, formatExtractBytes(maxExtractedTextBytes))
+			}
+			return text, nil
 		}
 	}
 	return "", nil

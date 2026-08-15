@@ -66,7 +66,7 @@ func ooxmlKind(path string) string {
 }
 
 func extractDOCX(ctx context.Context, path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	zr, err := openValidatedZip(path)
 	if err != nil {
 		return "", err
 	}
@@ -113,7 +113,7 @@ func extractDOCX(ctx context.Context, path string) (string, error) {
 }
 
 func extractPPTX(ctx context.Context, path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	zr, err := openValidatedZip(path)
 	if err != nil {
 		return "", err
 	}
@@ -169,7 +169,7 @@ func extractPPTX(ctx context.Context, path string) (string, error) {
 }
 
 func extractXLSX(ctx context.Context, path string) (string, error) {
-	zr, err := zip.OpenReader(path)
+	zr, err := openValidatedZip(path)
 	if err != nil {
 		return "", err
 	}

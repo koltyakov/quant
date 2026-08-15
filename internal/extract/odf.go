@@ -1,7 +1,6 @@
 package extract
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/xml"
@@ -86,7 +85,7 @@ func extractODP(ctx context.Context, path string) (string, error) {
 }
 
 func readODFContent(ctx context.Context, path string) ([]byte, error) {
-	zr, err := zip.OpenReader(path)
+	zr, err := openValidatedZip(path)
 	if err != nil {
 		return nil, err
 	}

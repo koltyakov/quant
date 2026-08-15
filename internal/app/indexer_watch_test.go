@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -88,6 +89,38 @@ func TestDocumentKey_PathCleaning(t *testing.T) {
 	}
 	if key != "src/main.go" {
 		t.Fatalf("expected cleaned key, got %q", key)
+	}
+}
+
+func TestStatDocumentPathRejectsSymlinksAndEscapes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret.txt")
+	writeFile(t, target, "secret")
+
+	directLink := filepath.Join(root, "direct.txt")
+	if err := os.Symlink(target, directLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := statDocumentPath(root, directLink); !errors.Is(err, errUnsafeDocumentPath) {
+		t.Fatalf("direct symlink error = %v, want errUnsafeDocumentPath", err)
+	}
+
+	parentLink := filepath.Join(root, "linked-dir")
+	if err := os.Symlink(outside, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := statDocumentPath(root, filepath.Join(parentLink, "secret.txt")); !errors.Is(err, errUnsafeDocumentPath) {
+		t.Fatalf("parent symlink error = %v, want errUnsafeDocumentPath", err)
+	}
+
+	regular := filepath.Join(root, "regular.txt")
+	writeFile(t, regular, "ok")
+	if _, err := statDocumentPath(root, regular); err != nil {
+		t.Fatalf("regular file rejected: %v", err)
 	}
 }
 

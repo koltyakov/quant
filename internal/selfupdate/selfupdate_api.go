@@ -4,6 +4,7 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,6 +22,8 @@ const (
 	maxReleaseJSON    = 2 << 20   // 2 MiB
 	maxDownloadBytes  = 100 << 20 // 100 MiB
 	maxBinaryBytes    = 100 << 20 // 100 MiB
+	maxChecksumsBytes = 1 << 20   // 1 MiB
+	checksumsAsset    = "checksums.txt"
 )
 
 var releaseHTTPClient = &http.Client{Timeout: 20 * time.Second}
@@ -113,11 +116,13 @@ func Apply(ctx context.Context, rel *Release) (*Result, error) {
 		return nil, err
 	}
 
-	var dlURL string
+	var dlURL, checksumsURL string
 	for _, a := range rel.Assets {
 		if a.Name == assetName {
 			dlURL = a.BrowserDownloadURL
-			break
+		}
+		if a.Name == checksumsAsset {
+			checksumsURL = a.BrowserDownloadURL
 		}
 	}
 	if dlURL == "" {
@@ -127,10 +132,29 @@ func Apply(ctx context.Context, rel *Release) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid release asset URL for %s: %w", assetName, err)
 	}
+	if checksumsURL == "" {
+		return nil, fmt.Errorf("release is missing required %s asset", checksumsAsset)
+	}
+	checksumsURL, err = validateDownloadURL(checksumsURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid release checksum URL: %w", err)
+	}
 
 	data, err := download(ctx, dlURL)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", assetName, err)
+	}
+	checksums, err := downloadWithLimit(ctx, checksumsURL, maxChecksumsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", checksumsAsset, err)
+	}
+	expected, err := checksumForAsset(checksums, assetName)
+	if err != nil {
+		return nil, err
+	}
+	actual := fmt.Sprintf("%x", sha256.Sum256(data))
+	if !strings.EqualFold(actual, expected) {
+		return nil, fmt.Errorf("checksum mismatch for %s", assetName)
 	}
 
 	binary, err := extractBinary(assetName, data)

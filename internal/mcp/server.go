@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,9 @@ type Server struct {
 const (
 	shutdownTimeout        = 5 * time.Second
 	readHeaderTimeout      = 5 * time.Second
+	readTimeout            = 15 * time.Second
+	idleTimeout            = 60 * time.Second
+	maxHeaderBytes         = 64 << 10
 	healthPath             = "/healthz"
 	readinessPath          = "/readyz"
 	httpMCPPath            = "/mcp"
@@ -99,21 +103,52 @@ func (s *Server) Serve(ctx context.Context, cfg *config.Config) error {
 
 func (s *Server) newStreamableHTTPServer(addr string) (*mcpserver.StreamableHTTPServer, *http.Server) {
 	mux := http.NewServeMux()
-	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
+	httpServer := newHTTPServer(addr, mux)
 	streamServer := mcpserver.NewStreamableHTTPServer(s.mcp, mcpserver.WithStreamableHTTPServer(httpServer))
-	mux.Handle(httpMCPPath, withOriginProtection(withRequestBodyLimit(streamServer, maxMCPRequestBodyBytes)))
+	mux.Handle(httpMCPPath, withTransportSecurity(withRequestBodyLimit(streamServer, maxMCPRequestBodyBytes), s.cfg.MCPToken))
 	s.registerHealthRoutes(mux)
 	return streamServer, httpServer
 }
 
 func (s *Server) newSSEServer(addr string) (*mcpserver.SSEServer, *http.Server) {
 	mux := http.NewServeMux()
-	httpServer := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
+	httpServer := newHTTPServer(addr, mux)
 	sseServer := mcpserver.NewSSEServer(s.mcp, mcpserver.WithHTTPServer(httpServer))
-	mux.Handle(ssePath, withOriginProtection(sseServer.SSEHandler()))
-	mux.Handle(sseMessagePath, withOriginProtection(withRequestBodyLimit(sseServer.MessageHandler(), maxMCPRequestBodyBytes)))
+	mux.Handle(ssePath, withTransportSecurity(sseServer.SSEHandler(), s.cfg.MCPToken))
+	mux.Handle(sseMessagePath, withTransportSecurity(withRequestBodyLimit(sseServer.MessageHandler(), maxMCPRequestBodyBytes), s.cfg.MCPToken))
 	s.registerHealthRoutes(mux)
 	return sseServer, httpServer
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
+}
+
+func withTransportSecurity(next http.Handler, token string) http.Handler {
+	return withOriginProtection(withBearerAuth(next, token))
+}
+
+func withBearerAuth(next http.Handler, token string) http.Handler {
+	if token == "" {
+		return next
+	}
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.Header.Values("Authorization")
+		if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), want) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="quant"`)
+			http.Error(w, "missing or invalid bearer token", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) registerHealthRoutes(mux *http.ServeMux) {

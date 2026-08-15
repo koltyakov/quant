@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -176,15 +177,22 @@ func TestApplyAndCheckAndApplyErrorPaths(t *testing.T) {
 		t.Fatalf("assetNameForPlatform() error = %v", err)
 	}
 
-	downloadURL := "https://github.com/owner/repo/releases/download/v9.9.9/asset"
+	downloadURL := "https://github.com/owner/repo/releases/download/v9.9.9/" + assetName
+	checksumsURL := "https://github.com/owner/repo/releases/download/v9.9.9/checksums.txt"
+	archiveBody := "not an archive"
+	checksumBody := fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte(archiveBody)), assetName)
 	useDownloadTransport(t, func(req *http.Request) (*http.Response, error) {
-		return jsonResponse(http.StatusOK, "not an archive"), nil
+		if strings.HasSuffix(req.URL.Path, "/checksums.txt") {
+			return jsonResponse(http.StatusOK, checksumBody), nil
+		}
+		return jsonResponse(http.StatusOK, archiveBody), nil
 	})
 
 	rel := &Release{
 		TagName: "v9.9.9",
 		Assets: []Asset{
 			{Name: assetName, BrowserDownloadURL: downloadURL},
+			{Name: checksumsAsset, BrowserDownloadURL: checksumsURL},
 		},
 	}
 	if _, err := Apply(context.Background(), rel); err == nil || !strings.Contains(err.Error(), "extract binary") {
@@ -213,7 +221,7 @@ func TestApplyAndCheckAndApplyErrorPaths(t *testing.T) {
 
 	releaseTag = "v9.9.9"
 	useReleaseTransport(t, func(req *http.Request) (*http.Response, error) {
-		return jsonResponse(http.StatusOK, `{"tag_name":"v9.9.9","assets":[{"name":"`+assetName+`","browser_download_url":"`+downloadURL+`"}]}`), nil
+		return jsonResponse(http.StatusOK, `{"tag_name":"v9.9.9","assets":[{"name":"`+assetName+`","browser_download_url":"`+downloadURL+`"},{"name":"checksums.txt","browser_download_url":"`+checksumsURL+`"}]}`), nil
 	})
 	result, err = CheckAndApply(context.Background(), "1.0.0")
 	if err == nil || !strings.Contains(err.Error(), "extract binary") {
@@ -221,6 +229,43 @@ func TestApplyAndCheckAndApplyErrorPaths(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatalf("CheckAndApply(update error) result = %#v, want nil", result)
+	}
+}
+
+func TestChecksumForAsset(t *testing.T) {
+	asset := "quant_Linux_x86_64.tar.gz"
+	want := strings.Repeat("a", 64)
+	got, err := checksumForAsset([]byte(want+"  "+asset+"\n"), asset)
+	if err != nil || got != want {
+		t.Fatalf("checksumForAsset() = %q, %v; want %q", got, err, want)
+	}
+	if _, err := checksumForAsset([]byte("bad  "+asset+"\n"), asset); err == nil {
+		t.Fatal("checksumForAsset() accepted malformed checksum")
+	}
+	if _, err := checksumForAsset([]byte(want+"  other.zip\n"), asset); err == nil {
+		t.Fatal("checksumForAsset() accepted missing asset")
+	}
+}
+
+func TestApplyRejectsChecksumMismatch(t *testing.T) {
+	assetName, err := assetNameForPlatform()
+	if err != nil {
+		t.Fatalf("assetNameForPlatform() error = %v", err)
+	}
+	releaseBase := "https://github.com/owner/repo/releases/download/v9.9.9/"
+	useDownloadTransport(t, func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/checksums.txt") {
+			return jsonResponse(http.StatusOK, strings.Repeat("0", 64)+"  "+assetName+"\n"), nil
+		}
+		return jsonResponse(http.StatusOK, "tampered archive"), nil
+	})
+
+	rel := &Release{TagName: "v9.9.9", Assets: []Asset{
+		{Name: assetName, BrowserDownloadURL: releaseBase + assetName},
+		{Name: checksumsAsset, BrowserDownloadURL: releaseBase + checksumsAsset},
+	}}
+	if _, err := Apply(context.Background(), rel); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("Apply() error = %v, want checksum mismatch", err)
 	}
 }
 

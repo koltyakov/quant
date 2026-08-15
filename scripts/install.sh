@@ -115,6 +115,7 @@ maybe_install_ollama() {
 need_cmd tar
 need_cmd mktemp
 need_cmd install
+need_cmd awk
 
 os="$(asset_os)"
 arch="$(asset_arch)"
@@ -125,8 +126,28 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
 archive="$tmp_dir/$asset"
+checksums="$tmp_dir/checksums.txt"
 echo "Downloading $asset from $repo..."
 download "$url" "$archive"
+download "https://github.com/${repo}/releases/latest/download/checksums.txt" "$checksums"
+
+expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$checksums")"
+if [ -z "$expected" ]; then
+  echo "error: checksum for $asset not found" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$archive" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+else
+  echo "error: missing required command: sha256sum or shasum" >&2
+  exit 1
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "error: checksum mismatch for $asset" >&2
+  exit 1
+fi
 
 tar -xzf "$archive" -C "$tmp_dir"
 if [ ! -f "$tmp_dir/$binary" ]; then

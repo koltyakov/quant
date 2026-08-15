@@ -33,6 +33,8 @@ embed_api_key: sk-...
 
 The key is sent as `Authorization: Bearer <key>` on every embedding request. Providers that use a different authentication scheme (e.g. custom headers) are not currently supported.
 
+Non-loopback model endpoints must use HTTPS so indexed content and credentials are not sent in plaintext. For a trusted private network that cannot provide TLS, `--allow-insecure-model-http` (or `QUANT_ALLOW_INSECURE_MODEL_HTTP=true`) is an explicit opt-out.
+
 ## Model choice
 
 Practical defaults for Ollama local use:

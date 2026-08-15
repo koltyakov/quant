@@ -94,8 +94,22 @@ New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
 try {
   $archive = "$tmpDir\$asset"
+  $checksums = "$tmpDir\checksums.txt"
   Write-Host "Downloading $asset from $repo..."
   Invoke-Download -Url $url -Out $archive
+  Invoke-Download -Url "https://github.com/$repo/releases/latest/download/checksums.txt" -Out $checksums
+
+  $checksumLine = Get-Content -LiteralPath $checksums | Where-Object { $_ -match "^[0-9a-fA-F]{64}\s+\*?$([regex]::Escape($asset))$" } | Select-Object -First 1
+  if (-not $checksumLine) {
+    Write-Error "Checksum for $asset not found"
+    exit 1
+  }
+  $expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+  $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) {
+    Write-Error "Checksum mismatch for $asset"
+    exit 1
+  }
 
   Expand-Archive -LiteralPath $archive -DestinationPath $tmpDir -Force
   $exeSrc = "$tmpDir\$binary.exe"
