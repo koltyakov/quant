@@ -92,6 +92,7 @@ func NewIndexer(ic IndexerConfig) *Indexer {
 		retries:    NewRetryScheduler(),
 		IndexState: runtimestate.NewIndexStateTracker(),
 	}
+	idx.pipeline.EmbeddingSpace = idx.embeddingSpace()
 	idx.initResyncCoordinator()
 	return idx
 }
@@ -192,11 +193,6 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 		err     error
 	}
 
-	// Snapshot the skip list once instead of querying it per scanned file. A
-	// file quarantined by a worker mid-scan is one this pass has already
-	// visited, so the snapshot cannot let a quarantined file slip through.
-	quarantined := idx.quarantinedKeys(ctx)
-
 	workers := idx.workerCount(0)
 
 	jobs := make(chan pendingItem)
@@ -208,9 +204,6 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 	for range workers {
 		wg.Go(func() {
 			for item := range jobs {
-				if quarantined[item.ref.Key] {
-					continue
-				}
 				modTime := item.result.ModifiedAt
 				action, err := idx.SyncDocumentRef(ctx, item.ref, &modTime, item.doc)
 				indexResults <- indexResult{ref: item.ref, modTime: modTime, action: action, err: err}
@@ -300,7 +293,7 @@ func (idx *Indexer) InitialSyncWithReport(ctx context.Context) (SyncReport, erro
 				}
 				continue
 			}
-			if err := idx.store.DeleteDocument(ctx, ref.Key); err != nil {
+			if err := idx.paths.InvalidatePrefixAnd(ref.Key, func() error { return idx.store.DeleteDocument(ctx, ref.Key) }); err != nil {
 				logx.Error("removing stale document failed", "path", doc.Path, "err", err)
 				continue
 			}
@@ -465,9 +458,7 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 			logx.Error("computing document key failed", "path", event.Path, "err", err)
 			return
 		}
-		if idx.isQuarantined(ctx, ref.Key) {
-			return
-		}
+		idx.paths.InvalidatePrefix(ref.Key)
 		idx.enqueueLiveDocument(ctx, ref, info.ModTime())
 
 	case watch.Remove:
@@ -476,31 +467,41 @@ func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
 			logx.Error("removing document failed", "path", event.Path, "err", err)
 			return
 		}
-		if idx.isQuarantined(ctx, ref.Key) {
-			return
-		}
 		if event.IsDir {
-			idx.paths.InvalidatePrefix(ref.Key)
 			if idx.live != nil {
 				idx.live.CancelPrefix(ref.Key)
 			}
 			if idx.retries != nil {
 				idx.retries.ClearPrefix(ref.Key)
 			}
-			if err := idx.store.DeleteDocumentsByPrefix(ctx, ref.Key); err != nil {
+			if err := idx.paths.InvalidatePrefixAnd(ref.Key, func() error { return idx.store.DeleteDocumentsByPrefix(ctx, ref.Key) }); err != nil {
 				logx.Error("removing directory from index failed", "path", event.Path, "err", err)
 				return
 			}
 		} else {
-			action, err := idx.SyncDocumentRef(ctx, ref, nil, nil)
+			err := idx.paths.InvalidatePrefixAnd(ref.Key, func() error {
+				doc, err := idx.store.GetDocumentByPath(ctx, ref.Key)
+				if err != nil {
+					return err
+				}
+				_, err = removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+				if err == nil && idx.quarantine != nil {
+					err = idx.quarantine.RemoveFromQuarantine(ctx, ref.Key)
+				}
+				return err
+			})
 			if err != nil {
 				logx.Error("removing document failed", "path", event.Path, "err", err)
 				return
 			}
-			if action == IndexNoop {
-				return
+			if idx.live != nil {
+				idx.live.Cancel(ref.Key)
+			}
+			if idx.retries != nil {
+				idx.retries.Clear(ref.Key)
 			}
 		}
+		idx.invalidateQuarantineCache()
 		logx.Info("removed document from index", "path", event.Path)
 	}
 }
@@ -657,14 +658,14 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 			if err != nil {
 				return IndexNoop, err
 			}
-			return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+			return idx.removeCurrentDocument(ctx, ref, doc, version)
 		}
 		if errors.Is(err, errUnsafeDocumentPath) {
 			doc, loadErr := idx.loadDocument(ctx, ref.Key, doc)
 			if loadErr != nil {
 				return IndexNoop, loadErr
 			}
-			return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+			return idx.removeCurrentDocument(ctx, ref, doc, version)
 		}
 		return IndexNoop, fmt.Errorf("stating file: %w", err)
 	}
@@ -677,7 +678,7 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 		if err != nil {
 			return IndexNoop, err
 		}
-		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+		return idx.removeCurrentDocument(ctx, ref, doc, version)
 	}
 
 	effectiveModTime := info.ModTime()
@@ -686,19 +687,7 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 	if err != nil {
 		return IndexNoop, err
 	}
-	precomputedHash := ""
-	if doc != nil && SameModTime(doc.ModifiedAt, effectiveModTime) {
-		precomputedHash, err = scan.FileHash(ref.AbsPath)
-		if err != nil {
-			return IndexNoop, fmt.Errorf("hashing file: %w", err)
-		}
-		if doc.Hash == precomputedHash {
-			idx.refreshDocumentStat(ctx, ref.Key, effectiveModTime, info.Size())
-			return IndexNoop, nil
-		}
-	}
-
-	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, info.Size(), precomputedHash, doc, version)
+	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, info.Size(), "", doc, version)
 }
 
 // refreshDocumentStat keeps the stored filesystem metadata current when the
@@ -767,35 +756,93 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 			batchSize = 16
 		}
 		idx.pipeline = &ingest.Pipeline{
-			Embedder:   idx.embedder,
-			ChunkSize:  idx.cfg.ChunkSize,
-			Overlap:    idx.cfg.ChunkOverlap,
-			BatchSize:  batchSize,
-			DedupStore: idx.dedupStore,
+			Embedder:       idx.embedder,
+			ChunkSize:      idx.cfg.ChunkSize,
+			Overlap:        idx.cfg.ChunkOverlap,
+			BatchSize:      batchSize,
+			DedupStore:     idx.dedupStore,
+			EmbeddingSpace: idx.embeddingSpace(),
 		}
 	}
 	return idx.pipeline
 }
 
-func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, fileSize int64, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
-	hash := precomputedHash
-	if hash == "" {
-		var err error
-		hash, err = scan.FileHash(ref.AbsPath)
-		if err != nil {
-			return IndexNoop, fmt.Errorf("hashing file: %w", err)
+func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, fileSize int64, _ string, doc *index.Document, version uint64) (action IndexAction, resultErr error) {
+	snapshot, hash, info, cleanup, err := snapshotSource(ctx, ref.AbsPath)
+	defer cleanup()
+	defer func() {
+		if shouldQuarantineIndexError(resultErr) && hash != "" {
+			resultErr = &revisionIndexError{error: resultErr, version: version, revision: hash, info: info}
+			idx.quarantineFailedRef(ctx, ref, resultErr)
+		}
+	}()
+	if q, ok := idx.quarantine.(scopedQuarantineStore); ok {
+		entry, qErr := q.GetQuarantineRevision(ctx, ref.Key)
+		if qErr != nil {
+			return IndexNoop, qErr
+		}
+		if entry != nil && entry.Revision == hash && entry.Config == idx.failureConfig(entry.Category) {
+			return IndexNoop, nil
+		}
+		if err := idx.quarantine.RemoveFromQuarantine(ctx, ref.Key); err != nil {
+			return IndexNoop, err
 		}
 	}
-	if doc != nil && doc.Hash == hash {
-		idx.refreshDocumentStat(ctx, ref.Key, modTime, fileSize)
-		return IndexNoop, nil
+	if err != nil {
+		return IndexNoop, err
 	}
+	modTime, fileSize = info.ModTime(), info.Size()
 
+	existingByContent, err := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
+	if err != nil {
+		return IndexNoop, fmt.Errorf("loading existing chunks: %w", err)
+	}
+	compatible := false
+	projection := index.Projection{}
+	if store, ok := idx.store.(projectionStore); ok {
+		stored, err := store.DocumentProjection(ctx, ref.Key)
+		if err != nil {
+			return IndexNoop, err
+		}
+		projection = stored
+		compatible = projection.Fingerprint == idx.projectionFingerprint()
+	}
+	if idx.embedder != nil && projection.EmbeddingSpace != idx.embeddingSpace() {
+		existingByContent = nil
+	}
+	complete := len(existingByContent) > 0
+	if idx.embedder != nil {
+		for _, c := range existingByContent {
+			complete = complete && idx.getPipeline().UsableEmbedding(c.Embedding)
+		}
+		if store, ok := idx.store.(projectionStore); ok && complete {
+			complete, err = store.DocumentEmbeddingsComplete(ctx, ref.Key, idx.embedder.Dimensions())
+			if err != nil {
+				return IndexNoop, err
+			}
+		}
+	}
+	if doc != nil && doc.Hash == hash && compatible && complete {
+		_, err := idx.paths.Publish(ref.Key, version, func() error {
+			if !idx.sourceMatches(ctx, ref, hash, info) {
+				return fmt.Errorf("source changed during indexing")
+			}
+			idx.refreshDocumentStat(ctx, ref.Key, modTime, fileSize)
+			return nil
+		})
+		return IndexNoop, err
+	}
+	if !compatible {
+		existingByContent = nil
+	}
+	projection.Fingerprint = idx.projectionFingerprint()
+	if idx.embedder != nil {
+		projection.EmbeddingSpace = idx.embeddingSpace()
+	}
 	if !idx.paths.IsCurrent(ref.Key, version) {
 		return IndexNoop, nil
 	}
-
-	text, err := idx.extractor.Extract(ctx, ref.AbsPath)
+	text, err := idx.extractor.Extract(ctx, snapshot)
 	if err != nil {
 		if errors.Is(err, ErrOCRFailed) {
 			return IndexNoop, err
@@ -803,21 +850,18 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		return IndexNoop, fmt.Errorf("extracting text: %w", err)
 	}
 
-	if text == "" {
-		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
-	}
-
 	chunks := ingest.PrepareChunks(text, ref.AbsPath, idx.cfg.ChunkSize, idx.cfg.ChunkOverlap)
 	if len(chunks) == 0 {
-		return removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
-	}
-
-	existingByContent, err := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
-	if err != nil {
-		// A transient read failure here would silently drop the embedding
-		// cache for the whole document and re-embed every chunk, so fail
-		// the file and let the retry scheduler handle it.
-		return IndexNoop, fmt.Errorf("loading existing chunks: %w", err)
+		action := IndexNoop
+		_, err := idx.paths.Publish(ref.Key, version, func() error {
+			if !idx.sourceMatches(ctx, ref, hash, info) {
+				return fmt.Errorf("source changed during indexing")
+			}
+			var err error
+			action, err = removeDocumentIfPresent(ctx, idx.store, doc, ref.Key)
+			return err
+		})
+		return action, err
 	}
 
 	chunkRecords, toEmbed, embedPositions, err := idx.getPipeline().DiffChunks(ctx, chunks, existingByContent)
@@ -839,8 +883,23 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 		Language:   language,
 	}
 
-	if err := idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords); err != nil {
+	published, err := idx.paths.Publish(ref.Key, version, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !idx.sourceMatches(ctx, ref, hash, info) {
+			return fmt.Errorf("source changed during indexing")
+		}
+		if store, ok := idx.store.(projectionStore); ok {
+			return store.ReindexDocumentProjection(ctx, indexedDoc, chunkRecords, projection)
+		}
+		return idx.store.ReindexDocument(ctx, indexedDoc, chunkRecords)
+	})
+	if err != nil {
 		return IndexNoop, err
+	}
+	if !published {
+		return IndexNoop, nil
 	}
 
 	return IndexUpdated, nil
@@ -974,12 +1033,10 @@ func (idx *Indexer) scheduleIndexRetryRef(ctx context.Context, ref DocumentRef, 
 	if !shouldRetryIndexError(err) {
 		idx.retries.Clear(ref.Key)
 		logx.Warn("not retrying path", "path", ref.AbsPath, "err", err)
-		if shouldQuarantineIndexError(err) {
-			idx.quarantineFailedRef(ctx, ref, err)
-		}
+		// The job's defer owns revision-guarded quarantine publication.
 		return
 	}
-	result := idx.retries.Schedule(ref.Key, modTime, func(retryModTime time.Time) {
+	idx.retries.Schedule(ref.Key, modTime, func(retryModTime time.Time) {
 		select {
 		case <-ctx.Done():
 			idx.retries.Clear(ref.Key)
@@ -988,9 +1045,6 @@ func (idx *Indexer) scheduleIndexRetryRef(ctx context.Context, ref DocumentRef, 
 		}
 		idx.enqueueLiveDocument(ctx, ref, retryModTime)
 	})
-	if result == RetryScheduleGaveUp && shouldQuarantineIndexError(err) {
-		idx.quarantineFailedRef(ctx, ref, err)
-	}
 }
 
 func shouldRetryIndexError(err error) bool {
@@ -1028,25 +1082,11 @@ func shouldQuarantineIndexError(err error) bool {
 }
 
 func (idx *Indexer) quarantineFailedRef(ctx context.Context, ref DocumentRef, failure error) {
-	if idx == nil || idx.cfg == nil || ref.Key == "" || failure == nil {
+	var revisionErr *revisionIndexError
+	if idx == nil || idx.cfg == nil || idx.paths == nil || !errors.As(failure, &revisionErr) {
 		return
 	}
-	if idx.quarantine == nil {
-		logx.Warn("no quarantine store available; skipping quarantine", "path", ref.AbsPath)
-		return
-	}
-
-	if err := idx.quarantine.AddToQuarantine(ctx, ref.Key, failure.Error()); err != nil {
-		logx.Warn("adding path to quarantine failed", "path", ref.AbsPath, "err", err)
-		return
-	}
-	idx.invalidateQuarantineCache()
-
-	if delErr := idx.store.DeleteDocument(ctx, ref.Key); delErr != nil {
-		logx.Warn("removing quarantined document from index failed", "path", ref.AbsPath, "err", delErr)
-	}
-
-	logx.Warn("quarantined path in skip list", "path", ref.AbsPath, "error", failure.Error())
+	idx.quarantineRevisionFailure(ctx, ref, revisionErr.version, revisionErr.revision, revisionErr.info, failure)
 }
 
 func removeDocumentIfPresent(ctx context.Context, store index.DocumentWriter, doc *index.Document, path string) (IndexAction, error) {

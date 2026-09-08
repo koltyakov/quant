@@ -723,7 +723,7 @@ func TestGetPipeline_NilPipeline(t *testing.T) {
 	}
 }
 
-func TestIndexFileCore_HashMatchNoop(t *testing.T) {
+func TestIndexFileCore_HashMatchWithoutProjectionRebuilds(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "a.txt")
 	writeFile(t, file, "hello")
@@ -748,8 +748,8 @@ func TestIndexFileCore_HashMatchNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != IndexNoop {
-		t.Fatalf("expected noop when hash matches, got %s", action)
+	if action != IndexUpdated {
+		t.Fatalf("expected rebuild without compatible projection, got %s", action)
 	}
 }
 
@@ -1111,7 +1111,7 @@ func TestQuarantineFailedPath_NilFailure(t *testing.T) {
 	}
 }
 
-func TestQuarantineFailedPath_Success(t *testing.T) {
+func TestQuarantineFailedPath_UnscopedFailureIgnored(t *testing.T) {
 	root := t.TempDir()
 	quarantine := &stubQuarantineStore{}
 	idx := newTestIndexer(root, &trackingDocumentStore{}, &stubExtractor{}, &stubEmbedder{dimensions: 3})
@@ -1119,7 +1119,7 @@ func TestQuarantineFailedPath_Success(t *testing.T) {
 
 	file := filepath.Join(root, "a.txt")
 	idx.quarantineFailedPath(context.Background(), file, errors.New("permanent failure"))
-	if quarantine.addedPath != "a.txt" {
-		t.Fatalf("expected quarantined path 'a.txt', got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("unscoped failure quarantined %q", quarantine.addedPath)
 	}
 }

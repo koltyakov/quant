@@ -23,6 +23,31 @@ type mockEmbedder struct {
 	dims    int
 }
 
+func TestDiffChunksRejectsUnusableCachedEmbeddings(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"empty":            {},
+		"wrong-dimensions": index.EncodeInt8([]float32{1, 2}),
+		"non-finite":       index.EncodeFloat32([]float32{float32(math.NaN()), 1, 2}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := chunk.Chunk{Content: "same content"}
+			key := index.ChunkDiffKey(c.Content)
+			dedup := newMockDedupStore()
+			dedup.store[key] = data
+			p := Pipeline{Embedder: &mockEmbedder{dims: 3}, DedupStore: dedup}
+			_, pending, _, err := p.DiffChunks(t.Context(), []chunk.Chunk{c}, map[string]index.ChunkRecord{key: {Content: c.Content, Embedding: data}})
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("pending=%d err=%v", len(pending), err)
+			}
+			dedup.store[key] = index.EncodeInt8([]float32{1, 0, 0})
+			records, pending, _, err := p.DiffChunks(t.Context(), []chunk.Chunk{c}, map[string]index.ChunkRecord{key: {Content: c.Content, Embedding: data}})
+			if err != nil || len(pending) != 0 || !p.UsableEmbedding(records[0].Embedding) {
+				t.Fatalf("valid dedup not reused: pending=%d err=%v", len(pending), err)
+			}
+		})
+	}
+}
+
 func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	m.called++
 	if m.err != nil {
@@ -193,14 +218,14 @@ func TestDiffChunks_ReusesExisting(t *testing.T) {
 func TestDiffChunks_ReusePreservesMetadata(t *testing.T) {
 	t.Parallel()
 	dedup := newMockDedupStore()
-	dedup.store[index.ChunkDiffKey("beta")] = []byte("dedup-emb")
-	p := &Pipeline{ChunkSize: 100, Overlap: 0.15, DedupStore: dedup}
+	dedup.store[index.ChunkDiffKey("beta")] = index.EncodeInt8([]float32{1})
+	p := &Pipeline{ChunkSize: 100, Overlap: 0.15, DedupStore: dedup, Embedder: &mockEmbedder{}}
 	chunks := []chunk.Chunk{
 		{Content: "alpha", Index: 0, Depth: 2, SectionTitle: "Section A"},
 		{Content: "beta", Index: 1, Depth: 1, SectionTitle: "Section B"},
 	}
 	existing := map[string]index.ChunkRecord{
-		index.ChunkDiffKey("alpha"): {Content: "alpha", Embedding: []byte{1, 2, 3}, Summary: "alpha summary"},
+		index.ChunkDiffKey("alpha"): {Content: "alpha", Embedding: index.EncodeInt8([]float32{1}), Summary: "alpha summary"},
 	}
 	records, toEmbed, _, err := p.DiffChunks(context.Background(), chunks, existing)
 	if err != nil {
@@ -223,8 +248,8 @@ func TestDiffChunks_ReusePreservesMetadata(t *testing.T) {
 func TestDiffChunks_DedupHit(t *testing.T) {
 	t.Parallel()
 	dedup := newMockDedupStore()
-	dedup.store[index.ChunkDiffKey("existing")] = []byte("dedup-emb")
-	p := &Pipeline{DedupStore: dedup}
+	dedup.store[index.ChunkDiffKey("existing")] = index.EncodeInt8([]float32{1})
+	p := &Pipeline{DedupStore: dedup, Embedder: &mockEmbedder{}}
 	ctx := context.Background()
 
 	chunks := []chunk.Chunk{
@@ -241,7 +266,7 @@ func TestDiffChunks_DedupHit(t *testing.T) {
 	if toEmbed[0].Content != "new" {
 		t.Fatalf("expected new chunk content 'new', got %q", toEmbed[0].Content)
 	}
-	if string(records[0].Embedding) != "dedup-emb" {
+	if string(records[0].Embedding) != string(index.EncodeInt8([]float32{1})) {
 		t.Fatalf("expected dedup-emb for existing chunk, got %q", string(records[0].Embedding))
 	}
 	if dedup.lookups != 2 {

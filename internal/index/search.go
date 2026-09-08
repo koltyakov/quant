@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -36,6 +37,10 @@ func (s *Store) Search(ctx context.Context, query string, queryEmbedding []float
 }
 
 func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter SearchFilter) ([]SearchResult, error) {
+	semanticStatus(ctx, "unavailable", nil)
+	if math.IsNaN(float64(filter.Threshold)) || math.IsInf(float64(filter.Threshold), 0) {
+		return nil, fmt.Errorf("threshold must be finite")
+	}
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -87,25 +92,34 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, queryEmbedding
 
 	var vectorOnlyCandidates map[int]*searchCandidate
 	if queryEmbedding != nil {
+		semanticStatus(ctx, "complete", nil)
 		var err error
-		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, limit, pathPrefix, keywordCandidates, docFilter, metadataWhere, metadataArgs)
+		// Keep a useful semantic pool even for limit=1, bounded independently
+		// from the keyword pool and the reranker's configured TopK.
+		vectorOnlyCandidates, err = s.collectVectorCandidates(ctx, queryEmbedding, min(max(limit, 100), 1000), pathPrefix, keywordCandidates, docFilter, metadataWhere, metadataArgs)
 		if err != nil {
+			semanticStatus(ctx, "failed", err)
 			return nil, err
 		}
 	}
 
 	weights := classifyQueryWeights(query, s.keywordWeightOverride, s.vectorWeightOverride)
-	results := unifiedRRF(keywordCandidates, vectorOnlyCandidates, limit, pathQueryTokens(query), weights)
-
-	s.hydrateResultContents(ctx, results)
+	results := fuseCandidates(keywordCandidates, vectorOnlyCandidates, pathQueryTokens(query), weights)
 
 	if s.reranker != nil {
-		reranked, err := s.reranker.Rerank(ctx, query, queryEmbedding, results)
+		s.hydrateResultContents(ctx, results)
+		reranked, err := s.reranker.Rerank(ctx, query, queryEmbedding, slices.Clone(results))
 		if err == nil && len(reranked) > 0 {
 			results = reranked
 		}
+		if err != nil {
+			if d, ok := ctx.Value(retrievalDiagnosticsKey{}).(*RetrievalDiagnostics); ok {
+				d.RerankError = err.Error()
+			}
+		}
 	}
-
+	results = finalizeSearchResults(results, filter.Threshold, limit)
+	s.hydrateResultContents(ctx, results)
 	return results, nil
 }
 
@@ -186,6 +200,7 @@ func (s *Store) GetChunkWindow(ctx context.Context, chunkID int64, before, after
 }
 
 func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]SearchResult, error) {
+	semanticStatus(ctx, "unavailable", nil)
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -209,6 +224,7 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 	}
 
 	queryEmbed := NormalizeFloat32(vec)
+	semanticStatus(ctx, "complete", nil)
 	vectorOnly := make(map[int]*searchCandidate)
 
 	if s.hnsw != nil && s.hnsw.ready.Load() {
@@ -224,6 +240,7 @@ func (s *Store) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]Se
 			s.loadHNSWChunkRows(ctx, filtered, queryEmbed, limit, nil, vectorOnly, nil)
 		}
 	} else if err := s.findSimilarBruteForce(ctx, chunkID, queryEmbed, limit, vectorOnly); err != nil {
+		semanticStatus(ctx, "failed", err)
 		return nil, err
 	}
 
@@ -320,6 +337,7 @@ func (s *Store) hydrateResultContents(ctx context.Context, results []SearchResul
 
 func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string, metadataWhere string, metadataArgs []any) (bool, error) {
 	if s.maxVectorSearchCandidates == 0 {
+		semanticStatus(ctx, "budget_skipped", nil)
 		logx.Info("skipping brute-force vector fallback", "reason", "max_vector_candidates=0")
 		return false, nil
 	}
@@ -334,6 +352,7 @@ func (s *Store) canRunVectorFallback(ctx context.Context, pathPrefix string, met
 	}
 
 	if count > s.maxVectorSearchCandidates {
+		semanticStatus(ctx, "budget_skipped", nil)
 		logx.Info("skipping brute-force vector fallback", "candidate_count_over", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return false, nil
 	}
@@ -363,6 +382,7 @@ func (s *Store) collectVectorCandidates(ctx context.Context, queryEmbedding []fl
 	var rows *sql.Rows
 	var err error
 	if pathPrefix == "" && len(docFilter) > 0 && metadataWhere == "" {
+		semanticStatus(ctx, "incomplete", nil)
 		rows, err = s.queryChunksByDocPaths(ctx, docFilter)
 	} else {
 		query, args := filteredChunkQuery(vectorScanColumns, pathPrefix, metadataWhere, metadataArgs)
@@ -517,7 +537,7 @@ func (s *Store) scanVectorRows(rows *sql.Rows, queryEmbedding []float32, limit i
 }
 
 func (s *Store) collectHNSWCandidates(ctx context.Context, queryEmbedding []float32, limit int, keywordCandidates map[int]*searchCandidate, vectorOnly map[int]*searchCandidate, docFilter map[string]float32) {
-	fetchK := limit*3 + len(keywordCandidates) + 10
+	fetchK := min(limit*3+len(keywordCandidates)+10, maxHNSWFetchK)
 	ids := s.hnsw.Search(queryEmbedding, fetchK)
 	if len(ids) == 0 {
 		return
@@ -531,12 +551,13 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	// the SQL filter. When the filter is broad (a repo-root path prefix, a
 	// common file type) enough survive, and the survivors are exactly the
 	// nearest filtered chunks — the full filter-set id scan below is skipped.
-	probeK := limit*3 + len(keywordCandidates) + 10
+	probeK := min(limit*3+len(keywordCandidates)+10, maxHNSWFetchK)
 	probeIDs := s.hnsw.Search(queryEmbedding, probeK)
 	if len(probeIDs) > 0 {
 		survivors, err := s.filterChunkIDs(ctx, probeIDs, pathPrefix, metadataWhere, metadataArgs)
 		if err != nil {
 			logx.Warn("filtered vector search: probe filter query failed; returning keyword-only results", "err", err)
+			semanticStatus(ctx, "failed", err)
 			return
 		}
 		if len(survivors) > 0 {
@@ -552,13 +573,18 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	filterRows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		logx.Warn("filtered vector search: candidate query failed; returning keyword-only results", "err", err)
+		semanticStatus(ctx, "failed", err)
 		return
 	}
 	filterSet := make(map[int]bool)
 	truncated := false
 	for filterRows.Next() {
 		var id int
-		if filterRows.Scan(&id) == nil {
+		if err := filterRows.Scan(&id); err != nil {
+			semanticStatus(ctx, "failed", err)
+			_ = filterRows.Close()
+			return
+		} else {
 			filterSet[id] = true
 			if len(filterSet) >= maxFilterSetIDs {
 				truncated = true
@@ -569,9 +595,11 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	_ = filterRows.Close()
 	if rowsErr := filterRows.Err(); rowsErr != nil {
 		logx.Warn("filtered vector search: candidate scan failed; returning keyword-only results", "err", rowsErr)
+		semanticStatus(ctx, "failed", rowsErr)
 		return
 	}
 	if truncated {
+		semanticStatus(ctx, "incomplete", nil)
 		// The HNSW probe below can return at most maxHNSWFetchK neighbors, so
 		// a partial filter set costs some recall but bounds memory for very
 		// broad filters.
@@ -595,17 +623,32 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	if len(filtered) > 0 {
 		s.loadHNSWChunkRows(ctx, filtered, queryEmbedding, limit, keywordCandidates, vectorOnly, nil)
 	}
-	if len(filtered) >= limit {
+	if len(filtered) >= limit || (!truncated && len(filtered) == len(filterSet)) {
 		return
 	}
 
 	if s.maxVectorSearchCandidates == 0 {
 		logx.Info("skipping brute-force filtered vector fallback", "reason", "max_vector_candidates=0", "path_prefix", pathPrefix)
+		semanticStatus(ctx, "budget_skipped", nil)
+		semanticStatus(ctx, "incomplete", nil)
 		return
 	}
 	if s.maxVectorSearchCandidates > 0 && len(filterSet) > s.maxVectorSearchCandidates {
+		semanticStatus(ctx, "budget_skipped", nil)
+		semanticStatus(ctx, "incomplete", nil)
 		logx.Info("skipping brute-force filtered vector fallback", "matching_chunks", len(filterSet), "max_vector_candidates", s.maxVectorSearchCandidates, "path_prefix", pathPrefix)
 		return
+	}
+	if truncated {
+		ok, err := s.canRunVectorFallback(ctx, pathPrefix, metadataWhere, metadataArgs)
+		if err != nil {
+			semanticStatus(ctx, "failed", err)
+			return
+		}
+		if !ok {
+			semanticStatus(ctx, "incomplete", nil)
+			return
+		}
 	}
 	// Re-run the filter as a direct scan rather than feeding every matching id
 	// back in as a bound variable: the filter set can hold far more ids than
@@ -615,12 +658,16 @@ func (s *Store) collectHNSWCandidatesWithDBFilter(ctx context.Context, queryEmbe
 	scanRows, err := s.db.QueryContext(ctx, scanQuery, scanArgs...)
 	if err != nil {
 		logx.Warn("filtered vector search: brute-force fallback query failed; returning keyword-only results", "err", err)
+		semanticStatus(ctx, "failed", err)
 		return
 	}
 	defer func() { _ = scanRows.Close() }()
 
 	if _, err := s.scanVectorRows(scanRows, queryEmbedding, limit, keywordCandidates, vectorOnly); err != nil {
 		logx.Warn("filtered vector search: brute-force fallback scan failed", "err", err)
+		semanticStatus(ctx, "failed", err)
+	} else {
+		semanticStatus(ctx, "complete", nil)
 	}
 }
 
@@ -695,6 +742,7 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			logx.Warn("vector search: loading hnsw candidate chunks failed", "err", err)
+			semanticStatus(ctx, "failed", err)
 			return
 		}
 
@@ -702,6 +750,7 @@ func (s *Store) loadHNSWChunkRows(ctx context.Context, ids []int, queryEmbedding
 		_ = rows.Close()
 		if err != nil {
 			logx.Warn("vector search: scanning hnsw candidate chunks failed", "err", err)
+			semanticStatus(ctx, "failed", err)
 			return
 		}
 	}

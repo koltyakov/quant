@@ -20,17 +20,27 @@ func searchRows(results []index.SearchResult) []searchToolResultRow {
 }
 
 func searchRow(result index.SearchResult) searchToolResultRow {
+	semantics := ""
+	switch result.ScoreKind {
+	case "rrf":
+		semantics = "theoretical-maximum-normalized reciprocal rank fusion with path and recency boosts; not a probability"
+	case "rerank_blend":
+		semantics = "weighted blend of pool-maximum-normalized original and model relevance scores; not a probability; only scored candidates returned"
+	case "similar":
+		semantics = "embedding dot product; not a probability"
+	}
 	return searchToolResultRow{
-		ChunkID:       result.ChunkID,
-		Path:          result.DocumentPath,
-		ChunkIndex:    result.ChunkIndex,
-		Score:         result.Score,
-		ScoreKind:     result.ScoreKind,
-		ChunkContent:  result.ChunkContent,
-		ParentID:      result.ParentID,
-		Depth:         result.Depth,
-		SectionTitle:  result.SectionTitle,
-		ParentContext: result.ParentContext,
+		ScoreSemantics: semantics,
+		ChunkID:        result.ChunkID,
+		Path:           result.DocumentPath,
+		ChunkIndex:     result.ChunkIndex,
+		Score:          result.Score,
+		ScoreKind:      result.ScoreKind,
+		ChunkContent:   result.ChunkContent,
+		ParentID:       result.ParentID,
+		Depth:          result.Depth,
+		SectionTitle:   result.SectionTitle,
+		ParentContext:  result.ParentContext,
 	}
 }
 

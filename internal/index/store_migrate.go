@@ -24,6 +24,11 @@ func (s *Store) migrate() error {
 		embedding   BLOB NOT NULL
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_document_chunk ON chunks(document_id, chunk_index);
+	CREATE TABLE IF NOT EXISTS document_projection (
+		document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+		fingerprint TEXT NOT NULL,
+		embedding_space TEXT NOT NULL
+	);
 	CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 	CREATE TABLE IF NOT EXISTS embedding_metadata (
 		key   TEXT PRIMARY KEY,
@@ -52,6 +57,12 @@ func (s *Store) migrate() error {
 		content_hash TEXT PRIMARY KEY,
 		embedding    BLOB NOT NULL,
 		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE TABLE IF NOT EXISTS quarantine_revision (
+		path TEXT PRIMARY KEY REFERENCES quarantine(path) ON DELETE CASCADE,
+		revision TEXT NOT NULL,
+		category TEXT NOT NULL,
+		config TEXT NOT NULL
 	);
 	CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 		content,

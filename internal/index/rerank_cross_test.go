@@ -2,6 +2,7 @@ package index
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/koltyakov/quant/internal/llm"
@@ -129,49 +130,16 @@ func TestParseScoreArrayWithSurroundingText(t *testing.T) {
 
 func TestParseScoreArrayInvalidJSON(t *testing.T) {
 	t.Parallel()
-	scores, err := parseScoreArray("[not valid json]", 4)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := []float32{0.5, 0.5, 0.5, 0.5}
-	for i, s := range scores {
-		if s != expected[i] {
-			t.Fatalf("expected uniform fallback at index %d: got %f, want %f", i, s, expected[i])
-		}
-	}
-}
-
-func TestParseScoreArrayNoArray(t *testing.T) {
-	t.Parallel()
-	scores, _ := parseScoreArray("no array here", 3)
-	for _, s := range scores {
-		if s != 0.5 {
-			t.Fatalf("expected uniform 0.5, got %f", s)
-		}
-	}
-}
-
-func TestParseScoreArrayEmptyContent(t *testing.T) {
-	t.Parallel()
-	scores, _ := parseScoreArray("", 2)
-	for _, s := range scores {
-		if s != 0.5 {
-			t.Fatalf("expected uniform 0.5, got %f", s)
-		}
-	}
-}
-
-func TestParseScoreArrayMismatchedLength(t *testing.T) {
-	t.Parallel()
-	scores, _ := parseScoreArray("[0.8]", 3)
-	if len(scores) != 3 {
-		t.Fatalf("expected 3 scores, got %d", len(scores))
-	}
-	if scores[0] != 0.8 {
-		t.Fatalf("expected first score 0.8, got %f", scores[0])
-	}
-	if scores[1] != 0.5 || scores[2] != 0.5 {
-		t.Fatalf("expected fallback 0.5 for missing entries, got %f %f", scores[1], scores[2])
+	for _, response := range []string{"[not valid json]", "no array", "", "[]", "[0.8]", "[0.1,0.2,0.3]", "[null,0.5]", "[NaN,0.5]", "[1e400,0.5]", "[1e100,0.5]"} {
+		t.Run(response, func(t *testing.T) {
+			r := NewCrossEncoderReranker(CrossEncoderConfig{Completer: &stubCompleter{response: response}})
+			original := []SearchResult{{ChunkID: 1, Score: .9, ScoreKind: "rrf"}, {ChunkID: 2, Score: .8, ScoreKind: "rrf"}}
+			before := append([]SearchResult(nil), original...)
+			out, err := r.Rerank(context.Background(), "q", nil, original)
+			if err == nil || !reflect.DeepEqual(out, before) || !reflect.DeepEqual(original, before) {
+				t.Fatalf("invalid response must error without changing results: out=%v err=%v", out, err)
+			}
+		})
 	}
 }
 
@@ -186,15 +154,29 @@ func TestParseScoreArrayClamp(t *testing.T) {
 	}
 }
 
-func TestUniformScores(t *testing.T) {
-	t.Parallel()
-	scores := uniformScores(5, 0.7)
-	if len(scores) != 5 {
-		t.Fatalf("expected 5 scores, got %d", len(scores))
+func TestCrossEncoderScoredPoolOnly(t *testing.T) {
+	r := NewCrossEncoderReranker(CrossEncoderConfig{TopK: 2, Completer: &stubCompleter{response: "[0.2,0.9]"}})
+	out, err := r.Rerank(context.Background(), "q", nil, []SearchResult{{ChunkID: 1, Score: .9}, {ChunkID: 2, Score: .8}, {ChunkID: 3, Score: .7}})
+	if err != nil || len(out) != 2 {
+		t.Fatalf("out=%v err=%v", out, err)
 	}
-	for _, s := range scores {
-		if s != 0.7 {
-			t.Fatalf("expected 0.7, got %f", s)
+	for _, result := range out {
+		if result.ScoreKind != "rerank_blend" || result.ChunkID == 3 {
+			t.Fatalf("unscored or mislabeled result: %+v", result)
 		}
+	}
+}
+
+func TestCrossEncoderLateBatchFailurePreservesAllResults(t *testing.T) {
+	// The first batch succeeds; the same eight scores are wrong for batch two.
+	r := NewCrossEncoderReranker(CrossEncoderConfig{Completer: &stubCompleter{response: "[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]"}})
+	in := make([]SearchResult, 9)
+	for i := range in {
+		in[i] = SearchResult{ChunkID: int64(i + 1), Score: float32(9-i) / 10, ScoreKind: "rrf"}
+	}
+	before := append([]SearchResult(nil), in...)
+	out, err := r.Rerank(context.Background(), "q", nil, in)
+	if err == nil || !reflect.DeepEqual(out, before) || !reflect.DeepEqual(in, before) {
+		t.Fatalf("out=%v err=%v", out, err)
 	}
 }

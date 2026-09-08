@@ -15,8 +15,9 @@ type SearchRequest struct {
 }
 
 type SearchResponse struct {
-	Results []index.SearchResult `json:"results"`
-	Error   string               `json:"error,omitempty"`
+	Retrieval *index.RetrievalDiagnostics `json:"retrieval,omitempty"`
+	Results   []index.SearchResult        `json:"results"`
+	Error     string                      `json:"error,omitempty"`
 }
 
 type FindSimilarRequest struct {
@@ -25,8 +26,9 @@ type FindSimilarRequest struct {
 }
 
 type FindSimilarResponse struct {
-	Results []index.SearchResult `json:"results"`
-	Error   string               `json:"error,omitempty"`
+	Retrieval *index.RetrievalDiagnostics `json:"retrieval,omitempty"`
+	Results   []index.SearchResult        `json:"results"`
+	Error     string                      `json:"error,omitempty"`
 }
 
 type ListSourcesRequest struct {

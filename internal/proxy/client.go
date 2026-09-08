@@ -54,17 +54,7 @@ func (c *Client) Alive(ctx context.Context) bool {
 }
 
 func (c *Client) Search(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string) ([]index.SearchResult, error) {
-	body := SearchRequest{
-		Query:          query,
-		QueryEmbedding: queryEmbedding,
-		Limit:          limit,
-		PathPrefix:     pathPrefix,
-	}
-	var resp SearchResponse
-	if err := c.doPost(ctx, "/proxy/search", body, &resp); err != nil {
-		return nil, err
-	}
-	return resp.Results, nil
+	return c.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, index.SearchFilter{})
 }
 
 func (c *Client) SearchFiltered(ctx context.Context, query string, queryEmbedding []float32, limit int, pathPrefix string, filter index.SearchFilter) ([]index.SearchResult, error) {
@@ -79,6 +69,7 @@ func (c *Client) SearchFiltered(ctx context.Context, query string, queryEmbeddin
 	if err := c.doPost(ctx, "/proxy/search", body, &resp); err != nil {
 		return nil, err
 	}
+	index.RecordRetrievalDiagnostics(ctx, resp.Retrieval)
 	return resp.Results, nil
 }
 
@@ -88,6 +79,7 @@ func (c *Client) FindSimilar(ctx context.Context, chunkID int64, limit int) ([]i
 	if err := c.doPost(ctx, "/proxy/find_similar", body, &resp); err != nil {
 		return nil, err
 	}
+	index.RecordRetrievalDiagnostics(ctx, resp.Retrieval)
 	return resp.Results, nil
 }
 
@@ -249,10 +241,14 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp struct {
-			Error string `json:"error"`
+			Error     string                      `json:"error"`
+			Retrieval *index.RetrievalDiagnostics `json:"retrieval,omitempty"`
 		}
-		if json.Unmarshal(respData, &errResp) == nil && errResp.Error != "" {
-			return fmt.Errorf("proxy error (%d): %s", resp.StatusCode, errResp.Error)
+		if json.Unmarshal(respData, &errResp) == nil {
+			index.RecordRetrievalDiagnostics(ctx, errResp.Retrieval)
+			if errResp.Error != "" {
+				return fmt.Errorf("proxy error (%d): %s", resp.StatusCode, errResp.Error)
+			}
 		}
 		return fmt.Errorf("proxy error (%d): %s", resp.StatusCode, string(respData))
 	}

@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"strings"
@@ -22,12 +23,13 @@ type ContentDedupStore interface {
 }
 
 type Pipeline struct {
-	Embedder   embed.Embedder
-	ChunkSize  int
-	Overlap    float64
-	BatchSize  int
-	DedupStore ContentDedupStore
-	Summarizer ChunkSummarizer
+	Embedder       embed.Embedder
+	ChunkSize      int
+	Overlap        float64
+	BatchSize      int
+	DedupStore     ContentDedupStore
+	Summarizer     ChunkSummarizer
+	EmbeddingSpace string
 }
 
 type ChunkSummarizer interface {
@@ -57,7 +59,7 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 
 	for i, c := range chunks {
 		key := keys[i]
-		if existingRecord, ok := existing[key]; ok {
+		if existingRecord, ok := existing[key]; ok && p.UsableEmbedding(existingRecord.Embedding) {
 			records = append(records, index.ChunkRecord{
 				Content:      c.Content,
 				ChunkIndex:   c.Index,
@@ -68,7 +70,7 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 			})
 			continue
 		}
-		if embedding, ok := deduped[key]; ok {
+		if embedding, ok := deduped[key]; ok && p.UsableEmbedding(embedding) {
 			records = append(records, index.ChunkRecord{
 				Content:      c.Content,
 				ChunkIndex:   c.Index,
@@ -89,14 +91,14 @@ func (p *Pipeline) DiffChunks(ctx context.Context, chunks []chunk.Chunk, existin
 // own existing chunks do not already cover. A dedup read failure is not fatal:
 // the affected chunks are simply re-embedded.
 func (p *Pipeline) lookupDedup(ctx context.Context, keys []string, existing map[string]index.ChunkRecord) map[string][]byte {
-	if p.DedupStore == nil {
+	if p.DedupStore == nil || p.Embedder == nil {
 		return nil
 	}
 
 	wanted := make([]string, 0, len(keys))
 	seen := make(map[string]bool, len(keys))
 	for _, key := range keys {
-		if _, ok := existing[key]; ok {
+		if record, ok := existing[key]; ok && p.UsableEmbedding(record.Embedding) {
 			continue
 		}
 		if seen[key] {
@@ -109,12 +111,56 @@ func (p *Pipeline) lookupDedup(ctx context.Context, keys []string, existing map[
 		return nil
 	}
 
-	deduped, err := p.DedupStore.LookupContentDedupBatch(ctx, wanted)
+	cacheKeys := make([]string, len(wanted))
+	for i, key := range wanted {
+		cacheKeys[i] = p.dedupKey(key)
+	}
+	deduped, err := p.DedupStore.LookupContentDedupBatch(ctx, cacheKeys)
 	if err != nil {
 		logx.Warn("content dedup lookup failed; re-embedding chunks", "chunks", len(wanted), "err", err)
 		return nil
 	}
-	return deduped
+	result := make(map[string][]byte, len(deduped))
+	for i, key := range wanted {
+		if data, ok := deduped[cacheKeys[i]]; ok {
+			result[key] = data
+		}
+	}
+	return result
+}
+
+func (p *Pipeline) dedupKey(key string) string {
+	if p.EmbeddingSpace == "" {
+		return key
+	}
+	return index.ChunkDiffKey(p.EmbeddingSpace + ":" + key)
+}
+
+// UsableEmbedding rejects missing, malformed, or non-finite cached vectors.
+// Model compatibility is established by the caller/store metadata before diffing.
+func (p *Pipeline) UsableEmbedding(data []byte) bool {
+	if p.Embedder == nil {
+		return len(data) > 0
+	}
+	dims := p.Embedder.Dimensions()
+	if dims <= 0 {
+		return false
+	}
+	finite := func(v float32) bool { return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) }
+	if len(data) == dims*4 {
+		for i := 0; i < len(data); i += 4 {
+			if !finite(math.Float32frombits(binary.LittleEndian.Uint32(data[i:]))) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(data) != dims+8 {
+		return false
+	}
+	minVal := math.Float32frombits(binary.LittleEndian.Uint32(data))
+	scale := math.Float32frombits(binary.LittleEndian.Uint32(data[4:]))
+	return scale >= 0 && finite(minVal) && finite(scale) && finite(minVal+255*scale)
 }
 
 func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
@@ -244,7 +290,7 @@ func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, posit
 				Summary:      summary,
 			}
 			if dedupEntries != nil {
-				dedupEntries[index.ChunkDiffKey(index.EmbedInputText(c.Heading, c.Content))] = emb
+				dedupEntries[p.dedupKey(index.ChunkDiffKey(index.EmbedInputText(c.Heading, c.Content)))] = emb
 			}
 		}
 

@@ -23,6 +23,8 @@ ollama pull nomic-embed-text
 
 `quant` attempts these recovery steps automatically for local Ollama. If Ollama remains unavailable or its model cannot be pulled, it starts in keyword-only mode and search relies on FTS5 keyword matching.
 
+After restoring the backend, restart `quant`. Startup backfills missing embeddings for files indexed in keyword-only mode; unchanged files do not need an edit or a full index deletion.
+
 For remote or OpenAI-compatible backends, verify the URL, API key, and network connectivity:
 ```bash
 curl -H "Authorization: Bearer $QUANT_EMBED_API_KEY" \
@@ -63,7 +65,7 @@ Remote custom hosts require an explicit `--embed-provider`. Provider, authentica
      - "**/*_test.go"
    ```
 
-5. **Check for large files.** Plain-text files are indexed from at most their first 8 MiB. Structured document extractors reject files over 100 MiB.
+5. **Check for large files.** All files over 100 MiB are rejected before extraction. Within that limit, plain-text files are indexed from at most their first 8 MiB.
 
 ---
 
@@ -102,11 +104,25 @@ Remote custom hosts require an explicit `--embed-provider`. Provider, authentica
 
 3. **Excluded by `.gitignore`.** `quant` respects `.gitignore` files. If a file is gitignored, it won't be indexed.
 
-4. **File too large.** Plain-text files are truncated to their first 8 MiB and indexed. PDF, notebook, HTML, Office/Open XML, OpenDocument, and RTF files over 100 MiB are rejected.
+4. **File too large.** The source snapshot limit rejects all files over 100 MiB. Plain-text files within that limit are truncated to their first 8 MiB and indexed.
 
 5. **Index not yet up to date.** After adding files, `quant` may still be processing the queue. Check `index_status` to see the current `state`.
 
-6. **Permanent indexing failure.** OCR failures, oversized structured files, and permanent embedding errors can quarantine a file. Quarantine entries persist across restarts and are not retried automatically. There is currently no quarantine-management CLI; to force a complete retry, stop `quant`, remove `.index/`, and restart. This rebuilds the entire index.
+6. **Permanent indexing failure.** OCR failures, oversized files, and permanent embedding errors can quarantine a file. Quarantine applies to the failed source revision and relevant configuration. Editing the file or changing that configuration retries it automatically. Installing or repairing an external OCR tool may require an explicit retry.
+
+To retry without deleting the index, stop all MCP instances using the database, including workers, then run:
+
+```bash
+# Retry one path relative to the watch directory on the next startup
+quant retry --dir ./my-project --path docs/scanned.pdf
+
+# Or clear all quarantine entries
+quant retry --dir ./my-project
+
+quant mcp --dir ./my-project
+```
+
+Use the same `--config` and `--db` settings as MCP when applicable. `retry` only clears quarantine; the next MCP startup rescans. A running primary's database lock makes the command fail safely. Instances started without locking must also be stopped. Files that still fail can be quarantined again.
 
 ---
 
@@ -117,6 +133,8 @@ Remote custom hosts require an explicit `--embed-provider`. Provider, authentica
 **Steps:**
 
 1. **Check embedding status.** If `embedding_status` in the response is `"keyword_only"`, the embedding backend is unavailable and results are keyword-only. Fix the backend (see above) and restart `quant`.
+
+Also inspect `retrieval.semantic`: healthy query embeddings can coexist with skipped, incomplete, or failed semantic retrieval. See [retrieval diagnostics](search.md#retrieval-diagnostics) before treating an empty result set as proof of no matches.
 
 2. **Try a different query shape.** The hybrid pipeline weights signals based on query shape. For code identifiers, use exact names (`getUserById`). For conceptual questions, use natural language phrases.
 
@@ -193,9 +211,10 @@ PDFs that contain embedded text are indexed without OCR.
 
 **Cause:** The index contains embeddings from the previous model. Mixing embeddings from different models produces incorrect similarity scores.
 
-**Fix:** `quant` detects model changes automatically on startup and rebuilds the index from scratch. This happens when:
+**Fix:** `quant` detects embedding metadata changes automatically on startup and clears incompatible vectors, preserving keyword-searchable text while it regenerates embeddings. This happens when:
 - The model name changes
 - The embedding dimensions change
+- Normalization or embedding input version changes
 
 Allow the initial reindexing to complete before querying. Check `index_status` for progress.
 
@@ -220,7 +239,7 @@ Then restart `quant`. The index will be rebuilt from the current files.
    ```bash
    quant mcp --chunk-size 1024
    ```
-   Note: this requires reindexing (delete `.index/` first).
+   Restart `quant` with the new setting. The projection fingerprint triggers reprocessing automatically; do not delete `.index/`.
 
 2. **Narrow the index scope** with `include`/`exclude` patterns to exclude large directories that aren't needed for search.
 

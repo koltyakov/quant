@@ -710,7 +710,7 @@ func TestEnsureEmbeddingMetadata_ResetOnPopulatedEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if docCount != 0 || chunkCount != 0 {
-		t.Fatalf("expected empty store after reset, got %d docs, %d chunks", docCount, chunkCount)
+	if docCount != 1 || chunkCount != 1 {
+		t.Fatalf("expected text preserved after embedding reset, got %d docs, %d chunks", docCount, chunkCount)
 	}
 }

@@ -806,8 +806,12 @@ func TestEnsureEmbeddingMetadata_LegacyInputVersionResetsPersistedEmbeddings(t *
 			if err != nil {
 				t.Fatalf("Stats() error: %v", err)
 			}
-			if docCount != 0 || chunkCount != 0 {
-				t.Fatalf("reset left %d documents and %d chunks", docCount, chunkCount)
+			if docCount != 1 || chunkCount != 1 {
+				t.Fatalf("embedding reset lost text: %d documents and %d chunks", docCount, chunkCount)
+			}
+			var vectors int
+			if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE length(embedding) > 0`).Scan(&vectors); err != nil || vectors != 0 {
+				t.Fatalf("legacy vectors=%d err=%v", vectors, err)
 			}
 			if _, found := store.LookupContentDedup(ctx, dedupHash); found {
 				t.Fatal("reset left a legacy content dedup embedding")
@@ -895,8 +899,8 @@ func TestEnsureEmbeddingMetadata_DifferentMetaTriggersReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats() error: %v", err)
 	}
-	if docCount != 0 || chunkCount != 0 {
-		t.Fatalf("expected 0 docs, 0 chunks after reset, got %d, %d", docCount, chunkCount)
+	if docCount != 1 || chunkCount != 1 {
+		t.Fatalf("expected preserved text after embedding reset, got %d docs, %d chunks", docCount, chunkCount)
 	}
 	if _, found := store.LookupContentDedup(ctx, dedupHash); found {
 		t.Fatal("expected embedding metadata reset to invalidate content dedup")

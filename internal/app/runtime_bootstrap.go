@@ -273,6 +273,8 @@ func openMainStore(ctx context.Context, cfg *config.Config, rawEmbedder embed.Em
 	}
 
 	if rawEmbedder != nil {
+		// The initial filesystem sync also checks per-document embedding coverage,
+		// so unchanged metadata still backfills files ingested in keyword-only mode.
 		rebuild, err := store.EnsureEmbeddingMetadata(ctx, index.EmbeddingMetadata{
 			Model:      cfg.EmbedModel,
 			Dimensions: rawEmbedder.Dimensions(),
@@ -282,7 +284,7 @@ func openMainStore(ctx context.Context, cfg *config.Config, rawEmbedder embed.Em
 			return nil, fmt.Errorf("error configuring embedding metadata: %w", err)
 		}
 		if rebuild {
-			logx.Info("embedding metadata changed; rebuilding index from filesystem projection")
+			logx.Info("embedding metadata changed; preserving text and rebuilding embeddings during filesystem sync")
 		}
 	}
 

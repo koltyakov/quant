@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.15.5 (2026-09-07)
 
 ### Security
 
@@ -9,6 +9,15 @@
 - **Safer filesystem and document parsing** - Live indexing rejects symlinks and root escapes; ZIP-based extractors enforce entry, expansion, compression-ratio, and output budgets.
 - **Secure network defaults** - Non-loopback model endpoints require HTTPS unless explicitly overridden, HTTP servers bound slow request reads, and CI/release actions use least privilege with commit-pinned dependencies.
 - **Current Go security fixes** - Release builds require Go 1.26.6 and CI runs `govulncheck` on pushes, pull requests, and a weekly schedule.
+
+### Improvements
+
+- **Revision-safe indexing** - Hashing and extraction use the same bounded source snapshot, and publication rechecks the source revision so stale jobs cannot restore changed or deleted files.
+- **Automatic index repair** - Projection metadata detects extraction, chunking, OCR, and embedding changes independently from file hashes. Missing embeddings are backfilled while incompatible vectors are replaced without deleting keyword-searchable text.
+- **Recoverable quarantine** - Quarantine entries now apply to a specific source revision and configuration, so relevant changes trigger another attempt. The new `quant retry` command clears one file or all entries for retry on the next startup.
+- **Explicit retrieval diagnostics** - Search, similarity, drill-down, and summarization responses report whether semantic retrieval completed, was unavailable, exceeded a fallback budget, or failed, including through worker proxies.
+- **Consistent search finalization** - Semantic retrieval keeps a wider candidate pool, reranking runs before thresholding and document diversity, malformed reranker output preserves the original ranking, and responses identify RRF and rerank-blend score semantics.
+- **Dependency updates** - Upgraded `mcp-go` to v1.0.0, SQLite to v1.58.0, and related Go dependencies.
 
 ## v0.15.4 (2026-07-29)
 

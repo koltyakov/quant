@@ -336,9 +336,23 @@ func runRankingPipeline(candidates []scoredCandidate, stages ...rankingStage) []
 // unifiedRRF merges keyword and vector-only candidates using a composable ranking pipeline:
 // base RRF scoring, recency boost, path boost, and document diversity.
 func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, limit int, pathTokens []string, weights QuerySignalWeights) []SearchResult {
+	return finalizeSearchResults(fuseCandidates(keywordCandidates, vectorOnlyCandidates, pathTokens, weights), 0, limit)
+}
+
+func finalizeSearchResults(results []SearchResult, threshold float32, limit int) []SearchResult {
 	if limit <= 0 {
 		return nil
 	}
+	candidates := make([]scoredCandidate, 0, len(results))
+	for _, r := range results {
+		if r.Score >= threshold {
+			candidates = append(candidates, scoredCandidate{result: r, score: r.Score})
+		}
+	}
+	return runRankingPipeline(candidates, documentDiversity(limit))
+}
+
+func fuseCandidates(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate, pathTokens []string, weights QuerySignalWeights) []SearchResult {
 	candidates := mergeCandidates(keywordCandidates, vectorOnlyCandidates)
 	if len(candidates) == 0 {
 		return nil
@@ -350,7 +364,10 @@ func unifiedRRF(keywordCandidates, vectorOnlyCandidates map[int]*searchCandidate
 		recencyBoost(recencyHalfLife, recencyBoostWeight),
 		pathBoost(pathTokens),
 		normalizeScores(weights, hasKeyword, hasVector, len(pathTokens) > 0),
-		documentDiversity(limit),
+		func(c []scoredCandidate) []scoredCandidate {
+			sort.Slice(c, func(i, j int) bool { return scoredCandidateBefore(c[i], c[j]) })
+			return c
+		},
 	)
 }
 

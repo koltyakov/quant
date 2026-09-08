@@ -278,7 +278,7 @@ func TestQuarantineFailedPath_KeyError(t *testing.T) {
 	}
 }
 
-func TestQuarantineFailedPath_DeleteDocAfterQuarantine(t *testing.T) {
+func TestQuarantineFailedPath_UnscopedFailureKeepsDocument(t *testing.T) {
 	root := t.TempDir()
 	store := &trackingDocumentStore{}
 	quarantine := &stubQuarantineStore{}
@@ -294,8 +294,8 @@ func TestQuarantineFailedPath_DeleteDocAfterQuarantine(t *testing.T) {
 
 	file := filepath.Join(root, "a.txt")
 	idx.quarantineFailedPath(context.Background(), file, errors.New("permanent"))
-	if quarantine.addedPath != "a.txt" {
-		t.Fatalf("expected quarantined path 'a.txt', got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("unscoped failure quarantined %q", quarantine.addedPath)
 	}
 
 	store.mu.Lock()
@@ -306,8 +306,8 @@ func TestQuarantineFailedPath_DeleteDocAfterQuarantine(t *testing.T) {
 		}
 	}
 	store.mu.Unlock()
-	if !found {
-		t.Fatal("expected DeleteDocument to be called for quarantined path")
+	if found {
+		t.Fatal("unscoped failure deleted document")
 	}
 }
 
@@ -344,8 +344,8 @@ func TestQuarantineFailedPath_AddToQuarantineError(t *testing.T) {
 
 	file := filepath.Join(root, "a.txt")
 	idx.quarantineFailedPath(context.Background(), file, errors.New("failure"))
-	if quarantine.addedPath != "a.txt" {
-		t.Fatalf("expected AddToQuarantine to be called with 'a.txt', got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("unscoped failure quarantined %q", quarantine.addedPath)
 	}
 }
 
@@ -647,8 +647,8 @@ func TestScheduleIndexRetry_QuarantineOnGiveUp(t *testing.T) {
 	}
 
 	idx.scheduleIndexRetry(context.Background(), file, time.Now(), embed.ErrPermanent)
-	if quarantine.addedPath != "a.txt" {
-		t.Fatalf("expected quarantined path 'a.txt', got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("retry callback quarantined without a job revision: %q", quarantine.addedPath)
 	}
 }
 
@@ -1069,8 +1069,8 @@ func TestQuarantineFailedPath_DeleteDocError(t *testing.T) {
 
 	file := filepath.Join(root, "a.txt")
 	idx.quarantineFailedPath(context.Background(), file, errors.New("permanent failure"))
-	if quarantine.addedPath != "a.txt" {
-		t.Fatalf("expected quarantined path 'a.txt', got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("unscoped failure quarantined %q", quarantine.addedPath)
 	}
 
 	store.mu.Lock()
@@ -1081,8 +1081,8 @@ func TestQuarantineFailedPath_DeleteDocError(t *testing.T) {
 		}
 	}
 	store.mu.Unlock()
-	if !found {
-		t.Fatal("expected DeleteDocument to be attempted even on error")
+	if found {
+		t.Fatal("unscoped failure deleted document")
 	}
 }
 

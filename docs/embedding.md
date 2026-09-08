@@ -89,7 +89,9 @@ This reduces storage by ~4x with less than 1% recall loss on L2-normalized vecto
 
 ## Embedding metadata
 
-The store records the embedding model name, dimensions, and normalization flag. If you change the model or the dimensions change, the store detects the mismatch and rebuilds the index from scratch on next startup.
+The store records the embedding model name, dimensions, normalization flag, and input version. If these change, it clears incompatible vectors and cached embeddings on startup while retaining keyword-searchable text. The indexer then fills embeddings for the current model. Per-document projection metadata also tracks embedding identity, including provider and URL, to prevent incompatible chunk reuse.
+
+Files indexed in keyword-only mode are backfilled on a later startup with the embedding backend available, even when the source hash and model name are unchanged. Extraction and chunking configuration changes also trigger reprocessing without deleting `.index/`.
 
 ## Input truncation
 

@@ -35,7 +35,7 @@ func (s *Server) registerTools() {
 			mcplib.Max(maxSearchLimit),
 		),
 		mcplib.WithNumber("threshold",
-			mcplib.Description("Minimum result score (0-1 normalized scale, default: 0)"),
+			mcplib.Description("Minimum ranking score before document diversity (0-1, default: 0). Not a relevance probability; see score_kind and score_semantics."),
 			mcplib.Min(0.0),
 			mcplib.Max(1.0),
 		),
@@ -206,29 +206,31 @@ const (
 )
 
 type searchToolResponse struct {
-	Query           string                `json:"query"`
-	PathPrefix      string                `json:"path_prefix,omitempty"`
-	FileType        string                `json:"file_type,omitempty"`
-	Language        string                `json:"language,omitempty"`
-	Collection      string                `json:"collection,omitempty"`
-	Limit           int                   `json:"limit"`
-	Threshold       float32               `json:"threshold"`
-	EmbeddingStatus string                `json:"embedding_status"`
-	Note            string                `json:"note,omitempty"`
-	Results         []searchToolResultRow `json:"results"`
+	Retrieval       *index.RetrievalDiagnostics `json:"retrieval"`
+	Query           string                      `json:"query"`
+	PathPrefix      string                      `json:"path_prefix,omitempty"`
+	FileType        string                      `json:"file_type,omitempty"`
+	Language        string                      `json:"language,omitempty"`
+	Collection      string                      `json:"collection,omitempty"`
+	Limit           int                         `json:"limit"`
+	Threshold       float32                     `json:"threshold"`
+	EmbeddingStatus string                      `json:"embedding_status"`
+	Note            string                      `json:"note,omitempty"`
+	Results         []searchToolResultRow       `json:"results"`
 }
 
 type searchToolResultRow struct {
-	ChunkID       int64   `json:"chunk_id"`
-	Path          string  `json:"path"`
-	ChunkIndex    int     `json:"chunk_index"`
-	Score         float32 `json:"score"`
-	ScoreKind     string  `json:"score_kind"`
-	ChunkContent  string  `json:"chunk_content"`
-	ParentID      *int64  `json:"parent_id,omitempty"`
-	Depth         int     `json:"depth"`
-	SectionTitle  string  `json:"section_title,omitempty"`
-	ParentContext string  `json:"parent_context,omitempty"`
+	ChunkID        int64   `json:"chunk_id"`
+	Path           string  `json:"path"`
+	ChunkIndex     int     `json:"chunk_index"`
+	Score          float32 `json:"score"`
+	ScoreKind      string  `json:"score_kind"`
+	ScoreSemantics string  `json:"score_semantics,omitempty"`
+	ChunkContent   string  `json:"chunk_content"`
+	ParentID       *int64  `json:"parent_id,omitempty"`
+	Depth          int     `json:"depth"`
+	SectionTitle   string  `json:"section_title,omitempty"`
+	ParentContext  string  `json:"parent_context,omitempty"`
 }
 
 type listSourcesToolResponse struct {
@@ -264,10 +266,11 @@ type embeddingStatusProvider interface {
 }
 
 type findSimilarToolResponse struct {
-	ChunkID int64                 `json:"chunk_id"`
-	Limit   int                   `json:"limit"`
-	Source  searchToolResultRow   `json:"source"`
-	Results []searchToolResultRow `json:"results"`
+	Retrieval *index.RetrievalDiagnostics `json:"retrieval"`
+	ChunkID   int64                       `json:"chunk_id"`
+	Limit     int                         `json:"limit"`
+	Source    searchToolResultRow         `json:"source"`
+	Results   []searchToolResultRow       `json:"results"`
 }
 
 type getContextToolResponse struct {
@@ -368,9 +371,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		logx.Warn("MCP search embedding failed; falling back to keyword-only", "query", summarizeLogText(query, 120), "err", embedErr, "duration", time.Since(startedAt).Round(time.Millisecond))
 	}
 
+	ctx, retrieval := index.WithRetrievalDiagnostics(ctx)
+	filter.Threshold = threshold
 	var results []index.SearchResult
 	var err error
-	if len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0 || filter.Collection != "" {
+	if threshold != 0 || len(filter.FileTypes) > 0 || len(filter.Languages) > 0 || len(filter.Tags) > 0 || filter.Collection != "" {
 		results, err = s.store.SearchFiltered(ctx, query, queryEmbedding, limit, pathPrefix, filter)
 	} else {
 		results, err = s.store.Search(ctx, query, queryEmbedding, limit, pathPrefix)
@@ -386,6 +391,8 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 		results = enricher.EnrichWithParentContext(ctx, results)
 	}
 
+	// SearchFiltered applies this before diversity. Retain the response guard
+	// for older remote backends that do not yet honor SearchFilter.Threshold.
 	var filtered []index.SearchResult
 	for _, r := range results {
 		if r.Score >= threshold {
@@ -397,6 +404,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 
 	if len(filtered) == 0 {
 		structured := searchToolResponse{
+			Retrieval:       retrieval,
 			Query:           query,
 			PathPrefix:      pathPrefix,
 			FileType:        fileType,
@@ -413,6 +421,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcplib.CallToolReques
 
 	output := formatSearchResults(filtered)
 	structured := searchToolResponse{
+		Retrieval:       retrieval,
 		Query:           query,
 		PathPrefix:      pathPrefix,
 		FileType:        fileType,
@@ -619,6 +628,7 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 		return nil, fmt.Errorf("chunk %d not found: %w", int64(chunkID), err)
 	}
 
+	ctx, retrieval := index.WithRetrievalDiagnostics(ctx)
 	results, err := s.store.FindSimilar(ctx, int64(chunkID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("finding similar chunks: %w", err)
@@ -628,12 +638,17 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 
 	if len(results) == 0 {
 		structured := findSimilarToolResponse{
-			ChunkID: int64(chunkID),
-			Limit:   limit,
-			Source:  searchRow(*source),
-			Results: nil,
+			Retrieval: retrieval,
+			ChunkID:   int64(chunkID),
+			Limit:     limit,
+			Source:    searchRow(*source),
+			Results:   nil,
 		}
-		return mcplib.NewToolResultStructured(structured, "No similar chunks found."), nil
+		message := "No similar chunks found."
+		if retrieval.Semantic != "complete" {
+			message = "Similar-chunk retrieval unavailable or incomplete (" + retrieval.Semantic + "); an empty result does not establish no matches."
+		}
+		return mcplib.NewToolResultStructured(structured, message), nil
 	}
 
 	header := fmt.Sprintf("Source chunk %d from %s (chunk %d):\n%s\n\nSimilar chunks:\n",
@@ -642,10 +657,11 @@ func (s *Server) handleFindSimilar(ctx context.Context, request mcplib.CallToolR
 
 	output := header + formatSearchResults(results)
 	structured := findSimilarToolResponse{
-		ChunkID: int64(chunkID),
-		Limit:   limit,
-		Source:  searchRow(*source),
-		Results: searchRows(results),
+		Retrieval: retrieval,
+		ChunkID:   int64(chunkID),
+		Limit:     limit,
+		Source:    searchRow(*source),
+		Results:   searchRows(results),
 	}
 	return mcplib.NewToolResultStructured(structured, output), nil
 }
@@ -791,9 +807,10 @@ func embeddingStatus(err error) string {
 }
 
 type drillDownResponse struct {
-	SeedChunkID int64                 `json:"seed_chunk_id"`
-	Limit       int                   `json:"limit"`
-	Results     []searchToolResultRow `json:"results"`
+	Retrieval   *index.RetrievalDiagnostics `json:"retrieval"`
+	SeedChunkID int64                       `json:"seed_chunk_id"`
+	Limit       int                         `json:"limit"`
+	Results     []searchToolResultRow       `json:"results"`
 }
 
 func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -828,6 +845,7 @@ func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolReq
 	}
 
 	candidateLimit := min(maxSearchLimit, limit*3)
+	ctx, retrieval := index.WithRetrievalDiagnostics(ctx)
 	results, err := s.store.FindSimilar(ctx, int64(chunkID), candidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("finding related chunks: %w", err)
@@ -839,6 +857,7 @@ func (s *Server) handleDrillDown(ctx context.Context, request mcplib.CallToolReq
 	output += formatSearchResults(diverse)
 
 	structured := drillDownResponse{
+		Retrieval:   retrieval,
 		SeedChunkID: int64(chunkID),
 		Limit:       limit,
 		Results:     searchRows(diverse),
@@ -880,15 +899,16 @@ func diversifySearchResults(seedPath string, results []index.SearchResult, limit
 }
 
 type summarizeMatchesResponse struct {
-	Query           string   `json:"query"`
-	Limit           int      `json:"limit"`
-	MatchCount      int      `json:"match_count"`
-	DocumentCount   int      `json:"document_count"`
-	Documents       []string `json:"documents"`
-	EmbeddingStatus string   `json:"embedding_status"`
-	Note            string   `json:"note,omitempty"`
-	Exhaustive      bool     `json:"exhaustive"`
-	Overview        string   `json:"overview"`
+	Retrieval       *index.RetrievalDiagnostics `json:"retrieval"`
+	Query           string                      `json:"query"`
+	Limit           int                         `json:"limit"`
+	MatchCount      int                         `json:"match_count"`
+	DocumentCount   int                         `json:"document_count"`
+	Documents       []string                    `json:"documents"`
+	EmbeddingStatus string                      `json:"embedding_status"`
+	Note            string                      `json:"note,omitempty"`
+	Exhaustive      bool                        `json:"exhaustive"`
+	Overview        string                      `json:"overview"`
 }
 
 func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -926,6 +946,7 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 		logx.Warn("summarize_matches embedding failed", "err", embedErr)
 	}
 
+	ctx, retrieval := index.WithRetrievalDiagnostics(ctx)
 	results, err := s.store.Search(ctx, query, queryEmbedding, limit, "")
 	if err != nil {
 		return nil, fmt.Errorf("searching: %w", err)
@@ -970,6 +991,7 @@ func (s *Server) handleSummarizeMatches(ctx context.Context, request mcplib.Call
 	}
 
 	structured := summarizeMatchesResponse{
+		Retrieval:       retrieval,
 		Query:           query,
 		Limit:           limit,
 		MatchCount:      len(results),

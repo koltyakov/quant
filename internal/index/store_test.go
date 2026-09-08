@@ -1013,8 +1013,8 @@ func TestStore_EnsureEmbeddingMetadata_ResetOnChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error reading stats: %v", err)
 	}
-	if docCount != 0 || chunkCount != 0 {
-		t.Fatalf("expected rebuilt index to be empty, got %d docs and %d chunks", docCount, chunkCount)
+	if docCount != 1 || chunkCount != 1 {
+		t.Fatalf("expected text preserved for embedding rebuild, got %d docs and %d chunks", docCount, chunkCount)
 	}
 }
 

@@ -350,8 +350,8 @@ func TestIndexerHelperBranches(t *testing.T) {
 	}()
 
 	idx.scheduleIndexRetry(context.Background(), path, time.Now(), ErrFileTooLarge)
-	if quarantine.addedPath != "docs/a.md" {
-		t.Fatalf("expected path to be quarantined, got %q", quarantine.addedPath)
+	if quarantine.addedPath != "" {
+		t.Fatalf("retry callback quarantined without a job revision: %q", quarantine.addedPath)
 	}
 
 	idx.retries = NewRetryScheduler()

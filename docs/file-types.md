@@ -4,7 +4,7 @@
 
 ## Plain text and source code
 
-The text extractor handles all common source code, markup, configuration, and data files. It indexes at most the first 8 MiB of each file; larger files are truncated with a warning. Files that appear to be binary are skipped (detected from null bytes or excessive control characters in the first 8 KiB).
+The text extractor handles all common source code, markup, configuration, and data files. It indexes at most the first 8 MiB of each file; larger supported files are truncated with a warning. The indexer's source snapshot limit rejects files over 100 MiB before extraction, including plain text. Files that appear to be binary are skipped (detected from null bytes or excessive control characters in the first 8 KiB).
 
 ### Recognized extensions
 
@@ -39,7 +39,7 @@ The text extractor handles all common source code, markup, configuration, and da
 
 ## Document formats
 
-PDF, notebook, HTML, Office/Open XML, OpenDocument, and RTF extractors reject files over 100 MiB. ZIP-based document formats also reject individual expanded entries over 100 MiB.
+All filesystem inputs are subject to the 100 MiB source snapshot limit. PDF, notebook, HTML, Office/Open XML, OpenDocument, and RTF extractors also enforce a 100 MiB limit. ZIP-based document formats reject individual expanded entries over 100 MiB.
 
 ### Jupyter notebooks (`.ipynb`)
 

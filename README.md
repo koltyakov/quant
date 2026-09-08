@@ -98,6 +98,7 @@ quant mcp [--dir <path>] [options]
 quant init [client] [options]
 quant launch <client> [--dir <path>] [-- <client args...>]
 quant update
+quant retry [--path <path>] [--dir <path>]
 quant version
 ```
 
@@ -109,6 +110,7 @@ quant version
 | `init` | Scaffold a project MCP config and research assistant instructions |
 | `launch` | Start a supported agent with quant MCP injected for this session |
 | `update` | Check for and apply the latest GitHub release |
+| `retry` | Clear quarantine for one file or all files while MCP is stopped; restart MCP to retry indexing |
 | `version` | Print the quant version and exit |
 | `help` | Show top-level CLI help |
 
@@ -153,6 +155,8 @@ For clients with narrow MCP permission controls, `quant init` and `quant launch`
 | `delete_collection` | Delete all documents and chunks in a named collection. Params: `collection` (required) |
 
 **`search`** retrieves keyword candidates through SQLite FTS5 and semantic candidates through HNSW (or a bounded exact fallback), then combines their rankings with Reciprocal Rank Fusion (RRF) on a normalized 0-1 scale. If a query-time embedding call fails, search falls back to keyword-only results automatically. The `embedding_status` field in the response indicates whether results are hybrid or keyword-only.
+
+The separate `retrieval` field reports whether semantic retrieval completed, was unavailable, or was limited by a budget or error. A healthy embedding call alone does not guarantee semantic retrieval completed. Search applies optional reranking and the score threshold before document diversity and the final result limit. See [search and ranking](docs/search.md) for score semantics and retrieval statuses.
 
 **`find_similar`** takes a chunk ID from a previous search result and returns nearest neighbors from HNSW when available, otherwise from a bounded exact scan. Useful for discovering related content without formulating a new query.
 
@@ -210,6 +214,7 @@ flowchart TD
 - **SQLite tuned for concurrency** - WAL + busy timeout + multi-connection pool allow reads during writes
 - **Transactional indexing** - chunk replacement happens in a single SQLite transaction per document, with incremental HNSW updates deferred until after commit
 - **Incremental reindexing** - unchanged chunks reuse their stored embeddings, so only new or modified content is sent to the embedding backend
+- **Projection recovery** - startup checks extraction/chunking configuration and embedding completeness independently from file hashes. Missing embeddings are backfilled when the backend returns, without deleting searchable text.
 - **File watching** via `fsnotify` with 500ms debounce and self-healing resync on overflow
 - **Embedding caching** - LRU cache with in-flight deduplication and circuit breaker for query-time embedding calls
 

@@ -45,7 +45,7 @@ All flags apply to `quant mcp`.
 | `--reranker` | - | Reranker type. Only accepted value: `cross-encoder` (requires `--reranker-model`). |
 | `--reranker-model` | `--llm-model` | Model used for cross-encoder reranking (e.g. `llama3.2`). Overrides the shared LLM model for this feature. |
 
-Cross-encoder reranking adds a second-pass LLM reranking step after the initial hybrid retrieval. The model scores up to the first 20 `(query, chunk)` pairs. `quant` normalizes the original and LLM scores, blends them 50/50, and reorders the candidates. Results currently retain `score_kind: "rrf"`.
+Cross-encoder reranking scores up to the first 20 fused candidates before thresholding and document diversity. `quant` normalizes the original and LLM scores against their pool maxima, blends them 50/50, and returns only the scored pool with `score_kind: "rerank_blend"`. Requests for more than 20 results can therefore return fewer than their limit. Invalid responses or backend failures preserve the original scores and order and report `retrieval.rerank_error`. See [search and ranking](search.md) for the full pipeline and score semantics.
 
 **When to use:** When retrieval precision matters more than latency. Reranking runs at query time and adds one LLM call per candidate batch, so it noticeably increases response time. Good for research workspaces where you want the single best result to be highly accurate.
 

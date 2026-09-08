@@ -130,6 +130,8 @@ type HealthProvider interface {
 
 // Searcher provides the index read capabilities exposed by query servers.
 type SearchFilter struct {
+	// Threshold is applied after fusion/reranking and before diversity/limit.
+	Threshold  float32
 	FileTypes  []string
 	Languages  []string
 	Tags       map[string]string

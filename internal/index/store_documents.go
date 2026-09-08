@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"strings"
 	"time"
@@ -68,6 +69,60 @@ func (s *Store) ReindexDocument(ctx context.Context, doc *Document, chunks []Chu
 }
 
 func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Document, chunks []ChunkRecord, deferredHNSW func()) error {
+	return s.reindexDocument(ctx, doc, chunks, Projection{}, deferredHNSW)
+}
+
+type Projection struct {
+	Fingerprint    string
+	EmbeddingSpace string
+}
+
+// ReindexDocumentProjection atomically replaces a document and its projection fingerprint.
+func (s *Store) ReindexDocumentProjection(ctx context.Context, doc *Document, chunks []ChunkRecord, projection Projection) error {
+	return s.reindexDocument(ctx, doc, chunks, projection, nil)
+}
+
+func (s *Store) DocumentProjection(ctx context.Context, path string) (Projection, error) {
+	var projection Projection
+	err := s.db.QueryRowContext(ctx, `SELECT p.fingerprint, p.embedding_space FROM document_projection p JOIN documents d ON d.id = p.document_id WHERE d.path = ?`, path).Scan(&projection.Fingerprint, &projection.EmbeddingSpace)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Projection{}, nil
+	}
+	return projection, err
+}
+
+// DocumentEmbeddingsComplete checks every row, including duplicate chunk inputs
+// that GetDocumentChunksByPath collapses into one diff-cache entry.
+func (s *Store) DocumentEmbeddingsComplete(ctx context.Context, path string, dimensions int) (bool, error) {
+	if dimensions <= 0 {
+		return false, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT c.embedding FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ?`, path)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	complete, found := true, false
+	for rows.Next() {
+		found = true
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return false, err
+		}
+		vector := decodeEmbeddingForHNSW(data, dimensions)
+		if dimensions <= 0 || len(vector) != dimensions {
+			complete = false
+		}
+		for _, v := range vector {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				complete = false
+			}
+		}
+	}
+	return found && complete, rows.Err()
+}
+
+func (s *Store) reindexDocument(ctx context.Context, doc *Document, chunks []ChunkRecord, projection Projection, deferredHNSW func()) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -79,6 +134,9 @@ func (s *Store) ReindexDocumentWithDeferredHNSW(ctx context.Context, doc *Docume
 
 	docID, err := upsertDocumentTx(ctx, tx, doc)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO document_projection(document_id, fingerprint, embedding_space) VALUES (?, ?, ?) ON CONFLICT(document_id) DO UPDATE SET fingerprint = excluded.fingerprint, embedding_space = excluded.embedding_space`, docID, projection.Fingerprint, projection.EmbeddingSpace); err != nil {
 		return err
 	}
 
@@ -277,7 +335,8 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 		return err
 	}
 	if doc == nil {
-		return nil
+		_, err := s.db.ExecContext(ctx, `DELETE FROM quarantine WHERE path = ?`, path)
+		return err
 	}
 	docID = doc.ID
 	if hnswReady {
@@ -309,6 +368,9 @@ func (s *Store) DeleteDocument(ctx context.Context, path string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, docID); err != nil {
 		return fmt.Errorf("deleting document: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM quarantine WHERE path = ?`, path); err != nil {
+		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err
@@ -353,6 +415,9 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM documents`); err != nil {
 			return fmt.Errorf("clearing documents: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM quarantine`); err != nil {
+			return err
 		}
 		if err := clearHNSWStateTx(ctx, tx); err != nil {
 			return err
@@ -412,6 +477,9 @@ func (s *Store) DeleteDocumentsByPrefix(ctx context.Context, prefix string) erro
 		prefix, likePrefix,
 	); err != nil {
 		return fmt.Errorf("deleting documents by prefix: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM quarantine WHERE path = ? OR path LIKE ? ESCAPE '\'`, prefix, likePrefix); err != nil {
+		return err
 	}
 	if err := clearHNSWStateTx(ctx, tx); err != nil {
 		return err

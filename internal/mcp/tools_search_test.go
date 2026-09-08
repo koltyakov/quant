@@ -60,8 +60,8 @@ func TestHandleFindSimilar(t *testing.T) {
 		t.Fatalf("unexpected handleFindSimilar error: %v", err)
 	}
 	text := extractToolText(t, result)
-	if !strings.Contains(text, "alpha.txt") && !strings.Contains(text, "No similar chunks found") {
-		t.Fatalf("expected source document or no-results message, got %q", text)
+	if !strings.Contains(text, "retrieval unavailable") {
+		t.Fatalf("expected unavailable message without embedding metadata, got %q", text)
 	}
 }
 

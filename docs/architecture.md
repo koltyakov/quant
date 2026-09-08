@@ -25,7 +25,7 @@ flowchart TD
 
 | Package | Responsibility |
 |---------|---------------|
-| `cmd/quant` | CLI entry point. Parses commands (`mcp`, `init`, `launch`, `update`, `version`, `help`) and delegates to the relevant subsystem. |
+| `cmd/quant` | CLI entry point. Parses commands (`mcp`, `init`, `launch`, `update`, `retry`, `version`, `help`) and delegates to the relevant subsystem. |
 | `internal/app` | Top-level orchestrator. `RunMCP()` wires together the embedder, store, indexer, watcher, and MCP server. Contains the `Indexer` which manages initial sync, live indexing via a work queue, retry scheduling, and resync coordination. |
 | `internal/config` | Configuration loading from flags, environment variables, and YAML files. Includes `PathMatcher` for include/exclude glob patterns. Validates all settings on startup. |
 | `internal/watch` | Filesystem watcher built on `fsnotify`. Recursively watches directories, respects `.gitignore`, debounces events (500ms), and emits create/write/remove/resync events. Self-heals on overflow by triggering a full resync. |
@@ -49,11 +49,15 @@ flowchart TD
 
 **Int8 embedding quantization.** Embeddings are L2-normalized and quantized to 1 byte per dimension with per-vector min/max scaling before storage. This reduces storage by ~4x with less than 1% recall loss on normalized vectors.
 
-**Incremental reindexing.** When a file changes, the ingest pipeline diffs the new chunks against existing ones by content hash. Only new or modified chunks are sent to the embedding backend. Unchanged chunks reuse their stored embeddings.
+**Incremental reindexing.** Source hashes, extraction/chunking fingerprints, and embedding completeness are checked separately. Unchanged chunks reuse compatible, valid embeddings; missing vectors are backfilled when the backend becomes available. Model changes clear incompatible vectors and the dedup cache while preserving keyword-searchable text. Existing indexes without projection metadata undergo one reprocessing pass. Chunk-size, overlap, and OCR configuration changes trigger reprocessing automatically.
 
 **HNSW lifecycle.** The HNSW graph is persisted beside the database as `<db>.hnsw` and accepted only when its model, dimensions, node count, and chunk generation match SQLite. Otherwise it is rebuilt from stored embeddings. During live indexing, nodes are added and removed after database commits; the graph is flushed every two minutes and at shutdown.
 
 **Transactional writes.** All chunk replacements for a single document happen inside one SQLite transaction. HNSW updates are deferred until after the transaction commits.
+
+**Source snapshots.** Hashing and extraction read the same temporary snapshot, capped at 100 MiB. Before publishing, the indexer rechecks source identity, metadata, content hash, and job revision. Publication and path/prefix invalidation share synchronization so invalidated jobs cannot reinsert deleted documents. Extraction and embedding happen outside that synchronization; subsequent filesystem writes are reconciled through watcher events and resync.
+
+**Recoverable quarantine.** Permanent failures record the failed source revision, failure category, and relevant configuration. Quarantine and document removal are atomic. Source or configuration changes retry the file automatically; `quant retry` clears one or all quarantine entries while MCP is stopped, for retry on the next startup.
 
 **Graceful degradation.** For recognized local Ollama availability and model errors, `quant` attempts to start Ollama or pull the configured model. If those recovery steps fail, it starts in keyword-only mode. Other provider, authentication, URL, and protocol errors can remain fatal. At query time, the circuit breaker (5 consecutive failures, 30-second reset) provides a second fallback layer. Search responses include the effective embedding mode.
 

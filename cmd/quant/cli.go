@@ -31,6 +31,8 @@ func run(args []string) int {
 		return runLaunchCommand(ctx, commandArgs)
 	case "update":
 		return runUpdateCommand(ctx, commandArgs)
+	case "retry":
+		return runRetryCommand(ctx, commandArgs)
 	case "version":
 		printVersion()
 		return 0
@@ -49,6 +51,9 @@ func run(args []string) int {
 	case "update-help":
 		printUpdateUsage()
 		return 0
+	case "retry-help":
+		printRetryUsage()
+		return 0
 	default:
 		fmt.Fprintln(os.Stderr, "error: unknown command")
 		fmt.Fprintln(os.Stderr)
@@ -65,6 +70,9 @@ func resolveCommand(args []string) (string, []string) {
 		return "version", nil
 	}
 	if isHelpRequest(args) {
+		if len(args) > 1 && args[1] == "retry" {
+			return "retry-help", nil
+		}
 		if len(args) > 1 && args[1] == "mcp" {
 			return "mcp-help", nil
 		}
@@ -81,6 +89,11 @@ func resolveCommand(args []string) (string, []string) {
 	}
 
 	switch args[0] {
+	case "retry":
+		if len(args) > 1 && isHelpRequest(args[1:]) {
+			return "retry-help", nil
+		}
+		return "retry", args[1:]
 	case "mcp":
 		if len(args) > 1 && isHelpRequest(args[1:]) {
 			return "mcp-help", nil
@@ -136,6 +149,7 @@ Usage:
   quant init [client]    Scaffold a project MCP config
   quant launch <client>  Launch an agent with quant MCP for this session
   quant update           Update to the latest release
+  quant retry [flags]     Clear quarantine for retry on next MCP startup
   quant version          Print version
   quant help             Show help
 

@@ -139,11 +139,11 @@ type selectiveBlockingExtractor struct {
 }
 
 func (f *selectiveBlockingExtractor) Extract(_ context.Context, path string) (string, error) {
-	if path == f.blockPath {
+	if filepath.Base(path) == filepath.Base(f.blockPath) {
 		f.blockedOnce.Do(func() { close(f.started) })
 		<-f.release
 	}
-	return f.texts[path], nil
+	return f.texts[filepath.Base(path)], nil
 }
 
 func (f *selectiveBlockingExtractor) Supports(path string) bool { return filepath.Ext(path) == ".txt" }
@@ -208,7 +208,7 @@ func TestIndexFile_RemovesDocumentWhenExtractionIsEmpty(t *testing.T) {
 	}
 }
 
-func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
+func TestIndexFile_MigratesLegacyProjectionOnceWithSameModTime(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")
 	if err := os.WriteFile(path, []byte("same contents"), 0644); err != nil {
@@ -267,14 +267,21 @@ func TestIndexFile_SkipsAlreadyIndexedDocumentWithSameModTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error indexing file: %v", err)
 	}
-	if action != indexNoop {
-		t.Fatalf("expected noop action, got %s", action)
+	if action != indexUpdated || ext.calls.Load() != 1 || emb.BatchCalls.Load() != 1 {
+		t.Fatalf("expected one migration extraction/embed: action=%s calls=%d/%d", action, ext.calls.Load(), emb.BatchCalls.Load())
 	}
-	if ext.calls.Load() != 0 {
-		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
+	projection, err := store.DocumentProjection(ctx, "sample.txt")
+	if err != nil || projection.Fingerprint == "" || projection.EmbeddingSpace == "" {
+		t.Fatalf("expected persisted compatibility: %+v err=%v", projection, err)
 	}
-	if emb.BatchCalls.Load() != 0 {
-		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.BatchCalls.Load())
+	// A fresh indexer must recognize the persisted migration, not an in-memory cache.
+	idx.inner = nil
+	action, err = idx.indexFile(ctx, path, info.ModTime())
+	if err != nil || action != indexNoop {
+		t.Fatalf("migrated file: action=%s err=%v", action, err)
+	}
+	if ext.calls.Load() != 1 || emb.BatchCalls.Load() != 1 {
+		t.Fatalf("migrated file was reprocessed: extraction/embed calls=%d/%d", ext.calls.Load(), emb.BatchCalls.Load())
 	}
 }
 
@@ -844,11 +851,13 @@ func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
 		}
 	})
 
+	emb := &permanentFailingEmbedder{}
+	ext := &countingExtractor{text: "hello world"}
 	idx := &indexer{
 		cfg:        &config.Config{WatchDir: dir, ChunkSize: 128, ChunkOverlap: 0, IndexWorkers: 1},
 		store:      store,
-		embedder:   &permanentFailingEmbedder{},
-		extractor:  &countingExtractor{text: "hello world"},
+		embedder:   emb,
+		extractor:  ext,
 		quarantine: store,
 	}
 
@@ -891,9 +900,20 @@ func TestInitialSyncWithReport_QuarantinesPermanentIndexFailures(t *testing.T) {
 	if doc != nil {
 		t.Fatalf("expected quarantined document to be removed from index, got %+v", doc)
 	}
+	idx.inner = nil
+	report, err = idx.initialSyncWithReport(context.Background())
+	if err != nil || report.hadIndexFailures {
+		t.Fatalf("unchanged scoped quarantine was retried: report=%+v err=%v", report, err)
+	}
+	if ext.calls.Load() != 1 || emb.calls.Load() != 1 {
+		t.Fatalf("expected scoped quarantine to skip extraction/embedding: calls=%d/%d", ext.calls.Load(), emb.calls.Load())
+	}
+	if docs, err := store.ListDocuments(context.Background()); err != nil || len(docs) != 0 {
+		t.Fatalf("quarantined document was reinserted: %+v err=%v", docs, err)
+	}
 }
 
-func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
+func TestInitialSync_RetriesLegacyUnscopedQuarantine(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "books", "sample.txt")
 	if err := os.MkdirAll(filepath.Dir(sourcePath), 0750); err != nil {
@@ -934,8 +954,11 @@ func TestInitialSync_IgnoresQuarantineTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected list error: %v", err)
 	}
-	if len(docs) != 0 {
-		t.Fatalf("expected quarantined path to be skipped, got %d docs", len(docs))
+	if len(docs) != 1 || docs[0].Path != docKey {
+		t.Fatalf("expected legacy unscoped quarantine to be retried, got %+v", docs)
+	}
+	if quarantined, err := store.IsQuarantined(context.Background(), docKey); err != nil || quarantined {
+		t.Fatalf("expected obsolete quarantine cleared: quarantined=%v err=%v", quarantined, err)
 	}
 }
 
@@ -1045,8 +1068,8 @@ func TestInitialSync_ReconcilesFileRecreatedDuringScanWindow(t *testing.T) {
 
 	ext := &selectiveBlockingExtractor{
 		texts: map[string]string{
-			blockerPath:   "blocker contents",
-			recreatedPath: "recreated contents",
+			"blocker.txt":   "blocker contents",
+			"recreated.txt": "recreated contents",
 		},
 		blockPath: blockerPath,
 		started:   make(chan struct{}),
@@ -1095,9 +1118,22 @@ func TestInitialSync_ReconcilesFileRecreatedDuringScanWindow(t *testing.T) {
 	if recreatedDoc == nil {
 		t.Fatal("expected recreated document to be indexed")
 	}
+	hash, err := scan.FileHash(recreatedPath)
+	if err != nil || recreatedDoc.Hash != hash {
+		t.Fatalf("expected recreated source revision, got hash=%q err=%v", recreatedDoc.Hash, err)
+	}
+	chunks, err := store.GetDocumentChunksByPath(context.Background(), "recreated.txt")
+	if err != nil || len(chunks) != 1 {
+		t.Fatalf("expected replacement chunk: %+v err=%v", chunks, err)
+	}
+	for _, chunk := range chunks {
+		if chunk.Content != "recreated contents" {
+			t.Fatalf("stale recreated chunk: %q", chunk.Content)
+		}
+	}
 }
 
-func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
+func TestInitialSync_MigratesStoredPathAndLegacyProjectionOnce(t *testing.T) {
 	dir := t.TempDir()
 	subdir := filepath.Join(dir, "nested")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -1152,11 +1188,11 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 	if err := idx.initialSync(context.Background()); err != nil {
 		t.Fatalf("unexpected initial sync error: %v", err)
 	}
-	if ext.calls.Load() != 0 {
-		t.Fatalf("expected extractor to be skipped, got %d calls", ext.calls.Load())
+	if ext.calls.Load() != 1 {
+		t.Fatalf("expected one legacy projection extraction, got %d calls", ext.calls.Load())
 	}
-	if emb.BatchCalls.Load() != 0 {
-		t.Fatalf("expected embedder to be skipped, got %d batch calls", emb.BatchCalls.Load())
+	if emb.BatchCalls.Load() != 1 {
+		t.Fatalf("expected one legacy projection embedding, got %d batch calls", emb.BatchCalls.Load())
 	}
 
 	docs, err := store.ListDocuments(context.Background())
@@ -1168,6 +1204,30 @@ func TestInitialSync_MigratesStoredPathAndSkipsReindex(t *testing.T) {
 	}
 	if docs[0].Path != "nested/sample.txt" {
 		t.Fatalf("expected migrated relative path, got %q", docs[0].Path)
+	}
+	if old, err := store.GetDocumentByPath(context.Background(), oldStoredPath); err != nil || old != nil {
+		t.Fatalf("old stored path remains: %+v err=%v", old, err)
+	}
+	idx.inner = nil
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ext.calls.Load() != 1 || emb.BatchCalls.Load() != 1 {
+		t.Fatalf("migrated document was reprocessed: extraction/embed calls=%d/%d", ext.calls.Load(), emb.BatchCalls.Load())
+	}
+	// Path normalization alone must preserve an already-compatible projection.
+	if err := store.RenameDocumentPath(context.Background(), "nested/sample.txt", oldStoredPath); err != nil {
+		t.Fatal(err)
+	}
+	idx.inner = nil
+	if err := idx.initialSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ext.calls.Load() != 1 || emb.BatchCalls.Load() != 1 {
+		t.Fatalf("path-only migration reprocessed a compatible projection: calls=%d/%d", ext.calls.Load(), emb.BatchCalls.Load())
+	}
+	if doc, err := store.GetDocumentByPath(context.Background(), "nested/sample.txt"); err != nil || doc == nil {
+		t.Fatalf("expected normalized compatible document: %+v err=%v", doc, err)
 	}
 }
 

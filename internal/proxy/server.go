@@ -196,12 +196,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.SearchFiltered(r.Context(), req.Query, req.QueryEmbedding, req.Limit, req.PathPrefix, req.Filter)
+	ctx, retrieval := index.WithRetrievalDiagnostics(r.Context())
+	results, err := s.store.SearchFiltered(ctx, req.Query, req.QueryEmbedding, req.Limit, req.PathPrefix, req.Filter)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeJSON(w, http.StatusInternalServerError, SearchResponse{Error: err.Error(), Retrieval: retrieval})
 		return
 	}
-	s.writeJSON(w, http.StatusOK, SearchResponse{Results: results})
+	s.writeJSON(w, http.StatusOK, SearchResponse{Results: results, Retrieval: retrieval})
 }
 
 func (s *Server) handleFindSimilar(w http.ResponseWriter, r *http.Request) {
@@ -210,12 +211,13 @@ func (s *Server) handleFindSimilar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.FindSimilar(r.Context(), req.ChunkID, req.Limit)
+	ctx, retrieval := index.WithRetrievalDiagnostics(r.Context())
+	results, err := s.store.FindSimilar(ctx, req.ChunkID, req.Limit)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeJSON(w, http.StatusInternalServerError, FindSimilarResponse{Error: err.Error(), Retrieval: retrieval})
 		return
 	}
-	s.writeJSON(w, http.StatusOK, FindSimilarResponse{Results: results})
+	s.writeJSON(w, http.StatusOK, FindSimilarResponse{Results: results, Retrieval: retrieval})
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {

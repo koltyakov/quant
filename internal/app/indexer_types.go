@@ -23,8 +23,9 @@ const (
 
 // PathSyncTracker prevents concurrent indexing of the same file path.
 type PathSyncTracker struct {
-	mu     sync.Mutex
-	states map[string]*pathState
+	mu          sync.Mutex
+	states      map[string]*pathState
+	nextVersion uint64
 }
 
 type pathState struct {
@@ -51,7 +52,8 @@ func (t *PathSyncTracker) Begin(key string, modTime *time.Time) (uint64, bool) {
 	}
 	if state.running {
 		if t.requestInvalidates(state, modTime) {
-			state.version++
+			t.nextVersion++
+			state.version = t.nextVersion
 			state.dirty = true
 			state.hasModTime = modTime != nil
 			if modTime != nil {
@@ -60,7 +62,8 @@ func (t *PathSyncTracker) Begin(key string, modTime *time.Time) (uint64, bool) {
 		}
 		return state.version, false
 	}
-	state.version++
+	t.nextVersion++
+	state.version = t.nextVersion
 	state.running = true
 	state.hasModTime = modTime != nil
 	if modTime != nil {
@@ -103,15 +106,32 @@ func (t *PathSyncTracker) IsCurrent(key string, version uint64) bool {
 }
 
 func (t *PathSyncTracker) InvalidatePrefix(prefix string) {
+	_ = t.InvalidatePrefixAnd(prefix, func() error { return nil })
+}
+
+// InvalidatePrefixAnd serializes deletion with publication of in-flight jobs.
+func (t *PathSyncTracker) InvalidatePrefixAnd(prefix string, fn func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	for key, state := range t.states {
 		if key == prefix || strings.HasPrefix(key, prefix+"/") {
-			state.version++
+			t.nextVersion++
+			state.version = t.nextVersion
 			state.dirty = true
 		}
 	}
+	return fn()
+}
+
+func (t *PathSyncTracker) Publish(key string, version uint64, fn func() error) (bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := t.states[key]
+	if state == nil || !state.running || state.version != version {
+		return false, nil
+	}
+	return true, fn()
 }
 
 func (t *PathSyncTracker) requestInvalidates(state *pathState, modTime *time.Time) bool {

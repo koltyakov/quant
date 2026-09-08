@@ -33,7 +33,7 @@ func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetad
 		}
 		needsReset := docCount > 0 || chunkCount > 0 || dedupCount > 0
 		if needsReset {
-			if err := s.resetIndex(ctx); err != nil {
+			if err := s.resetEmbeddings(ctx); err != nil {
 				return false, err
 			}
 		}
@@ -47,13 +47,37 @@ func (s *Store) EnsureEmbeddingMetadata(ctx context.Context, meta EmbeddingMetad
 		return false, nil
 	}
 
-	if err := s.resetIndex(ctx); err != nil {
+	if err := s.resetEmbeddings(ctx); err != nil {
 		return false, err
 	}
 	if err := s.putEmbeddingMetadata(ctx, meta); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// A model change invalidates vectors, not the keyword-searchable text projection.
+func (s *Store) resetEmbeddings(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, query := range []string{
+		`UPDATE chunks SET embedding = X''`,
+		`UPDATE documents SET doc_embedding = NULL`,
+		`DELETE FROM content_dedup`,
+		`DELETE FROM hnsw_state`,
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.resetRuntimeIndexes(true)
+	return nil
 }
 
 func (s *Store) Stats(ctx context.Context) (docCount int, chunkCount int, err error) {
@@ -108,6 +132,118 @@ func (s *Store) IsQuarantined(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// QuarantineRevision describes the source and configuration that failed.
+type QuarantineRevision struct {
+	Revision string
+	Category string
+	Config   string
+}
+
+func (s *Store) GetQuarantineRevision(ctx context.Context, path string) (*QuarantineRevision, error) {
+	var q QuarantineRevision
+	err := s.db.QueryRowContext(ctx, `SELECT revision, category, config FROM quarantine_revision WHERE path = ?`, path).Scan(&q.Revision, &q.Category, &q.Config)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &q, err
+}
+
+// QuarantineDocument atomically records a scoped failure and removes the indexed document.
+// RemoveFromQuarantine (or ClearQuarantine), followed by a rescan, explicitly retries it.
+func (s *Store) QuarantineDocument(ctx context.Context, path, message string, q QuarantineRevision) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	doc, err := s.GetDocumentByPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	hnswReady := s.hnsw != nil && s.hnsw.ready.Load()
+	hnswDeleteComplete := !hnswReady
+	var hnswDeleteIDs []int
+	if doc != nil && hnswReady {
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM chunks WHERE document_id = ?`, doc.ID)
+		if err == nil {
+			hnswDeleteComplete = true
+			for rows.Next() {
+				var id int
+				if err := rows.Scan(&id); err != nil {
+					hnswDeleteComplete = false
+					break
+				}
+				hnswDeleteIDs = append(hnswDeleteIDs, id)
+			}
+			if rows.Err() != nil {
+				hnswDeleteComplete = false
+			}
+			_ = rows.Close()
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO quarantine(path, error_msg, attempts) VALUES (?, ?, 1) ON CONFLICT(path) DO UPDATE SET error_msg = excluded.error_msg, created_at = CURRENT_TIMESTAMP, attempts = attempts + 1`, path, message); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO quarantine_revision(path, revision, category, config) VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET revision = excluded.revision, category = excluded.category, config = excluded.config`, path, q.Revision, q.Category, q.Config); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE path = ?)`, path); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM documents WHERE path = ?`, path); err != nil {
+		return err
+	}
+	if doc != nil {
+		if err = clearHNSWStateTx(ctx, tx); err != nil {
+			return err
+		}
+	}
+	committedGeneration, err := chunkGenerationTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if doc != nil {
+		if hnswReady {
+			if hnswDeleteComplete {
+				func() {
+					s.hnsw.mu.Lock()
+					defer s.hnsw.mu.Unlock()
+					defer func() {
+						if failure := recover(); failure != nil {
+							hnswDeleteComplete = false
+							s.hnsw.ready.Store(false)
+							s.hnsw.graph = newGraph(s.hnswM, s.hnswEfSearch)
+							logx.Warn("incremental quarantine graph removal failed", "path", path, "err", failure)
+						}
+					}()
+					for _, id := range hnswDeleteIDs {
+						s.hnsw.graph.Delete(id)
+					}
+					// The library can leave an empty upper layer after deletion.
+					// Probe before releasing the lock so readers never see that graph.
+					if s.hnsw.graph.Len() > 0 {
+						s.hnsw.graph.Search(make([]float32, s.hnsw.graph.Dims()), 1)
+					}
+					s.hnsw.mods.Add(int64(len(hnswDeleteIDs)))
+					s.hnsw.generation.Store(committedGeneration)
+				}()
+			}
+			if !hnswDeleteComplete {
+				s.resetRuntimeIndexes(false)
+			}
+		}
+		if s.docEmbeds != nil {
+			s.docEmbeds.Remove(doc.ID, path)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ListQuarantined(ctx context.Context) ([]QuarantineEntry, error) {

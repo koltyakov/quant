@@ -15,7 +15,9 @@ Query text
   │     │
   │     └──► Vector-only candidates with similarity scores
   │
-  └──► Merge candidates ──► RRF fusion ──► Normalize ──► Results
+  └──► Merge candidates ──► RRF fusion ──► Normalize
+                           │
+                           └──► Optional rerank ──► Threshold ──► Diversity ──► Limit
 ```
 
 ## Stage 1: Keyword search
@@ -37,6 +39,8 @@ Results are collected with their BM25 rank and initial vector similarity score (
 The query is embedded via the configured backend and used to search the in-memory HNSW graph (M=16, EfSearch=100). This returns approximate nearest neighbors ranked by cosine distance.
 
 When a path or metadata filter is active, HNSW results are intersected with the matching set from SQLite. If the intersection is too small, a bounded exact scan over matching chunks is used as a fallback (controlled by `--max-vector-candidates`). Exceptionally broad filters cap the in-memory intersection at 500,000 chunk IDs.
+
+The vector candidate budget is independent of the output count: small searches retain up to 100 semantic candidates, with a 1,000-candidate cap for larger internal requests. This lets later ranking and diversity choose among more than the requested number of hits. HNSW probes request at most 10,000 neighbors. These are upper bounds, not guarantees that enough matching chunks exist.
 
 ## Stage 3: RRF fusion
 
@@ -73,15 +77,19 @@ After base RRF scoring, additional signals are applied:
 
 ## Stage 5: Normalization
 
-Scores are divided by the theoretical maximum (rank 1 for both keyword and vector, plus maximum recency and path bonuses) so the top candidate approaches 1.0. This makes the `threshold` parameter intuitive: a threshold of 0.5 means "at least half the best possible score."
+RRF scores are divided by the theoretical maximum, using rank 1 for both keyword and vector plus maximum recency and path bonuses. These scores are ranking signals, not relevance probabilities. Optional reranking uses a different normalization, described below.
 
-## Stage 6: Document diversity
+## Stage 6: Optional LLM reranking
 
-Results are reordered so the single best chunk per unique document appears first, then remaining slots are filled with secondary chunks from the same documents. This prevents one large file from dominating all results.
+With `--reranker cross-encoder`, the configured LLM scores up to the first 20 fused candidates, before thresholding or diversity. The original and LLM scores are each normalized against the maximum in that scored pool, then blended 50/50. Successful results use `score_kind: "rerank_blend"`.
 
-## Stage 7: Optional LLM reranking
+Only the scored pool is returned after successful reranking. Unscored candidates are not mixed in using incomparable RRF scores, so a request for more than 20 results can return fewer than its limit. If any scoring batch fails or returns malformed, missing, nonfinite, or wrong-length scores, the entire original candidate pool retains its scores and order. The response reports `retrieval.rerank_error`.
 
-With `--reranker cross-encoder`, the configured LLM scores up to the first 20 results after diversity is applied. The original and LLM scores are normalized and blended 50/50 before the results are reordered. If reranking fails, the original order is retained.
+## Stage 7: Threshold, diversity, and limit
+
+Candidates below `threshold` are removed first. Among eligible candidates, the single best chunk per document appears first, then remaining slots are filled with secondary chunks. Finally, results are limited to the requested count. A low-scoring chunk from a different document cannot displace an eligible secondary chunk and then leave a gap when thresholding runs.
+
+A threshold applies to the result's score kind. RRF and rerank-blend scores are not interchangeable, and neither is a relevance probability.
 
 Search can be restricted by path prefix, canonical file type, programming language, or exact collection name. File type aliases and language names are normalized case-insensitively; collection names remain case-sensitive.
 
@@ -97,6 +105,23 @@ Filesystem indexing does not currently assign collection names, so collection fi
 2. The search proceeds with keyword-only candidates.
 3. The response includes `embedding_status: "keyword_only"` and a note explaining the fallback.
 4. The circuit breaker resets after 30 seconds, allowing retry.
+
+When the server starts in keyword-only mode, new chunks can lack embeddings. Restarting with the backend available backfills those chunks even if their source files and model name have not changed.
+
+## Retrieval diagnostics
+
+Search and similarity tool responses include a request-level `retrieval` object, also carried through the local worker proxy. It is independent of `embedding_status`, which retains its existing embedding-availability meaning.
+
+| `retrieval.semantic` | Meaning |
+|----------------------|---------|
+| `complete` | The configured semantic retrieval strategy completed. HNSW is approximate, so this does not promise exhaustive recall. |
+| `unavailable` | No query or source embedding was available for semantic retrieval. |
+| `budget_skipped` | The exact fallback was skipped because it was disabled or exceeded its candidate budget. |
+| `incomplete` | Semantic retrieval examined a restricted subset or could not complete a filtered fallback. |
+| `failed` | A semantic retrieval operation failed; partial results may still be present. |
+| `unknown` | The backend did not supply diagnostics, for example an older proxy server. |
+
+`budget_skipped: true` records a skipped fallback even when the overall status is `incomplete`. `errors` contains retrieval failures, and `rerank_error` records optional reranker failures. An empty result set with unavailable or incomplete retrieval is not evidence that nothing in the corpus matches.
 
 ## find_similar
 
@@ -120,5 +145,8 @@ Each result includes a `score_kind` field that indicates how the score was produ
 
 | Value | Source |
 |-------|--------|
-| `"rrf"` | Search (`search` tool) - score is from RRF fusion; when cross-encoder reranking is enabled, the score is the 50/50 normalized blend but currently retains this label |
+| `"rrf"` | Search score from theoretical-maximum-normalized RRF fusion with path and recency bonuses |
+| `"rerank_blend"` | Successful LLM reranking, using a 50/50 blend of pool-maximum-normalized original and model scores |
 | `"similar"` | Similarity search (`find_similar`, `drill_down` tools) - score is raw vector similarity |
+
+Each scored result also includes `score_semantics`, a description of its score calculation.

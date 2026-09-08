@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -34,7 +35,7 @@ func NewCrossEncoderReranker(cfg CrossEncoderConfig) *CrossEncoderReranker {
 	if cfg.TopK < 1 {
 		cfg.TopK = 20
 	}
-	if cfg.ScoreWeight <= 0 {
+	if cfg.ScoreWeight <= 0 || cfg.ScoreWeight > 1 || math.IsNaN(float64(cfg.ScoreWeight)) {
 		cfg.ScoreWeight = 0.5
 	}
 	return &CrossEncoderReranker{
@@ -60,11 +61,14 @@ func (r *CrossEncoderReranker) Rerank(ctx context.Context, query string, _ []flo
 	scores, err := r.scoreBatch(ctx, query, candidates)
 	if err != nil {
 		logx.Warn("cross-encoder rerank failed; keeping original order", "err", err)
-		return results, nil
+		return results, err
 	}
 
 	maxOriginal := float32(0)
 	for _, res := range candidates {
+		if math.IsNaN(float64(res.Score)) || math.IsInf(float64(res.Score), 0) {
+			return results, fmt.Errorf("nonfinite original score for chunk %d", res.ChunkID)
+		}
 		if res.Score > maxOriginal {
 			maxOriginal = res.Score
 		}
@@ -101,15 +105,13 @@ func (r *CrossEncoderReranker) Rerank(ctx context.Context, query string, _ []flo
 		return scoredResults[i].combined > scoredResults[j].combined
 	})
 
-	out := make([]SearchResult, len(results))
+	// Return only the scored pool: its normalized blend is not comparable to
+	// the original RRF scores of the unscored tail.
+	out := make([]SearchResult, len(scoredResults))
 	for i, s := range scoredResults {
 		s.result.Score = s.combined
+		s.result.ScoreKind = "rerank_blend"
 		out[i] = s.result
-	}
-	if len(results) > len(scoredResults) {
-		copy(out[len(scoredResults):], results[len(scoredResults):])
-	} else {
-		out = out[:len(scoredResults)]
 	}
 
 	return out, nil
@@ -177,35 +179,33 @@ func parseScoreArray(content string, expected int) ([]float32, error) {
 	start := strings.Index(content, "[")
 	end := strings.LastIndex(content, "]")
 	if start < 0 || end < 0 || end <= start {
-		return uniformScores(expected, 0.5), nil
+		return nil, fmt.Errorf("reranker response has no score array")
 	}
 
-	var raw []float64
+	var raw []*float64
 	if err := json.Unmarshal([]byte(content[start:end+1]), &raw); err != nil {
-		return uniformScores(expected, 0.5), nil
+		return nil, fmt.Errorf("invalid reranker scores: %w", err)
+	}
+	if len(raw) != expected {
+		return nil, fmt.Errorf("reranker returned %d scores, expected %d", len(raw), expected)
 	}
 
 	scores := make([]float32, expected)
 	for i := range scores {
-		s := float32(0.5)
-		if i < len(raw) {
-			s = float32(raw[i])
-			if s < 0 {
-				s = 0
-			}
-			if s > 1 {
-				s = 1
-			}
+		if raw[i] == nil || math.IsNaN(*raw[i]) || math.IsInf(*raw[i], 0) {
+			return nil, fmt.Errorf("reranker score %d is missing or nonfinite", i)
+		}
+		s := float32(*raw[i])
+		if math.IsInf(float64(s), 0) {
+			return nil, fmt.Errorf("reranker score %d overflows float32", i)
+		}
+		if s < 0 {
+			s = 0
+		}
+		if s > 1 {
+			s = 1
 		}
 		scores[i] = s
 	}
 	return scores, nil
-}
-
-func uniformScores(n int, v float32) []float32 {
-	s := make([]float32, n)
-	for i := range s {
-		s[i] = v
-	}
-	return s
 }
