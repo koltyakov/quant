@@ -63,6 +63,7 @@ func (idx *Indexer) failureConfig(category string) string {
 // basename allows routers to recognize extensionless files such as Dockerfile.
 func snapshotSource(ctx context.Context, path string) (snapshot, revision string, info os.FileInfo, cleanup func(), err error) {
 	cleanup = func() {}
+	// #nosec G304 -- callers pass a path resolved and confined to the watch root.
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -87,6 +88,7 @@ func snapshotSource(ctx context.Context, path string) (snapshot, revision string
 	}
 	cleanup = func() { _ = os.RemoveAll(dir) }
 	snapshot = filepath.Join(dir, filepath.Base(path))
+	// #nosec G304 -- snapshot is confined to the private temporary directory.
 	out, err := os.OpenFile(snapshot, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
@@ -121,6 +123,7 @@ func (idx *Indexer) sourceMatches(ctx context.Context, ref DocumentRef, revision
 	if info.Size() > maxIndexSnapshotBytes {
 		return revision == fmt.Sprintf("oversize:%d:%d", info.Size(), info.ModTime().UnixNano())
 	}
+	// #nosec G304 -- statDocumentPath validated this path against the watch root.
 	f, err := os.Open(ref.AbsPath)
 	if err != nil {
 		return false

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -52,19 +51,15 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string, modTime time.Tim
 	return idx.IndexDocument(ctx, ref, modTime)
 }
 
-func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, modTime time.Time, precomputedHash string, doc *index.Document, version uint64) (IndexAction, error) {
-	var fileSize int64 = -1
-	if info, err := os.Stat(path); err == nil {
-		fileSize = info.Size()
-	}
+func (idx *Indexer) indexFileCore(ctx context.Context, key, path string, _ time.Time, _ string, doc *index.Document, version uint64) (IndexAction, error) {
 	if path != "" {
-		return idx.indexFileCoreRef(ctx, DocumentRef{Key: key, AbsPath: path}, modTime, fileSize, precomputedHash, doc, version)
+		return idx.indexFileCoreRef(ctx, DocumentRef{Key: key, AbsPath: path}, doc, version)
 	}
 	ref, err := ResolveDocumentRefFromKey(idx.cfg.WatchDir, key)
 	if err != nil {
 		return IndexNoop, fmt.Errorf("resolving document key: %w", err)
 	}
-	return idx.indexFileCoreRef(ctx, ref, modTime, fileSize, precomputedHash, doc, version)
+	return idx.indexFileCoreRef(ctx, ref, doc, version)
 }
 
 func (idx *Indexer) processLiveIndexRequest(ctx context.Context, path string) {

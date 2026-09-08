@@ -37,10 +37,13 @@ func TestRetryQuarantined(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer s.Close()
 		entries, err := s.ListQuarantined(ctx)
+		closeErr := s.Close()
 		if err != nil || len(entries) != want {
 			t.Fatalf("quarantine entries = %v, err = %v; want %d", entries, err, want)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
 		}
 	}
 	lk, err := lock.TryAcquireForDB(cfg.DBPath, "primary", "")

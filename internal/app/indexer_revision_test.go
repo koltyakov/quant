@@ -312,7 +312,7 @@ func TestRetrySchedulerDoesNotRepublishQuarantine(t *testing.T) {
 		t.Fatal("job did not start")
 	}
 	defer idx.paths.Finish(ref.Key)
-	_, err = idx.indexFileCoreRef(ctx, ref, time.Time{}, 0, "", nil, version)
+	_, err = idx.indexFileCoreRef(ctx, ref, nil, version)
 	if !errors.Is(err, embed.ErrPermanent) {
 		t.Fatalf("index error=%v", err)
 	}

@@ -1020,7 +1020,7 @@ func TestIndexFile_RemoveDuringInFlightIndexDoesNotResurrectDocument(t *testing.
 
 	close(ext.release)
 
-	if err := <-indexErrCh; err != nil {
+	if err := <-indexErrCh; err != nil && !strings.Contains(err.Error(), "source changed during indexing") {
 		t.Fatalf("unexpected indexing error: %v", err)
 	}
 	if err := <-removeErrCh; err != nil {

@@ -681,13 +681,11 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 		return idx.removeCurrentDocument(ctx, ref, doc, version)
 	}
 
-	effectiveModTime := info.ModTime()
-
 	doc, err = idx.loadDocument(ctx, ref.Key, doc)
 	if err != nil {
 		return IndexNoop, err
 	}
-	return idx.indexFileCoreRef(ctx, ref, effectiveModTime, info.Size(), "", doc, version)
+	return idx.indexFileCoreRef(ctx, ref, doc, version)
 }
 
 // refreshDocumentStat keeps the stored filesystem metadata current when the
@@ -767,7 +765,7 @@ func (idx *Indexer) getPipeline() *ingest.Pipeline {
 	return idx.pipeline
 }
 
-func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTime time.Time, fileSize int64, _ string, doc *index.Document, version uint64) (action IndexAction, resultErr error) {
+func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, doc *index.Document, version uint64) (action IndexAction, resultErr error) {
 	snapshot, hash, info, cleanup, err := snapshotSource(ctx, ref.AbsPath)
 	defer cleanup()
 	defer func() {
@@ -791,7 +789,7 @@ func (idx *Indexer) indexFileCoreRef(ctx context.Context, ref DocumentRef, modTi
 	if err != nil {
 		return IndexNoop, err
 	}
-	modTime, fileSize = info.ModTime(), info.Size()
+	modTime, fileSize := info.ModTime(), info.Size()
 
 	existingByContent, err := idx.store.GetDocumentChunksByPath(ctx, ref.Key)
 	if err != nil {
@@ -940,24 +938,6 @@ func (idx *Indexer) shouldIgnorePath(path string) bool {
 	}
 
 	return !matcher.ShouldIndex(relPath)
-}
-
-// quarantinedKeys returns the current skip list as a set. A read failure yields
-// an empty set, matching isQuarantined's fail-open behavior.
-func (idx *Indexer) quarantinedKeys(ctx context.Context) map[string]bool {
-	if idx.quarantine == nil {
-		return nil
-	}
-	entries, err := idx.quarantine.ListQuarantined(ctx)
-	if err != nil {
-		logx.Warn("failed to load quarantine list", "err", err)
-		return nil
-	}
-	keys := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		keys[entry.Path] = true
-	}
-	return keys
 }
 
 func (idx *Indexer) isQuarantined(ctx context.Context, key string) bool {

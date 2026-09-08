@@ -54,7 +54,9 @@ func runRetryCommand(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(os.Stdout, "Quarantine cleared. Start quant mcp with the same --dir/--db/--config settings to rescan and retry; no indexing was performed by this command.")
+	if _, err := fmt.Fprintln(os.Stdout, "Quarantine cleared. Start quant mcp with the same --dir/--db/--config settings to rescan and retry; no indexing was performed by this command."); err != nil {
+		return 1
+	}
 	return 0
 }
 

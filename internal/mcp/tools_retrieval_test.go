@@ -82,7 +82,11 @@ func TestSearchRetrievalDiagnosticsWithHealthyEmbedding(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer db.Close()
+				t.Cleanup(func() {
+					if err := db.Close(); err != nil {
+						t.Errorf("closing diagnostic database: %v", err)
+					}
+				})
 				if _, err := db.Exec("ALTER TABLE documents RENAME COLUMN path TO broken_path"); err != nil {
 					t.Fatal(err)
 				}
