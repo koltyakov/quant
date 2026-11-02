@@ -173,8 +173,11 @@ func TestIndexerBlockedPublication(t *testing.T) {
 				emb.err = embed.ErrPermanent
 			}
 			idx = revisionIndexer(t, root, store, emb)
-			done := make(chan error, 1)
-			go func() { _, err := idx.SyncDocumentRef(ctx, ref, nil, nil); done <- err }()
+			done := make(chan struct{})
+			go func() {
+				_, _ = idx.SyncDocumentRef(ctx, ref, nil, nil) // Errors are expected for failed embeddings or changed sources.
+				close(done)
+			}()
 			select {
 			case <-emb.started:
 			case <-time.After(5 * time.Second):
