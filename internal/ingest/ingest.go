@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
 	"strings"
@@ -142,25 +141,7 @@ func (p *Pipeline) UsableEmbedding(data []byte) bool {
 	if p.Embedder == nil {
 		return len(data) > 0
 	}
-	dims := p.Embedder.Dimensions()
-	if dims <= 0 {
-		return false
-	}
-	finite := func(v float32) bool { return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) }
-	if len(data) == dims*4 {
-		for i := 0; i < len(data); i += 4 {
-			if !finite(math.Float32frombits(binary.LittleEndian.Uint32(data[i:]))) {
-				return false
-			}
-		}
-		return true
-	}
-	if len(data) != dims+8 {
-		return false
-	}
-	minVal := math.Float32frombits(binary.LittleEndian.Uint32(data))
-	scale := math.Float32frombits(binary.LittleEndian.Uint32(data[4:]))
-	return scale >= 0 && finite(minVal) && finite(scale) && finite(minVal+255*scale)
+	return index.IsUsableEmbedding(data, p.Embedder.Dimensions())
 }
 
 func (p *Pipeline) EmbedChunks(ctx context.Context, toEmbed []chunk.Chunk, positions []PendingEmbed, records []index.ChunkRecord) error {
@@ -347,9 +328,8 @@ func splitChunkForEmbeddingBudget(c chunk.Chunk) []chunk.Chunk {
 	return parts
 }
 
-// dropRunes returns text with its first n runes removed. Slicing by byte offset
-// avoids the []rune round trip the caller used to pay on every iteration, which
-// made splitting one oversized chunk quadratic in its own length.
+// dropRunes returns text with its first n runes removed without scanning or
+// copying the remaining suffix.
 func dropRunes(text string, n int) string {
 	if n <= 0 {
 		return text

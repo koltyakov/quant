@@ -685,6 +685,10 @@ func (idx *Indexer) syncDocumentOnceRef(ctx context.Context, ref DocumentRef, do
 	if err != nil {
 		return IndexNoop, err
 	}
+	skip, err := idx.canSkipSnapshot(ctx, ref, doc, info, version)
+	if err != nil || skip {
+		return IndexNoop, err
+	}
 	return idx.indexFileCoreRef(ctx, ref, doc, version)
 }
 

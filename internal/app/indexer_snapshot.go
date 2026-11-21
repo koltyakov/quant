@@ -59,6 +59,40 @@ func (idx *Indexer) failureConfig(category string) string {
 	return fmt.Sprintf("%s:limit=%d", idx.projectionFingerprint(), maxIndexSnapshotBytes)
 }
 
+// canSkipSnapshot uses file metadata only to decide whether to try the fast
+// path. It still hashes the full source under the revision guard.
+func (idx *Indexer) canSkipSnapshot(ctx context.Context, ref DocumentRef, doc *index.Document, info os.FileInfo, version uint64) (bool, error) {
+	if doc == nil || idx.embedder == nil || doc.Hash == "" || doc.FileSize != info.Size() ||
+		!doc.ModifiedAt.Equal(info.ModTime()) || info.Size() > maxIndexSnapshotBytes || !info.Mode().IsRegular() {
+		return false, nil
+	}
+	store, ok := idx.store.(projectionStore)
+	if !ok {
+		return false, nil
+	}
+	projection, err := store.DocumentProjection(ctx, ref.Key)
+	if err != nil || projection.Fingerprint != idx.projectionFingerprint() || projection.EmbeddingSpace != idx.embeddingSpace() {
+		return false, err
+	}
+	if q, ok := idx.quarantine.(scopedQuarantineStore); ok {
+		entry, err := q.GetQuarantineRevision(ctx, ref.Key)
+		if err != nil || entry != nil {
+			return false, err
+		}
+	}
+	complete, err := store.DocumentEmbeddingsComplete(ctx, ref.Key, idx.embedder.Dimensions())
+	if err != nil || !complete {
+		return false, err
+	}
+
+	matched := false
+	current, err := idx.paths.Publish(ref.Key, version, func() error {
+		matched = idx.sourceMatches(ctx, ref, doc.Hash, info)
+		return ctx.Err()
+	})
+	return !current || matched, err
+}
+
 // snapshotSource copies and hashes exactly the same bounded bytes. Keeping the
 // basename allows routers to recognize extensionless files such as Dockerfile.
 func snapshotSource(ctx context.Context, path string) (snapshot, revision string, info os.FileInfo, cleanup func(), err error) {

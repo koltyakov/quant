@@ -148,6 +148,108 @@ func TestIndexerStartupBackfillsSameModelKeywordDocuments(t *testing.T) {
 	}
 }
 
+func TestIndexerWarmStartup(t *testing.T) {
+	const original, rewritten = "first version", "other version"
+	for _, name := range []string{"unchanged without snapshot", "same size and mtime rewrite", "incomplete embeddings"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			root := t.TempDir()
+			file := filepath.Join(root, "a.txt")
+			dbPath := filepath.Join(t.TempDir(), "index.db")
+			modTime := time.Unix(1_700_000_000, 0)
+			writeFile(t, file, original)
+			if err := os.Chtimes(file, modTime, modTime); err != nil {
+				t.Fatal(err)
+			}
+			open := func() *index.Store {
+				t.Helper()
+				store, err := index.NewStore(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				return store
+			}
+			sync := func(idx *Indexer) {
+				t.Helper()
+				if report, err := idx.InitialSyncWithReport(ctx); err != nil || report.HadIndexFailures {
+					t.Fatalf("initial sync: %+v, %v", report, err)
+				}
+			}
+			store := open()
+			idx := revisionIndexer(t, root, store, &revisionEmbedder{})
+			sync(idx)
+			before, err := store.GetDocumentByPath(ctx, "a.txt")
+			if err != nil || before == nil {
+				t.Fatalf("initial document: %v, %v", before, err)
+			}
+			if name == "incomplete embeddings" {
+				projection, err := store.DocumentProjection(ctx, before.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ReindexDocumentProjection(ctx, before, []index.ChunkRecord{
+					{Content: original, Embedding: []byte{}},
+				}, projection); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			store = open()
+			emb := &revisionEmbedder{}
+			idx = revisionIndexer(t, root, store, emb)
+			idx.pipeline.DedupStore = nil // Missing vectors must be regenerated in this test.
+			wantText := original
+			switch name {
+			case "unchanged without snapshot":
+				badTemp := filepath.Join(root, "no-temp-dir")
+				writeFile(t, badTemp, "")
+				for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemTemp"} {
+					t.Setenv(key, badTemp)
+				}
+				if dir, err := os.MkdirTemp("", "snapshot-test-*"); err == nil {
+					_ = os.Remove(dir)
+					t.Fatal("test did not disable the temporary directory")
+				}
+			case "same size and mtime rewrite":
+				wantText = rewritten
+				writeFile(t, file, wantText)
+				if err := os.Chtimes(file, before.ModifiedAt, before.ModifiedAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info, err := os.Stat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != before.FileSize || !info.ModTime().Equal(before.ModifiedAt) {
+				t.Fatalf("expected stored stat to match source: size=%d, mtime=%v, doc=%+v",
+					info.Size(), info.ModTime(), before)
+			}
+			sync(idx)
+			after, err := store.GetDocumentByPath(ctx, before.Path)
+			if err != nil || after == nil || after.Hash != index.ChunkDiffKey(wantText) {
+				t.Fatalf("reopened document: %+v, %v", after, err)
+			}
+			chunks, err := store.GetDocumentChunksByPath(ctx, before.Path)
+			chunk := chunks[index.ChunkDiffKey(wantText)]
+			if err != nil || len(chunks) != 1 || chunk.Content != wantText || !idx.pipeline.UsableEmbedding(chunk.Embedding) {
+				t.Fatalf("reopened chunks: %+v, %v", chunks, err)
+			}
+			wantCalls := 1
+			if name == "unchanged without snapshot" {
+				wantCalls = 0
+			}
+			if emb.calls != wantCalls {
+				t.Fatalf("embedding calls = %d, want %d", emb.calls, wantCalls)
+			}
+		})
+	}
+}
+
 func TestIndexerBlockedPublication(t *testing.T) {
 	for _, mutation := range []string{"rewrite", "remove", "prefix", "failure-rewrite", "failure-remove"} {
 		t.Run(mutation, func(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"path"
 	"strings"
 	"time"
@@ -91,8 +90,8 @@ func (s *Store) DocumentProjection(ctx context.Context, path string) (Projection
 	return projection, err
 }
 
-// DocumentEmbeddingsComplete checks every row, including duplicate chunk inputs
-// that GetDocumentChunksByPath collapses into one diff-cache entry.
+// DocumentEmbeddingsComplete checks that every row contains a usable embedding,
+// including duplicate chunk inputs collapsed by GetDocumentChunksByPath.
 func (s *Store) DocumentEmbeddingsComplete(ctx context.Context, path string, dimensions int) (bool, error) {
 	if dimensions <= 0 {
 		return false, nil
@@ -109,15 +108,7 @@ func (s *Store) DocumentEmbeddingsComplete(ctx context.Context, path string, dim
 		if err := rows.Scan(&data); err != nil {
 			return false, err
 		}
-		vector := decodeEmbeddingForHNSW(data, dimensions)
-		if dimensions <= 0 || len(vector) != dimensions {
-			complete = false
-		}
-		for _, v := range vector {
-			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-				complete = false
-			}
-		}
+		complete = complete && IsUsableEmbedding(data, dimensions)
 	}
 	return found && complete, rows.Err()
 }
@@ -518,7 +509,7 @@ func (s *Store) RenameDocumentPath(ctx context.Context, oldPath, newPath string)
 
 // UpdateDocumentStat refreshes the stored modification time and size for a
 // document whose content hash already matches the file on disk, so future
-// syncs can skip re-hashing it.
+// syncs can check the hash without making a temporary snapshot.
 func (s *Store) UpdateDocumentStat(ctx context.Context, path string, modTime time.Time, size int64) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

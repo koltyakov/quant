@@ -55,7 +55,7 @@ flowchart TD
 
 **Transactional writes.** All chunk replacements for a single document happen inside one SQLite transaction. HNSW updates are deferred until after the transaction commits.
 
-**Source snapshots.** Hashing and extraction read the same temporary snapshot, capped at 100 MiB. Before publishing, the indexer rechecks source identity, metadata, content hash, and job revision. Publication and path/prefix invalidation share synchronization so invalidated jobs cannot reinsert deleted documents. Extraction and embedding happen outside that synchronization; subsequent filesystem writes are reconciled through watcher events and resync.
+**Source snapshots.** Hashing and extraction read the same temporary snapshot, capped at 100 MiB. If the source metadata, projection, and stored embeddings are current, the indexer can skip the snapshot by verifying the full source hash. A rewrite with the same size and modification time still triggers reindexing. Before publishing, the indexer rechecks source identity, metadata, content hash, and job revision. Publication and path/prefix invalidation share synchronization so invalidated jobs cannot reinsert deleted documents. Extraction and embedding happen outside that synchronization; subsequent filesystem writes are reconciled through watcher events and resync.
 
 **Recoverable quarantine.** Permanent failures record the failed source revision, failure category, and relevant configuration. Quarantine and document removal are atomic. Source or configuration changes retry the file automatically; `quant retry` clears one or all quarantine entries while MCP is stopped, for retry on the next startup.
 

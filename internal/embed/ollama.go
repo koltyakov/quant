@@ -294,36 +294,54 @@ func TruncateForInput(text string, maxChars int) string {
 	return prefix
 }
 
-// PrefixWithinInputBudget returns the largest leading segment that fits within
-// maxChars runes, along with the number of original input runes consumed.
+// PrefixWithinInputBudget returns a prefix that fits within maxChars runes,
+// preferring a natural boundary, and the number of original runes consumed.
+// A nonpositive budget leaves the input unchanged.
 func PrefixWithinInputBudget(text string, maxChars int) (string, int) {
-	if maxChars <= 0 || utf8.RuneCountInString(text) <= maxChars {
+	if maxChars <= 0 || len(text) <= maxChars {
 		return text, utf8.RuneCountInString(text)
 	}
 
-	runes := []rune(text)
-	if len(runes) <= maxChars {
-		return text, len(runes)
+	windowStart := max(maxChars-256, 0)
+	var count, windowByte, cutByte int
+	// Stop at the first rune beyond the budget. The caller may split the
+	// remaining suffix next, so scanning it here would repeat that work.
+	for offset := range text {
+		if count == windowStart {
+			windowByte = offset
+		}
+		if count == maxChars {
+			cutByte = offset
+			break
+		}
+		count++
+	}
+	if cutByte == 0 {
+		return text, count
 	}
 
-	cut := maxChars
-	windowStart := cut - 256
-	if windowStart < 0 {
-		windowStart = 0
+	prefix := text[:cutByte]
+	window := text[windowByte:cutByte]
+	valid := utf8.ValidString(prefix)
+	trim := func(s string) string {
+		if !valid {
+			// Preserve the old rune conversion's replacement of each invalid
+			// byte. It doesn't affect where ASCII break markers are found.
+			s = string([]rune(s))
+		}
+		return strings.TrimSpace(s)
 	}
-	window := string(runes[windowStart:cut])
 
 	for _, marker := range []string{"\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "} {
 		if idx := strings.LastIndex(window, marker); idx >= 0 {
-			// idx is a byte offset into window; convert to runes before mixing
-			// with rune-based offsets, or multibyte text overruns the budget.
-			consumed := windowStart + utf8.RuneCountInString(window[:idx]) + len([]rune(marker))
-			candidate := strings.TrimSpace(string(runes[:consumed]))
+			end := idx + len(marker)
+			consumed := windowStart + utf8.RuneCountInString(window[:end])
+			candidate := trim(text[:windowByte+end])
 			if utf8.RuneCountInString(candidate) >= maxChars/2 {
 				return candidate, consumed
 			}
 		}
 	}
 
-	return strings.TrimSpace(string(runes[:cut])), cut
+	return trim(prefix), maxChars
 }

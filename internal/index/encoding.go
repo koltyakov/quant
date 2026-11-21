@@ -82,6 +82,30 @@ func decodeFloat32(data []byte) []float32 {
 	return vec
 }
 
+// IsUsableEmbedding checks the stored vector format and finite values without
+// decoding a new vector. Quantized values are bounded by the scale endpoints.
+func IsUsableEmbedding(data []byte, dims int) bool {
+	if dims <= 0 {
+		return false
+	}
+	finite := func(v float32) bool { return v >= -math.MaxFloat32 && v <= math.MaxFloat32 }
+	switch len(data) {
+	case dims * 4:
+		for i := 0; i < len(data); i += 4 {
+			if !finite(math.Float32frombits(binary.LittleEndian.Uint32(data[i:]))) {
+				return false
+			}
+		}
+		return true
+	case 8 + dims:
+		minVal := math.Float32frombits(binary.LittleEndian.Uint32(data))
+		scale := math.Float32frombits(binary.LittleEndian.Uint32(data[4:]))
+		return scale >= 0 && finite(minVal) && finite(scale) && finite(minVal+255*scale)
+	default:
+		return false
+	}
+}
+
 func dotProduct(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return 0

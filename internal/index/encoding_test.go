@@ -2,6 +2,7 @@ package index
 
 import (
 	"container/heap"
+	"encoding/binary"
 	"math"
 	"testing"
 )
@@ -60,6 +61,36 @@ func TestEncodeInt8_ConstantVector(t *testing.T) {
 
 func decodeUint32(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+func TestIsUsableEmbedding(t *testing.T) {
+	quantized := func(minVal, scale float32) []byte {
+		data := EncodeInt8([]float32{0, 1, 2})
+		binary.LittleEndian.PutUint32(data, math.Float32bits(minVal))
+		binary.LittleEndian.PutUint32(data[4:], math.Float32bits(scale))
+		return data
+	}
+	for _, tt := range []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"float32", EncodeFloat32([]float32{0, 1, 2}), true},
+		{"quantized", EncodeInt8([]float32{0, 1, 2}), true},
+		{"constant quantized", quantized(1, 0), true},
+		{"missing", nil, false},
+		{"wrong dimensions", EncodeInt8([]float32{0, 1}), false},
+		{"nonfinite float32", EncodeFloat32([]float32{0, 1, float32(math.NaN())}), false},
+		{"nonfinite quantized minimum", quantized(float32(math.Inf(1)), 1), false},
+		{"negative scale", quantized(1, -1), false},
+		{"overflowing scale", quantized(0, math.MaxFloat32), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsUsableEmbedding(tt.data, 3); got != tt.want {
+				t.Fatalf("IsUsableEmbedding = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestDotProductEncoded_Int8Format(t *testing.T) {

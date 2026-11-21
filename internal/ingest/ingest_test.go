@@ -747,6 +747,47 @@ func TestPrepareChunks_RespectsEmbeddingBudget(t *testing.T) {
 	}
 }
 
+func TestPrepareChunks_PreservesExactLongChunkText(t *testing.T) {
+	t.Parallel()
+
+	first := strings.Repeat("é界", 1900) + "."
+	second := strings.Repeat("𐐷x", 1910) + "!"
+	wordParts := make([]string, 0, 65)
+	for range 32 {
+		wordParts = append(wordParts, first, second)
+	}
+	wordParts = append(wordParts, strings.Repeat("終", 200))
+
+	fullBudget := strings.Repeat("日𐐷", embed.MaxInputRunes/2)
+	hardParts := make([]string, 0, 33)
+	for range 32 {
+		hardParts = append(hardParts, fullBudget)
+	}
+	hardParts = append(hardParts, "末尾")
+
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"natural boundaries", strings.Join(wordParts, " "), wordParts},
+		{"hard cuts", strings.Join(hardParts, ""), hardParts},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := PrepareChunks(tc.input, "paper.pdf", 512, 0)
+			if len(chunks) != len(tc.want) {
+				t.Fatalf("got %d chunks, want %d", len(chunks), len(tc.want))
+			}
+			for i, c := range chunks {
+				if c.Index != i || c.Content != tc.want[i] {
+					t.Fatalf("chunk %d: got index %d and text hash %s, want index %d and text hash %s",
+						i, c.Index, index.ChunkDiffKey(c.Content), i, index.ChunkDiffKey(tc.want[i]))
+				}
+			}
+		})
+	}
+}
+
 func TestDropRunes(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
