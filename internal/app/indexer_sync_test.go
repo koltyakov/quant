@@ -887,16 +887,14 @@ func TestHandleWatchEvent_Remove(t *testing.T) {
 	}
 }
 
-func TestHandleWatchEvent_Resync(t *testing.T) {
+func TestHandleWatchEvent_ResyncWithFileInclude(t *testing.T) {
 	root := t.TempDir()
 	ext := &stubExtractor{}
 	emb := &stubEmbedder{dimensions: 3}
 	idx := newTestIndexer(root, &stubDocumentStore{}, ext, emb)
 
 	resyncDone := make(chan struct{})
-	idx.initResyncCoordinator()
-	origOnResync := idx.Resync
-	_ = origOnResync
+	idx.cfg.IncludePatterns = []string{"**/*.go"}
 	idx.Resync = NewResyncCoordinator(ResyncCallbacks{
 		OnResync: func(context.Context) (SyncReport, error) {
 			close(resyncDone)
@@ -912,7 +910,7 @@ func TestHandleWatchEvent_Resync(t *testing.T) {
 	}
 }
 
-func TestHandleWatchEvent_RemoveDirectory(t *testing.T) {
+func TestHandleWatchEvent_RemoveDirectoryWithFileInclude(t *testing.T) {
 	root := t.TempDir()
 	store := &trackingDocumentStore{}
 	ext := &stubExtractor{}
@@ -920,6 +918,7 @@ func TestHandleWatchEvent_RemoveDirectory(t *testing.T) {
 	idx := newSyncTestIndexer(root, store, ext, emb)
 
 	event := watch.Event{Path: filepath.Join(root, "docs"), Op: watch.Remove, IsDir: true}
+	idx.cfg.IncludePatterns = []string{"**/*.go"}
 	idx.HandleWatchEvent(context.Background(), event)
 
 	store.mu.Lock()

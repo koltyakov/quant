@@ -224,20 +224,32 @@ func (s *Server) readinessError(ctx context.Context) error {
 	if s.store == nil {
 		return errors.New("index store is unavailable")
 	}
-	if err := s.store.PingContext(ctx); err != nil {
-		return fmt.Errorf("index store is unavailable: %w", err)
-	}
-	if s.state != nil {
-		snapshot := s.state.Snapshot()
-		if !snapshot.Servable() {
-			if snapshot.State == "" {
-				return errors.New("index is not ready")
-			}
-			if snapshot.Message != "" {
-				return fmt.Errorf("index is %s: %s", snapshot.State, snapshot.Message)
-			}
-			return fmt.Errorf("index is %s", snapshot.State)
+	var snapshot runtimestate.IndexSnapshot
+	if worker, ok := s.store.(interface {
+		ReadinessSnapshot(context.Context) (runtimestate.IndexSnapshot, error)
+	}); ok {
+		var err error
+		snapshot, err = worker.ReadinessSnapshot(ctx)
+		if err != nil {
+			return fmt.Errorf("main index is unavailable: %w", err)
 		}
+	} else {
+		if err := s.store.PingContext(ctx); err != nil {
+			return fmt.Errorf("index store is unavailable: %w", err)
+		}
+		snapshot = s.state.Snapshot()
+	}
+	// An empty state means the main has no lifecycle tracker, so a reachable
+	// store is ready. Workers apply the same rule to state reported by mains,
+	// including older ones that don't report it.
+	if snapshot.State == "" {
+		return nil
+	}
+	if !snapshot.Servable() {
+		if snapshot.Message != "" {
+			return fmt.Errorf("index is %s: %s", snapshot.State, snapshot.Message)
+		}
+		return fmt.Errorf("index is %s", snapshot.State)
 	}
 	return nil
 }

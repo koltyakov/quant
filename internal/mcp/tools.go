@@ -11,6 +11,7 @@ import (
 
 	"github.com/koltyakov/quant/internal/index"
 	"github.com/koltyakov/quant/internal/logx"
+	"github.com/koltyakov/quant/internal/proxy"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -530,49 +531,48 @@ func (s *Server) handleListSources(ctx context.Context, request mcplib.CallToolR
 	return mcplib.NewToolResultStructured(structured, output), nil
 }
 
+func (s *Server) indexStatus(ctx context.Context) (proxy.IndexStatusResponse, error) {
+	if worker, ok := s.store.(interface {
+		IndexStatus(context.Context) (proxy.IndexStatusResponse, error)
+	}); ok {
+		return worker.IndexStatus(ctx)
+	}
+	return proxy.ReadIndexStatus(ctx, s.store, s.state, s.embeddingStatus(ctx))
+}
+
 func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	if err := s.acquireToolSlot(ctx); err != nil {
 		return nil, err
 	}
 	defer s.releaseToolSlot()
 
-	docCount, chunkCount, err := s.store.Stats(ctx)
+	status, err := s.indexStatus(ctx)
 	if err != nil {
 		logx.Error("MCP index_status error", "err", err)
 		return nil, fmt.Errorf("getting stats: %w", err)
 	}
 
 	dbSize := sqliteDiskUsage(s.cfg.DBPath)
-	embedStatus := s.embeddingStatus(ctx)
+	snapshot := status.Snapshot()
 	structured := indexStatusToolResponse{
-		Documents:       docCount,
-		Chunks:          chunkCount,
+		Documents:       status.Documents,
+		Chunks:          status.Chunks,
 		DBSizeBytes:     dbSize,
 		DBSize:          formatBytes(dbSize),
 		WatchDir:        s.cfg.WatchDir,
 		Model:           s.cfg.EmbedModel,
-		EmbeddingStatus: embedStatus,
-	}
-	if provider, ok := s.store.(index.FTSDiagnosticsProvider); ok {
-		diag, diagErr := provider.FTSDiagnostics(ctx)
-		if diagErr != nil {
-			logx.Warn("MCP index_status fts diagnostics error", "err", diagErr)
-		} else {
-			structured.FTS = &diag
-		}
-	}
-	if s.state != nil {
-		snapshot := s.state.Snapshot()
-		structured.State = string(snapshot.State)
-		structured.StateMessage = snapshot.Message
-		structured.StateUpdatedAt = snapshot.UpdatedAt
-		structured.StateServing = snapshot.Servable()
-		structured.StateFresh = snapshot.Fresh()
+		EmbeddingStatus: status.EmbeddingStatus,
+		FTS:             status.FTS,
+		State:           status.State,
+		StateMessage:    status.StateMessage,
+		StateUpdatedAt:  status.StateUpdatedAt,
+		StateServing:    snapshot.Servable(),
+		StateFresh:      snapshot.Fresh(),
 	}
 
 	output := fmt.Sprintf(
 		"Index Status:\n  Documents: %d\n  Chunks: %d\n  DB Size: %s\n  Watch Dir: %s\n  Model: %s\n  Embedding: %s",
-		docCount, chunkCount, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel, embedStatus,
+		status.Documents, status.Chunks, formatBytes(dbSize), s.cfg.WatchDir, s.cfg.EmbedModel, status.EmbeddingStatus,
 	)
 	if structured.FTS != nil {
 		output += fmt.Sprintf(
@@ -589,7 +589,7 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcplib.CallToolR
 		output += fmt.Sprintf("\n  Index Fresh: %t", structured.StateFresh)
 	}
 
-	logx.Info("MCP index_status", "documents", docCount, "chunks", chunkCount, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel, "state", structured.State)
+	logx.Info("MCP index_status", "documents", status.Documents, "chunks", status.Chunks, "db_size", formatBytes(dbSize), "watch_dir", s.cfg.WatchDir, "model", s.cfg.EmbedModel, "state", structured.State)
 
 	return mcplib.NewToolResultStructured(structured, output), nil
 }

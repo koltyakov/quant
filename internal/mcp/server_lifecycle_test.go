@@ -13,10 +13,111 @@ import (
 
 	"github.com/koltyakov/quant/internal/config"
 	"github.com/koltyakov/quant/internal/index"
+	"github.com/koltyakov/quant/internal/proxy"
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 	"github.com/koltyakov/quant/internal/testutil"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
+
+func TestWorkerAndMainLifecycle(t *testing.T) {
+	cfg := config.Default()
+	cfg.DBPath = filepath.Join(t.TempDir(), "index.db")
+	store, err := index.NewStore(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	state := runtimestate.NewIndexStateTracker()
+	p := proxy.NewServer(store, state, nil)
+	addr, err := p.Start(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Shutdown(context.Background()) })
+	main := NewServer(cfg, store, nil, "test", state)
+	worker := NewServer(cfg, proxy.NewClient(addr, p.Token()), nil, "test", nil)
+
+	for _, stage := range []struct {
+		state   runtimestate.IndexState
+		message string
+		code    int
+		fresh   bool
+	}{
+		{runtimestate.IndexStateStarting, "", http.StatusServiceUnavailable, false},
+		{runtimestate.IndexStateIndexing, "initial filesystem scan in progress", http.StatusServiceUnavailable, false},
+		{runtimestate.IndexStateReady, "initial scan complete", http.StatusOK, true},
+		{runtimestate.IndexStateDegraded, "filesystem resync failed", http.StatusOK, false},
+	} {
+		state.Set(stage.state, stage.message)
+		for name, server := range map[string]*Server{"main": main, "worker": worker} {
+			t.Run(string(stage.state)+"/"+name, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				server.handleReadiness(response, httptest.NewRequest(http.MethodGet, readinessPath, nil))
+				if response.Code != stage.code {
+					t.Fatalf("readyz = %d, want %d", response.Code, stage.code)
+				}
+				result, err := server.handleIndexStatus(t.Context(), mcplib.CallToolRequest{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := extractIndexStatusStructured(t, result)
+				if status.State != string(stage.state) || status.StateMessage != stage.message ||
+					!status.StateUpdatedAt.Equal(state.Snapshot().UpdatedAt) ||
+					status.StateServing != (stage.code == http.StatusOK) || status.StateFresh != stage.fresh {
+					t.Fatalf("index_status disagrees with main lifecycle: %+v", status)
+				}
+			})
+		}
+	}
+}
+
+func TestWorkerReadinessFromOlderMain(t *testing.T) {
+	cfg := config.Default()
+	cfg.DBPath = filepath.Join(t.TempDir(), "index.db")
+	store, err := index.NewStore(cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	// A main without a lifecycle tracker is ready once its store responds.
+	untracked := httptest.NewRecorder()
+	NewServer(cfg, store, nil, "test", nil).handleReadiness(untracked, httptest.NewRequest(http.MethodGet, readinessPath, nil))
+	if untracked.Code != http.StatusOK {
+		t.Fatalf("main without lifecycle readyz = %d, want %d", untracked.Code, http.StatusOK)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status string
+		code   int
+	}{
+		{"no lifecycle", `{"documents":1,"chunks":1,"embedding_status":"available"}`, untracked.Code},
+		{"indexing", `{"documents":1,"chunks":1,"state":"indexing","state_message":"initial scan"}`, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Older mains omit lifecycle from ping and may omit it from index_status.
+			mux := http.NewServeMux()
+			mux.HandleFunc("/proxy/ping", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			})
+			mux.HandleFunc("/proxy/index_status", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.status))
+			})
+			main := httptest.NewServer(mux)
+			t.Cleanup(main.Close)
+			worker := NewServer(cfg, proxy.NewClient(main.Listener.Addr().String(), "token"), nil, "test", nil)
+			if err := worker.readinessError(t.Context()); tc.code == http.StatusServiceUnavailable &&
+				(err == nil || !strings.Contains(err.Error(), "index is indexing")) {
+				t.Fatalf("worker readiness error = %v, want main's indexing state", err)
+			}
+			response := httptest.NewRecorder()
+			worker.handleReadiness(response, httptest.NewRequest(http.MethodGet, readinessPath, nil))
+			if response.Code != tc.code {
+				t.Fatalf("worker readyz = %d, want %d", response.Code, tc.code)
+			}
+		})
+	}
+}
 
 func TestEmbeddingStatus_NilError(t *testing.T) {
 	t.Parallel()

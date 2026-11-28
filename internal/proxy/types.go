@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/koltyakov/quant/internal/index"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 )
 
 type SearchRequest struct {
@@ -51,8 +52,15 @@ type IndexStatusResponse struct {
 	StateUpdatedAt  time.Time             `json:"state_updated_at,omitempty"`
 }
 
+func (s IndexStatusResponse) Snapshot() runtimestate.IndexSnapshot {
+	return runtimestate.IndexSnapshot{
+		State: runtimestate.IndexState(s.State), Message: s.StateMessage, UpdatedAt: s.StateUpdatedAt,
+	}
+}
+
 type PingResponse struct {
-	Status string `json:"status"`
+	Status string                      `json:"status"`
+	State  *runtimestate.IndexSnapshot `json:"state,omitempty"`
 }
 
 type ChunkByIDRequest struct {

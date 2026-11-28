@@ -240,37 +240,44 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIndexStatus(w http.ResponseWriter, r *http.Request) {
-	docCount, chunkCount, err := s.store.Stats(r.Context())
+	embeddingStatus := "available"
+	if s.embedder == nil {
+		embeddingStatus = "unavailable (keyword-only mode) — start Ollama with: ollama serve"
+	}
+	resp, err := ReadIndexStatus(r.Context(), s.store, s.state, embeddingStatus)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
 
+// ReadIndexStatus builds the same status for local MCP clients and proxy workers.
+func ReadIndexStatus(ctx context.Context, store index.Searcher, state *runtimestate.IndexStateTracker, embeddingStatus string) (IndexStatusResponse, error) {
+	docCount, chunkCount, err := store.Stats(ctx)
+	if err != nil {
+		return IndexStatusResponse{}, err
+	}
 	resp := IndexStatusResponse{
-		Documents: docCount,
-		Chunks:    chunkCount,
-	}
-	if s.embedder == nil {
-		resp.EmbeddingStatus = "unavailable (keyword-only mode) — start Ollama with: ollama serve"
-	} else {
-		resp.EmbeddingStatus = "available"
+		Documents: docCount, Chunks: chunkCount, EmbeddingStatus: embeddingStatus,
 	}
 
-	if s.state != nil {
-		snap := s.state.Snapshot()
+	if state != nil {
+		snap := state.Snapshot()
 		resp.State = string(snap.State)
 		resp.StateMessage = snap.Message
 		resp.StateUpdatedAt = snap.UpdatedAt
 	}
 
-	if provider, ok := s.store.(index.FTSDiagnosticsProvider); ok {
-		diag, diagErr := provider.FTSDiagnostics(r.Context())
+	if provider, ok := store.(index.FTSDiagnosticsProvider); ok {
+		diag, diagErr := provider.FTSDiagnostics(ctx)
 		if diagErr == nil {
 			resp.FTS = &diag
+		} else {
+			logx.Warn("index_status fts diagnostics error", "err", diagErr)
 		}
 	}
-
-	s.writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +285,12 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	resp := PingResponse{Status: "ok"}
+	if s.state != nil {
+		snapshot := s.state.Snapshot()
+		resp.State = &snapshot
+	}
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {

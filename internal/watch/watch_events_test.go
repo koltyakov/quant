@@ -242,46 +242,6 @@ func TestDebounce_FullEventChannel_TriggersResync(t *testing.T) {
 	time.Sleep(700 * time.Millisecond)
 }
 
-func TestSignalResyncDebounced_Basic(t *testing.T) {
-	t.Parallel()
-
-	w := &Watcher{
-		events:      make(chan Event, 1),
-		done:        make(chan struct{}),
-		rootDir:     "/test",
-		timers:      make(map[string]*time.Timer),
-		watchedDirs: map[string]struct{}{"/test": {}},
-	}
-
-	w.signalResyncDebounced()
-
-	select {
-	case evt := <-w.events:
-		if evt.Op != Resync {
-			t.Fatalf("expected Resync event, got %+v", evt)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected debounced resync event to fire")
-	}
-}
-
-func TestSignalResyncDebounced_ClosedWatcher(t *testing.T) {
-	t.Parallel()
-
-	w := &Watcher{
-		events:      make(chan Event, 1),
-		done:        make(chan struct{}),
-		rootDir:     "/test",
-		timers:      make(map[string]*time.Timer),
-		watchedDirs: map[string]struct{}{"/test": {}},
-		closed:      true,
-	}
-
-	w.signalResyncDebounced()
-
-	time.Sleep(100 * time.Millisecond)
-}
-
 func TestRemoveWatchedDirEntry_ExistingDir(t *testing.T) {
 	t.Parallel()
 

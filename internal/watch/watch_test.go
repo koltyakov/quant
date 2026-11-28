@@ -252,6 +252,148 @@ func TestWatcher_GitIgnoreChangeRequestsResync(t *testing.T) {
 	}
 }
 
+func TestWatcher_GitIgnoreChangeRefreshesDirectoryWatches(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "docs")
+	nested := filepath.Join(parent, "drafts", "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := filepath.Join(parent, ".gitignore")
+	writeRules := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(rules, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRules("drafts\n")
+	w, err := New(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	writeRules("")
+	waitForOp(t, w.Events(), Resync, 3*time.Second)
+	file := filepath.Join(nested, "new.md")
+	if err := os.WriteFile(file, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForPath(t, w.Events(), file, 3*time.Second)
+
+	writeRules("drafts\n")
+	waitForOp(t, w.Events(), Resync, 3*time.Second)
+	for _, path := range w.fsw.WatchList() {
+		if path == filepath.Dir(nested) || path == nested {
+			t.Fatalf("ignored directory still watched: %s", path)
+		}
+	}
+}
+
+// newRefreshTestWatcher registers watches without starting the event loop, so
+// tests can deliver the refresh signal and run refreshWatches themselves.
+func newRefreshTestWatcher(t *testing.T, root string) (*Watcher, map[string]int) {
+	t.Helper()
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{
+		fsw:         fsw,
+		matcher:     scan.NewGitIgnoreMatcher(root, nil),
+		rootDir:     root,
+		events:      make(chan Event, 4),
+		done:        make(chan struct{}),
+		timers:      make(map[string]*time.Timer),
+		pendingDirs: make(map[string]bool),
+		watchedDirs: make(map[string]struct{}),
+		retryDirs:   make(map[string]struct{}),
+		watchRetry:  make(chan struct{}, 1),
+		refreshDirs: make(map[string]struct{}),
+		refresh:     make(chan struct{}, 1),
+	}
+	adds := make(map[string]int)
+	w.addWatch = func(path string) error {
+		adds[path]++
+		return fsw.Add(path)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+	if err := w.addRecursive(root); err != nil {
+		t.Fatal(err)
+	}
+	clear(adds)
+	return w, adds
+}
+
+func runQueuedRefresh(t *testing.T, w *Watcher) {
+	t.Helper()
+	select {
+	case <-w.refresh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch refresh was not signaled")
+	}
+	w.refreshWatches()
+	waitForOp(t, w.Events(), Resync, time.Second)
+}
+
+func TestWatcher_GitIgnoreRefreshSkipsDeletedDirectory(t *testing.T) {
+	root := t.TempDir()
+	docs := filepath.Join(root, "docs")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, ".gitignore"), []byte("*.tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := newRefreshTestWatcher(t, root)
+	var logs bytes.Buffer
+	logx.SetOutput(&logs)
+	t.Cleanup(func() { logx.SetOutput(io.Discard) })
+
+	if err := os.RemoveAll(docs); err != nil {
+		t.Fatal(err)
+	}
+	w.handleGitIgnoreEvent(filepath.Join(docs, ".gitignore"))
+	runQueuedRefresh(t, w)
+
+	w.mu.Lock()
+	retries, retryTimer := len(w.retryDirs), w.watchRetryTimer
+	w.mu.Unlock()
+	if retries != 0 || retryTimer != nil {
+		t.Fatalf("deleted directory was queued for retry: dirs=%d, timer=%v", retries, retryTimer != nil)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("unexpected watcher log output: %s", logs.String())
+	}
+}
+
+func TestWatcher_GitIgnoreRefreshCoalescesNestedDirectories(t *testing.T) {
+	root := t.TempDir()
+	docs := filepath.Join(root, "docs")
+	nested := filepath.Join(docs, "drafts")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, adds := newRefreshTestWatcher(t, root)
+
+	// A burst like a checkout touching several .gitignore files.
+	for _, dir := range []string{nested, docs, root, docs} {
+		w.handleGitIgnoreEvent(filepath.Join(dir, ".gitignore"))
+	}
+	runQueuedRefresh(t, w)
+
+	for _, dir := range []string{root, docs, nested} {
+		if adds[dir] != 1 {
+			t.Fatalf("watch registrations = %v, want each directory once", adds)
+		}
+	}
+	select {
+	case <-w.refresh:
+		t.Fatal("burst produced more than one refresh")
+	case <-time.After(defaultDebounceDelay + 200*time.Millisecond):
+	}
+}
+
 func TestWatcher_EmitsEventsForHiddenFiles(t *testing.T) {
 	dir := t.TempDir()
 	watcher, err := New(dir, nil)

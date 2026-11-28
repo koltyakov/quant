@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,9 @@ type Watcher struct {
 	watchedDirs     map[string]struct{}
 	retryDirs       map[string]struct{}
 	watchRetry      chan struct{}
+	refreshDirs     map[string]struct{}
+	refreshTimer    *time.Timer
+	refresh         chan struct{}
 	addWatch        func(string) error
 	resyncPending   bool
 	closed          bool
@@ -86,6 +90,8 @@ func New(dir string, gi *ignore.GitIgnore, opts ...Options) (*Watcher, error) {
 		watchedDirs: make(map[string]struct{}),
 		retryDirs:   make(map[string]struct{}),
 		watchRetry:  make(chan struct{}, 1),
+		refreshDirs: make(map[string]struct{}),
+		refresh:     make(chan struct{}, 1),
 		addWatch:    fsw.Add,
 	}
 
@@ -125,6 +131,10 @@ func (w *Watcher) Close() error {
 		w.watchRetryTimer.Stop()
 		w.watchRetryTimer = nil
 	}
+	if w.refreshTimer != nil {
+		w.refreshTimer.Stop()
+		w.refreshTimer = nil
+	}
 	close(w.done)
 	w.mu.Unlock()
 	return w.fsw.Close()
@@ -153,6 +163,7 @@ func (w *Watcher) addRecursive(dir string) error {
 				return filepath.SkipDir
 			}
 			if w.matcher.Matches(path) {
+				w.dropIgnoredTree(path)
 				return filepath.SkipDir
 			}
 			w.matcher.Load(path)
@@ -242,6 +253,8 @@ func (w *Watcher) loop() {
 			w.handleBackendError(err)
 		case <-w.watchRetry:
 			w.retryUnwatched()
+		case <-w.refresh:
+			w.refreshWatches()
 		}
 	}
 }
@@ -392,31 +405,128 @@ func (w *Watcher) retryUnwatched() {
 
 func (w *Watcher) handleGitIgnoreEvent(path string) {
 	dir := filepath.Dir(path)
+	// New rules filter later events immediately. The subtree walk that
+	// updates watches is debounced, because a checkout can touch many
+	// .gitignore files at once.
 	w.matcher.Reload(dir)
-	w.signalResyncDebounced()
+	w.queueWatchRefresh(dir)
 }
 
-func (w *Watcher) signalResyncDebounced() {
+func (w *Watcher) queueWatchRefresh(dir string) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.closed {
-		w.mu.Unlock()
 		return
 	}
-	if w.resyncTimer != nil {
-		w.resyncTimer.Stop()
+	if w.refreshDirs == nil {
+		w.refreshDirs = make(map[string]struct{})
 	}
-	w.resyncPending = true
-	w.resyncTimer = time.AfterFunc(defaultDebounceDelay, func() {
+	w.refreshDirs[dir] = struct{}{}
+	if w.refreshTimer != nil {
+		w.refreshTimer.Stop()
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(defaultDebounceDelay, func() {
 		w.mu.Lock()
-		pending := w.resyncPending
+		if w.refreshTimer != timer {
+			// A newer event rescheduled the refresh.
+			w.mu.Unlock()
+			return
+		}
+		w.refreshTimer = nil
 		closed := w.closed
-		w.resyncTimer = nil
 		w.mu.Unlock()
-		if pending && !closed {
-			w.trySendResync()
+		if closed {
+			return
+		}
+		// Pending directories stay queued if a signal is already buffered.
+		select {
+		case <-w.done:
+		case w.refresh <- struct{}{}:
+		default:
 		}
 	})
+	w.refreshTimer = timer
+}
+
+// refreshWatches runs on the event loop because it uses the matcher. It walks
+// each queued directory once, skipping any nested under another queued one.
+// The rescan afterward covers changes made before new watches became active.
+func (w *Watcher) refreshWatches() {
+	w.mu.Lock()
+	dirs := make([]string, 0, len(w.refreshDirs))
+	for dir := range w.refreshDirs {
+		dirs = append(dirs, dir)
+	}
+	clear(w.refreshDirs)
 	w.mu.Unlock()
+	if len(dirs) == 0 {
+		return
+	}
+
+	for _, dir := range outermostDirs(dirs) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			// The directory was removed along with its .gitignore. Its own
+			// Remove event updates the index, so there's nothing to retry.
+			if err != nil && !os.IsNotExist(err) {
+				logx.Warn("watcher failed to refresh directory watches", "path", dir, "err", err)
+			}
+			continue
+		}
+		if err := w.addRecursive(dir); err != nil {
+			if errors.Is(err, errPartialWatch) {
+				w.scheduleWatchRetry()
+			} else {
+				logx.Warn("watcher failed to refresh directory watches", "path", dir, "err", err)
+			}
+		}
+	}
+	w.signalResync()
+}
+
+// outermostDirs drops directories contained in another listed directory.
+func outermostDirs(dirs []string) []string {
+	slices.Sort(dirs)
+	kept := dirs[:0]
+	for _, dir := range dirs {
+		covered := false
+		for _, parent := range kept {
+			if dir == parent || strings.HasPrefix(dir, parent+string(filepath.Separator)) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			kept = append(kept, dir)
+		}
+	}
+	return kept
+}
+
+func (w *Watcher) dropIgnoredTree(dir string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, watched := w.watchedDirs[dir]
+	_, retry := w.retryDirs[dir]
+	if !watched && !retry {
+		return
+	}
+	prefix := dir + string(filepath.Separator)
+	for path := range w.watchedDirs {
+		if path == dir || strings.HasPrefix(path, prefix) {
+			if err := w.fsw.Remove(path); err != nil && !errors.Is(err, fsnotify.ErrNonExistentWatch) {
+				logx.Warn("watcher failed to remove ignored watch", "path", path, "err", err)
+			}
+			delete(w.watchedDirs, path)
+		}
+	}
+	for path := range w.retryDirs {
+		if path == dir || strings.HasPrefix(path, prefix) {
+			delete(w.retryDirs, path)
+		}
+	}
+	w.matcher.Remove(dir)
 }
 
 func (w *Watcher) removeWatchedDirEntry(path string) bool {

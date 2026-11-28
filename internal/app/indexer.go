@@ -429,14 +429,18 @@ func (idx *Indexer) WatchLoop(ctx context.Context, watcher *watch.Watcher) {
 }
 
 func (idx *Indexer) HandleWatchEvent(ctx context.Context, event watch.Event) {
-	if idx.shouldIgnorePath(event.Path) {
+	if event.Op == watch.Resync {
+		idx.RequestResync(ctx)
+		return
+	}
+	// A removed directory can contain matching files even if its own name
+	// doesn't match a file include pattern.
+	removingDirectory := event.Op == watch.Remove && event.IsDir
+	if !removingDirectory && idx.shouldIgnorePath(event.Path) {
 		return
 	}
 
 	switch event.Op {
-	case watch.Resync:
-		idx.RequestResync(ctx)
-
 	case watch.Create, watch.Write:
 		info, err := statDocumentPath(idx.cfg.WatchDir, event.Path)
 		if err != nil {

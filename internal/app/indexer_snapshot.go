@@ -60,7 +60,8 @@ func (idx *Indexer) failureConfig(category string) string {
 }
 
 // canSkipSnapshot uses file metadata only to decide whether to try the fast
-// path. It still hashes the full source under the revision guard.
+// path. It hashes the source without holding the tracker mutex, then checks
+// whether the job was superseded during verification.
 func (idx *Indexer) canSkipSnapshot(ctx context.Context, ref DocumentRef, doc *index.Document, info os.FileInfo, version uint64) (bool, error) {
 	if doc == nil || idx.embedder == nil || doc.Hash == "" || doc.FileSize != info.Size() ||
 		!doc.ModifiedAt.Equal(info.ModTime()) || info.Size() > maxIndexSnapshotBytes || !info.Mode().IsRegular() {
@@ -85,12 +86,9 @@ func (idx *Indexer) canSkipSnapshot(ctx context.Context, ref DocumentRef, doc *i
 		return false, err
 	}
 
-	matched := false
-	current, err := idx.paths.Publish(ref.Key, version, func() error {
-		matched = idx.sourceMatches(ctx, ref, doc.Hash, info)
-		return ctx.Err()
-	})
-	return !current || matched, err
+	matched := idx.sourceMatches(ctx, ref, doc.Hash, info)
+	current := idx.paths.IsCurrent(ref.Key, version)
+	return !current || matched, ctx.Err()
 }
 
 // snapshotSource copies and hashes exactly the same bounded bytes. Keeping the

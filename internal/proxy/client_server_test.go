@@ -14,6 +14,23 @@ import (
 	runtimestate "github.com/koltyakov/quant/internal/runtime"
 )
 
+func TestReadinessSnapshotFromOlderMain(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/ping", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/proxy/index_status", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"state":"indexing","state_message":"initial scan"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := &Client{addr: server.URL, httpClient: server.Client()}
+	state, err := client.ReadinessSnapshot(t.Context())
+	if err != nil || state.State != runtimestate.IndexStateIndexing || state.Servable() {
+		t.Fatalf("readiness snapshot = %+v, %v", state, err)
+	}
+}
+
 func TestClientAdditionalMethodsProxyToMain(t *testing.T) {
 	ctx := context.Background()
 	store, client, _ := newProxyTestHarness(t)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/koltyakov/quant/internal/index"
+	runtimestate "github.com/koltyakov/quant/internal/runtime"
 )
 
 type Client struct {
@@ -17,6 +18,8 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 }
+
+const probeTimeout = 3 * time.Second
 
 var _ index.Searcher = (*Client)(nil)
 
@@ -35,7 +38,7 @@ func (c *Client) Addr() string {
 }
 
 func (c *Client) Alive(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.addr+"/proxy/ping", nil) //nolint:gosec // addr is localhost from lock file or config
 	if err != nil {
@@ -190,9 +193,32 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) EmbeddingStatus(ctx context.Context) (string, error) {
+func (c *Client) IndexStatus(ctx context.Context) (IndexStatusResponse, error) {
 	var resp IndexStatusResponse
-	if err := c.doGet(ctx, "/proxy/index_status", &resp); err != nil {
+	err := c.doGet(ctx, "/proxy/index_status", &resp)
+	return resp, err
+}
+
+// ReadinessSnapshot checks the store and its lifecycle in one lightweight
+// request. Alive remains independent of indexing progress for leader election.
+func (c *Client) ReadinessSnapshot(ctx context.Context) (runtimestate.IndexSnapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	var ping PingResponse
+	if err := c.doGet(ctx, "/proxy/ping", &ping); err != nil {
+		return runtimestate.IndexSnapshot{}, err
+	}
+	if ping.State != nil {
+		return *ping.State, nil
+	}
+	// Older mains only expose lifecycle on index_status.
+	status, err := c.IndexStatus(ctx)
+	return status.Snapshot(), err
+}
+
+func (c *Client) EmbeddingStatus(ctx context.Context) (string, error) {
+	resp, err := c.IndexStatus(ctx)
+	if err != nil {
 		return "", err
 	}
 	return resp.EmbeddingStatus, nil
